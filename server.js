@@ -1470,6 +1470,7 @@ async function processAlertNormally(alert, validateNASDAQ = false) {
     }
     
     if (!candles1m || candles1m.length < 200 || !candles5m || candles5m.length < 50) {
+      console.error(`[Extended Hours] Insufficient candles for ${ticker}: 1m=${candles1m?.length || 0}, 5m=${candles5m?.length || 0}`);
       return null;
     }
     
@@ -2075,6 +2076,7 @@ app.get('/api/stock/:symbol', async (req, res) => {
     
     // Process the symbol to get all indicators
     // Pass close field to match ChartsWatcher data priority
+    console.log(`[Stock API] Processing ${symbol}...`);
     const result = await processAlert({
       ticker: symbol,
       symbol: symbol,
@@ -2086,11 +2088,13 @@ app.get('/api/stock/:symbol', async (req, res) => {
     }, false); // Don't validate NASDAQ for stock info
     
     if (!result) {
+      console.error(`[Stock API] No result returned for ${symbol}`);
       return res.status(404).json({
         success: false,
         error: `No data available for symbol ${symbol}`
       });
     }
+    console.log(`[Stock API] Successfully processed ${symbol}`);
     
     // Combine all information
     const stockInfo = {

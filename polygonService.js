@@ -139,13 +139,12 @@ class PolygonService {
       
       const candles = await this.fetchOHLCV(ticker, timeframe, dateRange.from, dateRange.to);
       
-      // Filter and validate candles for real-time accuracy
-      const validatedCandles = this.validateCandleData(candles, timeframe);
-      
-      console.log(`[Extended Hours] Retrieved ${validatedCandles.length} valid ${timeframe}-minute candles for ${ticker}`);
+      // Don't filter candles for extended hours - we need all historical data for EMA calculations
+      // The validation was filtering out 99% of historical data, leaving only recent candles
+      console.log(`[Extended Hours] Retrieved ${candles.length} ${timeframe}-minute candles for ${ticker}`);
       
       return {
-        candles: validatedCandles,
+        candles: candles,
         session: dateRange.session,
         isExtendedHours: dateRange.isExtendedHours,
         dataRange: {
@@ -248,35 +247,19 @@ class PolygonService {
     const currentHour = easternTime.getHours();
     const currentMinute = easternTime.getMinutes();
     
-    // Define trading sessions (EST/EDT)
-    const premarketStart = 4; // 4:00 AM
-    const regularStart = 9; // 9:30 AM
-    const regularEnd = 16; // 4:00 PM
-    const afterhoursEnd = 20; // 8:00 PM
+    // Always fetch at least 7 days of data to ensure we have enough candles for EMA calculations
+    // This ensures we have sufficient historical data regardless of trading session
+    const to = new Date(now);
+    const from = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000)); // 7 days back
     
-    let to = new Date(now);
-    let from;
-    
-    // Determine current session and adjust date range accordingly
-    if (currentHour >= premarketStart && currentHour < regularStart) {
-      // Premarket session (4:00 AM - 9:30 AM)
-      // Include data from previous day's close + current premarket
-      from = new Date(now.getTime() - (24 * 60 * 60 * 1000)); // 24 hours back
+    // Log the current session for informational purposes
+    if (currentHour >= 4 && currentHour < 9) {
       console.log(`[Extended Hours] Premarket session detected: ${currentHour}:${currentMinute.toString().padStart(2, '0')} ET`);
-    } else if (currentHour >= regularStart && currentHour < regularEnd) {
-      // Regular trading session (9:30 AM - 4:00 PM)
-      // Include current day's data
-      from = new Date(now.getTime() - (12 * 60 * 60 * 1000)); // 12 hours back
+    } else if (currentHour >= 9 && currentHour < 16) {
       console.log(`[Extended Hours] Regular trading session detected: ${currentHour}:${currentMinute.toString().padStart(2, '0')} ET`);
-    } else if (currentHour >= regularEnd && currentHour < afterhoursEnd) {
-      // After-hours session (4:00 PM - 8:00 PM)
-      // Include current day's full data
-      from = new Date(now.getTime() - (20 * 60 * 60 * 1000)); // 20 hours back
+    } else if (currentHour >= 16 && currentHour < 20) {
       console.log(`[Extended Hours] After-hours session detected: ${currentHour}:${currentMinute.toString().padStart(2, '0')} ET`);
     } else {
-      // Outside trading hours (8:00 PM - 4:00 AM)
-      // Include previous day's full data
-      from = new Date(now.getTime() - (24 * 60 * 60 * 1000)); // 24 hours back
       console.log(`[Extended Hours] Outside trading hours: ${currentHour}:${currentMinute.toString().padStart(2, '0')} ET`);
     }
     
