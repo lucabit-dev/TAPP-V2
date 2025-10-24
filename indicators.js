@@ -3,7 +3,7 @@ class IndicatorsService {
     // All calculations are done manually, no need for instance variables
   }
 
-  // Manual EMA calculation function
+  // Manual EMA calculation function - TradingView compatible
   calculateManualEMA(values, period) {
     if (!values || values.length === 0) {
       return null;
@@ -13,17 +13,17 @@ class IndicatorsService {
       return null;
     }
 
-    // Calculate SMA for the first period values (seeding)
+    // TradingView EMA method: Seed with SMA of first period values
     let sum = 0;
     for (let i = 0; i < period; i++) {
       sum += values[i];
     }
     let ema = sum / period;
 
-    // Calculate EMA for remaining values
+    // Calculate EMA for remaining values using TradingView formula
     const multiplier = 2 / (period + 1);
     for (let i = period; i < values.length; i++) {
-      ema = (values[i] * multiplier) + (ema * (1 - multiplier));
+      ema = (values[i] - ema) * multiplier + ema;
     }
 
     return ema;
@@ -57,7 +57,7 @@ class IndicatorsService {
     }
   }
 
-  // Manual MACD calculation function with proper signal line
+  // Manual MACD calculation function with proper signal line - TradingView compatible
   calculateManualMACD(closes, fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
     if (!closes || closes.length === 0) {
       return null;
@@ -69,53 +69,53 @@ class IndicatorsService {
       return null;
     }
 
-    // Calculate EMA_fast and EMA_slow for all data points
-    const emaFastValues = [];
-    const emaSlowValues = [];
-    const macdLineValues = [];
-
-    // Calculate EMA values for each point
-    for (let i = 0; i < closes.length; i++) {
-      const closesSubset = closes.slice(0, i + 1);
-      
-      if (closesSubset.length >= fastPeriod) {
-        const emaFast = this.calculateManualEMA(closesSubset, fastPeriod);
-        emaFastValues.push(emaFast);
-      } else {
-        emaFastValues.push(null);
-      }
-      
-      if (closesSubset.length >= slowPeriod) {
-        const emaSlow = this.calculateManualEMA(closesSubset, slowPeriod);
-        emaSlowValues.push(emaSlow);
-      } else {
-        emaSlowValues.push(null);
-      }
+    // Calculate EMA_fast and EMA_slow efficiently
+    const emaFastMultiplier = 2 / (fastPeriod + 1);
+    const emaSlowMultiplier = 2 / (slowPeriod + 1);
+    
+    // Calculate fast EMA - seed with SMA
+    let fastSum = 0;
+    for (let i = 0; i < fastPeriod; i++) {
+      fastSum += closes[i];
     }
-
-    // Calculate MACD line values
-    for (let i = 0; i < closes.length; i++) {
-      if (emaFastValues[i] !== null && emaSlowValues[i] !== null) {
-        macdLineValues.push(emaFastValues[i] - emaSlowValues[i]);
-      } else {
-        macdLineValues.push(null);
+    let emaFast = fastSum / fastPeriod;
+    
+    // Calculate slow EMA - seed with SMA
+    let slowSum = 0;
+    for (let i = 0; i < slowPeriod; i++) {
+      slowSum += closes[i];
+    }
+    let emaSlow = slowSum / slowPeriod;
+    
+    // Calculate MACD line values efficiently
+    const macdLineValues = [];
+    
+    // Start from slowPeriod (when we have both EMAs)
+    for (let i = slowPeriod; i < closes.length; i++) {
+      // Update fast EMA
+      if (i >= fastPeriod) {
+        emaFast = (closes[i] - emaFast) * emaFastMultiplier + emaFast;
       }
+      
+      // Update slow EMA
+      emaSlow = (closes[i] - emaSlow) * emaSlowMultiplier + emaSlow;
+      
+      // Calculate MACD line
+      macdLineValues.push(emaFast - emaSlow);
     }
 
     // Get the latest MACD line value
     const latestMacdLine = macdLineValues[macdLineValues.length - 1];
-    if (latestMacdLine === null) {
+    if (latestMacdLine === null || macdLineValues.length === 0) {
       return null;
     }
 
     // Calculate signal line (EMA of MACD line values)
-    // Filter out null values for signal calculation
-    const validMacdValues = macdLineValues.filter(val => val !== null);
-    if (validMacdValues.length < signalPeriod) {
+    if (macdLineValues.length < signalPeriod) {
       return null;
     }
 
-    const signalLine = this.calculateManualEMA(validMacdValues, signalPeriod);
+    const signalLine = this.calculateManualEMA(macdLineValues, signalPeriod);
     if (signalLine === null) {
       return null;
     }

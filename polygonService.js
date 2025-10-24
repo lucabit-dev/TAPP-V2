@@ -316,7 +316,7 @@ class PolygonService {
     };
   }
 
-  // Calculate EMA using pandas-like exponential weighted moving average
+  // Calculate EMA using TradingView compatible method
   calculateEMA(values, span, adjust = false) {
     if (!values || values.length === 0) {
       return null;
@@ -327,15 +327,19 @@ class PolygonService {
     }
 
     try {
-      // Calculate alpha (smoothing factor)
-      const alpha = 2 / (span + 1);
+      // Calculate multiplier (smoothing factor)
+      const multiplier = 2 / (span + 1);
       
-      // Initialize with first value
-      let ema = values[0];
+      // Seed with SMA of first period values (TradingView method)
+      let sum = 0;
+      for (let i = 0; i < span; i++) {
+        sum += values[i];
+      }
+      let ema = sum / span;
       
-      // Calculate EMA for remaining values
-      for (let i = 1; i < values.length; i++) {
-        ema = alpha * values[i] + (1 - alpha) * ema;
+      // Calculate EMA for remaining values using TradingView formula
+      for (let i = span; i < values.length; i++) {
+        ema = (values[i] - ema) * multiplier + ema;
       }
       
       return ema;
@@ -566,7 +570,7 @@ class PolygonService {
     }
   }
 
-  // Calculate MACD using EMA results for accurate TradingView matching
+  // Calculate MACD using EMA results for accurate TradingView matching - optimized
   calculateMACDWithEMA(candles, timeframe = '1m', fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
     if (!candles || candles.length === 0) {
       return null;
@@ -581,22 +585,43 @@ class PolygonService {
     }
     
     try {
+      // Calculate EMAs efficiently (similar to indicators.js)
+      const emaFastMultiplier = 2 / (fastPeriod + 1);
+      const emaSlowMultiplier = 2 / (slowPeriod + 1);
       
-      // Calculate EMAs for each period to build MACD line
+      // Calculate fast EMA - seed with SMA
+      let fastSum = 0;
+      for (let i = 0; i < fastPeriod; i++) {
+        fastSum += closes[i];
+      }
+      let emaFast = fastSum / fastPeriod;
+      
+      // Calculate slow EMA - seed with SMA
+      let slowSum = 0;
+      for (let i = 0; i < slowPeriod; i++) {
+        slowSum += closes[i];
+      }
+      let emaSlow = slowSum / slowPeriod;
+      
+      // Calculate MACD line values efficiently
       const macdLine = [];
       const fastEMAs = [];
       const slowEMAs = [];
       
-      // Calculate EMAs for each period starting from slowPeriod
-      for (let i = slowPeriod - 1; i < closes.length; i++) {
-        const fastEMA = this.calculateEMA(closes.slice(0, i + 1), fastPeriod);
-        const slowEMA = this.calculateEMA(closes.slice(0, i + 1), slowPeriod);
-        
-        if (fastEMA !== null && slowEMA !== null) {
-          fastEMAs.push(fastEMA);
-          slowEMAs.push(slowEMA);
-          macdLine.push(fastEMA - slowEMA);
+      // Start from slowPeriod (when we have both EMAs)
+      for (let i = slowPeriod; i < closes.length; i++) {
+        // Update fast EMA
+        if (i >= fastPeriod) {
+          emaFast = (closes[i] - emaFast) * emaFastMultiplier + emaFast;
         }
+        
+        // Update slow EMA
+        emaSlow = (closes[i] - emaSlow) * emaSlowMultiplier + emaSlow;
+        
+        // Calculate MACD line
+        fastEMAs.push(emaFast);
+        slowEMAs.push(emaSlow);
+        macdLine.push(emaFast - emaSlow);
       }
       
       if (macdLine.length === 0) {
