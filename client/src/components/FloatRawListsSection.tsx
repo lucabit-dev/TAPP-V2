@@ -337,21 +337,21 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
   type HeaderSpec = { title: string; key: string | null };
   const shortenHeaderTitle = (title: string): string => {
     const map: Record<string, string> = {
-      'Symbol': 'Symbol',
-      'Price': 'Price',
-      'Distance from VWAP': 'Dist VWAP',
-      'Change from close': 'Chg close',
-      'Consecutive': 'Consecutive',
-      'ConsecutiveCandleFilterFM1': 'Consec 1m',
-      'Change from open': 'Chg open',
-      '2 min change': '2m chg',
-      '5 min change': '5m chg',
-      '10 min change': '10m chg',
-      '1 min trade count': '1m trades',
-      '5 min trade count': '5m trades',
-      '5 min volume': '5m vol',
-      '10 min volume': '10m vol',
-      '30 min volume': '30m vol',
+      'Symbol': 'S',
+      'Price': 'P',
+      'Distance from VWAP': 'VWAP',
+      'Change from close': 'Chg',
+      'Consecutive': 'Cons',
+      'ConsecutiveCandleFilterFM1': 'Cons',
+      'Change from open': 'Open',
+      '2 min change': '2m',
+      '5 min change': '5m',
+      '10 min change': '10m',
+      '1 min trade count': '1m#',
+      '5 min trade count': '5m#',
+      '5 min volume': '5mV',
+      '10 min volume': '10mV',
+      '30 min volume': '30mV',
       'high of the day': 'HOD',
       'low of the day': 'LOD'
     };
@@ -449,41 +449,41 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
           <div className="h-full flex items-center justify-center">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500" />
           </div>
-        ) : (
-          <div className={`${theme} rounded-md border flex flex-col h-full`}>
-            <div className="px-2 py-1.5 border-b border-[#3e3e42] flex items-center justify-between bg-[#252526] flex-shrink-0">
-              <div className="font-semibold text-[12px] tracking-wide">
-                Lista Unificada
-                <span className="ml-2 text-[9px] text-[#808080] font-mono">
-                  (Tech: {techCountInView}, Mom: {momCountInView}, Both: {bothCountInView})
-                </span>
-              </div>
-              <div className="text-[10px] text-[#969696]">{unified.length} stocks</div>
-            </div>
-            <div className="flex-1 overflow-auto">
-              {unified.length === 0 ? (
-                <div className="h-full flex items-center justify-center text-[10px] text-[#969696]">Sin datos</div>
               ) : (
-                <div className="p-2">
+                <div className={`${theme} rounded-md border flex flex-col h-full`}>
+                  <div className="px-2 py-1.5 border-b border-[#3e3e42] flex items-center justify-between bg-[#252526] flex-shrink-0">
+                    <div className="font-semibold text-[12px] tracking-wide">
+                      Lista Unificada
+                      <span className="ml-2 text-[9px] text-[#808080] font-mono">
+                        (Tech: {techCountInView}, Mom: {momCountInView}, Both: {bothCountInView})
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-[#969696]">{unified.length} stocks</div>
+                  </div>
+                  <div className="flex-1 overflow-auto">
+                    {unified.length === 0 ? (
+                      <div className="h-full flex items-center justify-center text-[10px] text-[#969696]">Sin datos</div>
+                    ) : (
+                      <div className="p-1">
                   {(() => {
                     const headers = resolveHeaders(unified);
                     const colCount = headers.length + 2; // +1 Origin column + 1 BUY button column
                     return (
                       <>
                         <div
-                          className="grid gap-1 text-[10px] text-[#969696] mb-1 sticky top-0 bg-[#252526] py-1 z-10"
-                          style={{ gridTemplateColumns: `repeat(${colCount}, minmax(80px, 1fr))` }}
+                          className="grid gap-0.5 text-[9px] text-[#969696] mb-0.5 sticky top-0 bg-[#252526] py-1 z-10"
+                          style={{ gridTemplateColumns: `50px repeat(${headers.length}, minmax(60px, 1fr)) 60px` }}
                         >
                           {/* Origin column at the start */}
-                          <div className="text-center leading-4 px-1"><span className="truncate inline-block" title="Origen">Origen</span></div>
+                          <div className="text-center leading-3 px-0.5"><span className="truncate inline-block" title="Origen">Origen</span></div>
                           {/* Other headers */}
                           {headers.map((h, i) => (
-                            <div key={i} className="text-center leading-4 px-1">
+                            <div key={i} className="text-center leading-3 px-0.5">
                               <span className="truncate inline-block" title={h.title}>{shortenHeaderTitle(h.title)}</span>
                             </div>
                           ))}
                           {/* BUY button column at the end */}
-                          <div className="text-center leading-4 px-1"><span className="truncate inline-block" title="Action">BUY</span></div>
+                          <div className="text-center leading-3 px-0.5"><span className="truncate inline-block" title="Action">BUY</span></div>
                         </div>
                         <div className="space-y-0.5">
                           {unified.map((row, idx) => {
@@ -530,12 +530,12 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
                             return (
                               <div
                                 key={`${symbolVal || 'row'}-${idx}`}
-                                className={`grid gap-1 text-[10px] border-b border-[#3e3e42] py-0.5 ${rowBgColor} hover:bg-[#2f2f33]`}
-                                style={{ gridTemplateColumns: `repeat(${colCount}, minmax(80px, 1fr))` }}
+                                className={`grid gap-0.5 text-[9px] border-b border-[#3e3e42] py-0.5 ${rowBgColor} hover:bg-[#2f2f33]`}
+                                style={{ gridTemplateColumns: `50px repeat(${headers.length}, minmax(60px, 1fr)) 60px` }}
                                 title={`Ver detalles de ${symbolVal || ''} - Tech: ${meetsTech ? '✓' : '✗'}, Momentum: ${meetsMomentum ? '✓' : '✗'} ${meetsAll ? '(READY TO BUY)' : ''}`}
                               >
                                 {/* Origin column at the start */}
-                                <div className="text-center leading-4">
+                                <div className="text-center leading-4 px-0.5">
                                   <span className="truncate block font-bold text-white">{row.origin}</span>
                                 </div>
                                 {/* Other columns */}
@@ -550,20 +550,20 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
                                   }
                                   
                                   return (
-                                    <div key={i} className="text-center leading-4" onClick={() => onSymbolClick && onSymbolClick(symbolVal)}>
-                                      <span className={`block font-mono text-white px-1 py-0.5 rounded ${cellColor}`} style={{ minHeight: '1.2rem' }}>{value}</span>
+                                    <div key={i} className="text-center leading-4 px-0.5" onClick={() => onSymbolClick && onSymbolClick(symbolVal)}>
+                                      <span className={`block font-mono text-white px-0.5 py-0.5 rounded ${cellColor}`} style={{ minHeight: '1rem' }}>{value}</span>
                                     </div>
                                   );
                                 })}
                                 {/* BUY button column at the end */}
-                                <div className="text-center leading-4">
+                                <div className="text-center leading-4 px-0.5">
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       // TODO: Implement buy action
                                       console.log(`Buy action for ${symbolVal}`);
                                     }}
-                                    className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded transition-colors"
+                                    className="px-2 py-0.5 bg-blue-600 hover:bg-blue-700 text-white text-[9px] font-semibold rounded transition-colors"
                                     title={`Buy ${symbolVal}`}
                                   >
                                     BUY
