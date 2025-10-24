@@ -467,19 +467,23 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
                 <div className="p-2">
                   {(() => {
                     const headers = resolveHeaders(unified);
-                    const colCount = headers.length + 1; // +1 Origin column
+                    const colCount = headers.length + 2; // +1 Origin column + 1 BUY button column
                     return (
                       <>
                         <div
                           className="grid gap-1 text-[10px] text-[#969696] mb-1 sticky top-0 bg-[#252526] py-1 z-10"
                           style={{ gridTemplateColumns: `repeat(${colCount}, minmax(80px, 1fr))` }}
                         >
+                          {/* Origin column at the start */}
+                          <div className="text-center leading-4 px-1"><span className="truncate inline-block" title="Origen">Origen</span></div>
+                          {/* Other headers */}
                           {headers.map((h, i) => (
                             <div key={i} className="text-center leading-4 px-1">
                               <span className="truncate inline-block" title={h.title}>{shortenHeaderTitle(h.title)}</span>
                             </div>
                           ))}
-                          <div className="text-center leading-4 px-1"><span className="truncate inline-block" title="Origen">Origen</span></div>
+                          {/* BUY button column at the end */}
+                          <div className="text-center leading-4 px-1"><span className="truncate inline-block" title="Action">BUY</span></div>
                         </div>
                         <div className="space-y-0.5">
                           {unified.map((row, idx) => {
@@ -526,11 +530,15 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
                             return (
                               <div
                                 key={`${symbolVal || 'row'}-${idx}`}
-                                className={`grid gap-1 text-[10px] border-b border-[#3e3e42] py-0.5 ${rowBgColor} hover:bg-[#2f2f33] cursor-pointer`}
+                                className={`grid gap-1 text-[10px] border-b border-[#3e3e42] py-0.5 ${rowBgColor} hover:bg-[#2f2f33]`}
                                 style={{ gridTemplateColumns: `repeat(${colCount}, minmax(80px, 1fr))` }}
-                                onClick={() => onSymbolClick && onSymbolClick(symbolVal)}
                                 title={`Ver detalles de ${symbolVal || ''} - Tech: ${meetsTech ? '✓' : '✗'}, Momentum: ${meetsMomentum ? '✓' : '✗'} ${meetsAll ? '(READY TO BUY)' : ''}`}
                               >
+                                {/* Origin column at the start */}
+                                <div className="text-center leading-4">
+                                  <span className="truncate block font-bold text-white">{row.origin}</span>
+                                </div>
+                                {/* Other columns */}
                                 {headers.map((h, i) => {
                                   const c = h.key ? columnsByKey.get(h.key) : undefined;
                                   const value = c?.value ?? '—';
@@ -542,13 +550,24 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
                                   }
                                   
                                   return (
-                                    <div key={i} className="text-center leading-4">
+                                    <div key={i} className="text-center leading-4" onClick={() => onSymbolClick && onSymbolClick(symbolVal)}>
                                       <span className={`block font-mono text-white px-1 py-0.5 rounded ${cellColor}`} style={{ minHeight: '1.2rem' }}>{value}</span>
                                     </div>
                                   );
                                 })}
+                                {/* BUY button column at the end */}
                                 <div className="text-center leading-4">
-                                  <span className="truncate block font-bold text-white">{row.origin}</span>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      // TODO: Implement buy action
+                                      console.log(`Buy action for ${symbolVal}`);
+                                    }}
+                                    className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded transition-colors"
+                                    title={`Buy ${symbolVal}`}
+                                  >
+                                    BUY
+                                  </button>
                                 </div>
                               </div>
                             );
