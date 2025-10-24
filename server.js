@@ -147,13 +147,13 @@ async function fetchCandlesForAnalysis(symbol) {
         candles1m = ext1?.candles || [];
         candles5m = ext5?.candles || [];
         
-        // Check if we have enough candles for EMA200 (need at least 200 for 1m and 50 for 5m)
-        if (candles1m.length >= 200 && candles5m.length >= 50) {
+        // Check if we have enough candles for EMA200 (need at least 200 for both 1m and 5m)
+        if (candles1m.length >= 200 && candles5m.length >= 200) {
           console.log(`[Adaptive] Successful fetch for ${symbol}: ${candles1m.length} 1m candles, ${candles5m.length} 5m candles with ${timeRange.days} days`);
           fetchSuccess = true;
           break;
         } else {
-          console.log(`[Adaptive] Insufficient candles for ${symbol} with ${timeRange.days} days: ${candles1m.length} 1m, ${candles5m.length} 5m`);
+          console.log(`[Adaptive] Insufficient candles for ${symbol} with ${timeRange.days} days: ${candles1m.length} 1m, ${candles5m.length} 5m (need 200+ for both)`);
         }
       } catch (error) {
         console.log(`[Adaptive] Error fetching ${symbol} with ${timeRange.days} days: ${error.message}`);
@@ -1418,16 +1418,54 @@ async function processAlertNormally(alert, validateNASDAQ = false) {
     
     try {
       if (useExtendedHours) {
-        // Use extended trading hours data for real-time accuracy
+        // Use extended trading hours data with adaptive fetching
         console.log(`[Extended Hours] Fetching extended hours data for ${ticker}`);
         
-        const [extendedData1m, extendedData5m] = await Promise.all([
-          polygonService.fetchExtendedHoursCandles(ticker, 1, true),
-          polygonService.fetchExtendedHoursCandles(ticker, 5, true)
-        ]);
+        // Try adaptive fetching with progressively longer periods
+        const timeRanges = [
+          { days: 7, hours: 168 },
+          { days: 15, hours: 360 },
+          { days: 30, hours: 720 },
+          { days: 60, hours: 1440 }
+        ];
         
-        candles1m = extendedData1m.candles;
-        candles5m = extendedData5m.candles;
+        let fetchSuccess = false;
+        for (const timeRange of timeRanges) {
+          try {
+            const [extendedData1m, extendedData5m] = await Promise.all([
+              polygonService.fetchExtendedHoursCandles(ticker, 1, true, timeRange.days),
+              polygonService.fetchExtendedHoursCandles(ticker, 5, true, timeRange.days)
+            ]);
+            
+            const tempCandles1m = extendedData1m.candles;
+            const tempCandles5m = extendedData5m.candles;
+            
+            // Check if we have enough candles for EMA200 (need at least 200 for both 1m and 5m)
+            if (tempCandles1m.length >= 200 && tempCandles5m.length >= 200) {
+              console.log(`[Adaptive] Successful fetch for ${ticker}: ${tempCandles1m.length} 1m candles, ${tempCandles5m.length} 5m candles with ${timeRange.days} days`);
+              candles1m = tempCandles1m;
+              candles5m = tempCandles5m;
+              fetchSuccess = true;
+              break;
+            } else {
+              console.log(`[Adaptive] Insufficient candles for ${ticker} with ${timeRange.days} days: ${tempCandles1m.length} 1m, ${tempCandles5m.length} 5m (need 200+ for both)`);
+            }
+          } catch (error) {
+            console.log(`[Adaptive] Error fetching ${ticker} with ${timeRange.days} days: ${error.message}`);
+          }
+        }
+        
+        if (!fetchSuccess) {
+          console.warn(`[Adaptive] Failed to fetch sufficient candles for ${ticker} after trying all time ranges`);
+          // Use the last attempt's data anyway
+          const [extendedData1m, extendedData5m] = await Promise.all([
+            polygonService.fetchExtendedHoursCandles(ticker, 1, true, 60),
+            polygonService.fetchExtendedHoursCandles(ticker, 5, true, 60)
+          ]);
+          candles1m = extendedData1m.candles;
+          candles5m = extendedData5m.candles;
+        }
+        
         isExtendedHours = true;
         
         console.log(`[Extended Hours] Retrieved ${candles1m.length} 1m candles and ${candles5m.length} 5m candles for ${ticker}`);
