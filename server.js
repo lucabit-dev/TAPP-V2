@@ -129,12 +129,41 @@ async function fetchCandlesForAnalysis(symbol) {
   let candles1m, candles5m;
   let isExtendedHours = false;
   if (useExtendedHours && polygonService.fetchExtendedHoursCandles) {
-    const [ext1, ext5] = await Promise.all([
-      polygonService.fetchExtendedHoursCandles(symbol, 1, true),
-      polygonService.fetchExtendedHoursCandles(symbol, 5, true)
-    ]);
-    candles1m = ext1?.candles || [];
-    candles5m = ext5?.candles || [];
+    // Try extended hours first, then fallback to longer periods if needed
+    const timeRanges = [
+      { days: 7, hours: 168 },
+      { days: 15, hours: 360 },
+      { days: 30, hours: 720 },
+      { days: 60, hours: 1440 }
+    ];
+    
+    let fetchSuccess = false;
+    for (const timeRange of timeRanges) {
+      try {
+        const [ext1, ext5] = await Promise.all([
+          polygonService.fetchExtendedHoursCandles(symbol, 1, true, timeRange.days),
+          polygonService.fetchExtendedHoursCandles(symbol, 5, true, timeRange.days)
+        ]);
+        candles1m = ext1?.candles || [];
+        candles5m = ext5?.candles || [];
+        
+        // Check if we have enough candles for EMA200 (need at least 200 for 1m and 50 for 5m)
+        if (candles1m.length >= 200 && candles5m.length >= 50) {
+          console.log(`[Adaptive] Successful fetch for ${symbol}: ${candles1m.length} 1m candles, ${candles5m.length} 5m candles with ${timeRange.days} days`);
+          fetchSuccess = true;
+          break;
+        } else {
+          console.log(`[Adaptive] Insufficient candles for ${symbol} with ${timeRange.days} days: ${candles1m.length} 1m, ${candles5m.length} 5m`);
+        }
+      } catch (error) {
+        console.log(`[Adaptive] Error fetching ${symbol} with ${timeRange.days} days: ${error.message}`);
+      }
+    }
+    
+    if (!fetchSuccess) {
+      console.warn(`[Adaptive] Failed to fetch sufficient candles for ${symbol} after trying all time ranges`);
+    }
+    
     isExtendedHours = true;
   } else {
     let daysToFetch = 10;

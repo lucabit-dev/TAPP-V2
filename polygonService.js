@@ -126,15 +126,27 @@ class PolygonService {
   }
 
   // Fetch candles with extended trading hours support and precise intervals
-  async fetchExtendedHoursCandles(ticker, timeframe, useExtendedHours = true) {
+  async fetchExtendedHoursCandles(ticker, timeframe, useExtendedHours = true, daysBack = 7) {
     try {
       let dateRange;
       
       if (useExtendedHours) {
+        // Use extended trading hours range with specified days
+        const hoursBack = daysBack * 24;
         dateRange = this.getExtendedTradingHoursRange();
-        console.log(`[Extended Hours] Fetching ${timeframe}-minute candles for ${ticker} using extended hours range: ${dateRange.from} to ${dateRange.to} (Session: ${dateRange.session})`);
+        
+        // Override the date range if requesting more days
+        if (daysBack > 7) {
+          const to = new Date();
+          const from = new Date(to.getTime() - (hoursBack * 60 * 60 * 1000));
+          dateRange.from = this.formatDateForAPI(from);
+          dateRange.to = this.formatDateForAPI(to);
+        }
+        
+        console.log(`[Extended Hours] Fetching ${timeframe}-minute candles for ${ticker} using extended hours range: ${dateRange.from} to ${dateRange.to} (Session: ${dateRange.session}, ${daysBack} days)`);
       } else {
-        dateRange = this.getDateRange(168); // Default 7 days
+        const hoursBack = daysBack * 24;
+        dateRange = this.getDateRange(hoursBack);
       }
       
       const candles = await this.fetchOHLCV(ticker, timeframe, dateRange.from, dateRange.to);
@@ -384,14 +396,16 @@ class PolygonService {
     try {
       let candleData;
       
-      if (useExtendedHours) {
-        // Use extended trading hours data for more accurate real-time calculations
+      if (useExtendedHours && hoursBack === 168) {
+        // Use extended trading hours data for more accurate real-time calculations (default 7 days)
         const extendedData = await this.fetchExtendedHoursCandles(ticker, timeframe, true);
         candleData = extendedData.candles;
         console.log(`[Extended Hours] EMA ${period} calculation using ${extendedData.session} session data`);
       } else {
+        // Use specified hoursBack for adaptive fetching
         const dateRange = this.getDateRange(hoursBack);
         candleData = await this.fetchOHLCV(ticker, timeframe, dateRange.from, dateRange.to);
+        console.log(`[EMA] Fetching ${hoursBack} hours of data for EMA ${period} calculation`);
       }
       
       if (!candleData || candleData.length === 0) {
@@ -405,10 +419,10 @@ class PolygonService {
       const emaValue = this.calculateEMA(closes, period);
       
       if (emaValue === null) {
-        throw new Error(`Cyber EMA ${period} from ${closes.length} candles`);
+        throw new Error(`Cannot calculate EMA ${period} from ${closes.length} candles (need at least ${period})`);
       }
       
-      console.log(`[Extended Hours] EMA ${period} calculated: ${emaValue.toFixed(4)} from ${closes.length} candles`);
+      console.log(`[EMA] EMA ${period} calculated: ${emaValue.toFixed(4)} from ${closes.length} candles`);
       
       return {
         value: emaValue,
@@ -418,15 +432,16 @@ class PolygonService {
           first: closes[0],
           last: closes[closes.length - 1]
         },
-        isExtendedHours: useExtendedHours
+        isExtendedHours: useExtendedHours && hoursBack === 168
       };
       
     } catch (error) {
+      console.error(`[EMA] Error calculating EMA ${period} for ${ticker}: ${error.message}`);
       throw error;
     }
   }
 
-  // Fetch all EMA values needed for trading conditions
+  // Fetch all EMA values needed for trading conditions with adaptive data fetching
   async fetchAllEMAValues(ticker) {
     try {
       
@@ -434,15 +449,54 @@ class PolygonService {
       const ema1m18 = await this.fetchEMAValues(ticker, 1, 18, 168); // 7 days
       const ema1m200 = await this.fetchEMAValues(ticker, 1, 200, 168); // 7 days
       
-      // Fetch 5-minute EMAs (recent data - 7 days, fallback to 30 days if needed)
+      // Fetch 5-minute EMAs with adaptive range - start with 7 days and increase if needed
       let ema5m18, ema5m200;
       
-      try {
-        ema5m18 = await this.fetchEMAValues(ticker, 5, 18, 168); // 7 days
-        ema5m200 = await this.fetchEMAValues(ticker, 5, 200, 168); // 7 days
-      } catch (error) {
-        ema5m18 = await this.fetchEMAValues(ticker, 5, 18, 720); // 30 days
-        ema5m200 = await this.fetchEMAValues(ticker, 5, 200, 720); // 30 days
+      // Adaptive fetching for EMA200 5min - try progressively longer periods
+      const timeRanges = [
+        { hours: 168, label: '7 days' },
+        { hours: 360, label: '15 days' },
+        { hours: 720, label: '30 days' },
+        { hours: 1440, label: '60 days' }
+      ];
+      
+      // Try EMA18 first
+      let ema5m18Success = false;
+      for (const timeRange of timeRanges) {
+        try {
+          // Disable extended hours for longer periods to get more historical data
+          const useExtendedHours = timeRange.hours === 168;
+          ema5m18 = await this.fetchEMAValues(ticker, 5, 18, timeRange.hours, useExtendedHours);
+          console.log(`[Adaptive] EMA5m18 successful with ${timeRange.label} (${ema5m18.candleCount} candles)`);
+          ema5m18Success = true;
+          break;
+        } catch (error) {
+          console.log(`[Adaptive] EMA5m18 failed with ${timeRange.label}, trying more data...`);
+        }
+      }
+      
+      if (!ema5m18Success) {
+        throw new Error(`Failed to calculate EMA5m18 after trying all time ranges`);
+      }
+      
+      // Try EMA200 with adaptive range
+      let ema5m200Success = false;
+      for (const timeRange of timeRanges) {
+        try {
+          // Disable extended hours for longer periods to get more historical data
+          const useExtendedHours = timeRange.hours === 168;
+          ema5m200 = await this.fetchEMAValues(ticker, 5, 200, timeRange.hours, useExtendedHours);
+          console.log(`[Adaptive] EMA5m200 successful with ${timeRange.label} (${ema5m200.candleCount} candles)`);
+          ema5m200Success = true;
+          break;
+        } catch (error) {
+          console.log(`[Adaptive] EMA5m200 failed with ${timeRange.label}, trying more data...`);
+        }
+      }
+      
+      if (!ema5m200Success) {
+        console.warn(`[Adaptive] EMA5m200 calculation failed for ${ticker} - will return null`);
+        ema5m200 = { value: null, candleCount: 0, error: 'Insufficient candles' };
       }
       
       const results = {
