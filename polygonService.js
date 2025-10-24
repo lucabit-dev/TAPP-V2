@@ -1,0 +1,693 @@
+const fetch = require('node-fetch');
+
+class PolygonService {
+  constructor() {
+    this.baseUrl = 'https://api.polygon.io';
+    this.apiKey = process.env.POLYGON_API_KEY || 'oLNQ0GD8RpIcP8X2iApVnlzg28P6Ttcc';
+    
+    // Log API key status (without exposing full key)
+    if (process.env.POLYGON_API_KEY) {
+      console.log(`[Polygon] Using API key from environment variable`);
+    } else {
+      console.log(`[Polygon] Using fallback API key (consider setting POLYGON_API_KEY environment variable)`);
+    }
+  }
+
+  async fetchOHLCV(ticker, timeframe, from, to) {
+    try {
+      const url = `${this.baseUrl}/v2/aggs/ticker/${ticker}/range/${timeframe}/minute/${from}/${to}?apikey=${this.apiKey}`;
+      
+      const response = await fetch(url);
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[Polygon] HTTP error ${response.status} for ${ticker}: ${errorText}`);
+        throw new Error(`Polygon API error: ${response.status} ${response.statusText}`);
+      }
+      
+      const data = await response.json();
+      
+      if (data.status !== 'OK') {
+        console.error(`[Polygon] API returned error status for ${ticker}:`, data);
+        throw new Error(`Polygon API returned error: ${data.status}`);
+      }
+      
+      const results = data.results || [];
+      
+      if (results.length === 0) {
+        console.warn(`[Polygon] No data returned for ${ticker} (${from} to ${to})`);
+        throw new Error(`No data returned from Polygon API for ${ticker}`);
+      }
+      
+      console.log(`[Polygon] Successfully fetched ${results.length} candles for ${ticker}`);
+      
+      // Transform data to our expected format
+      return results.map(candle => ({
+        timestamp: new Date(candle.t),
+        open: candle.o,
+        high: candle.h,
+        low: candle.l,
+        close: candle.c,
+        volume: candle.v,
+        transactions: candle.n !== undefined ? candle.n : null
+      })).sort((a, b) => a.timestamp - b.timestamp);
+      
+    } catch (error) {
+      console.error(`[Polygon] Error fetching OHLCV for ${ticker}:`, error.message);
+      throw error;
+    }
+  }
+
+  // Get company information for a ticker
+  async getCompanyInfo(ticker) {
+    try {
+      const url = `${this.baseUrl}/v3/reference/tickers/${ticker}?apikey=${this.apiKey}`;
+      
+      const response = await fetch(url);
+      
+      if (!response.ok) {
+        if (response.status === 404) {
+          throw new Error(`Symbol ${ticker} not found`);
+        }
+        throw new Error(`Polygon API error: ${response.status} ${response.statusText}`);
+      }
+      
+      const data = await response.json();
+      
+      if (data.status !== 'OK') {
+        throw new Error(`Polygon API returned error: ${data.status}`);
+      }
+      
+      const tickerData = data.results;
+      
+      if (!tickerData) {
+        throw new Error(`No ticker data found for ${ticker}`);
+      }
+      
+      return {
+        symbol: tickerData.ticker,
+        name: tickerData.name || tickerData.ticker,
+        market: tickerData.market,
+        primaryExchange: tickerData.primary_exchange,
+        currency: tickerData.currency_name,
+        description: tickerData.description || ''
+      };
+      
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  // Validate that a ticker is listed on NASDAQ
+  async validateNASDAQ(ticker) {
+    try {
+      const companyInfo = await this.getCompanyInfo(ticker);
+      
+      
+      // NASDAQ stocks have primary exchange as XNAS
+      if (companyInfo.primaryExchange !== 'XNAS') {
+        throw new Error(`Symbol ${ticker} is not listed on NASDAQ. Found on: ${companyInfo.primaryExchange}`);
+      }
+      
+      return true;
+      
+    } catch (error) {
+      throw error;
+    }
+  }
+
+
+  async fetch1MinuteCandles(ticker, from, to) {
+    return this.fetchOHLCV(ticker, 1, from, to);
+  }
+
+  async fetch5MinuteCandles(ticker, from, to) {
+    return this.fetchOHLCV(ticker, 5, from, to);
+  }
+
+  // Fetch candles with extended trading hours support and precise intervals
+  async fetchExtendedHoursCandles(ticker, timeframe, useExtendedHours = true) {
+    try {
+      let dateRange;
+      
+      if (useExtendedHours) {
+        dateRange = this.getExtendedTradingHoursRange();
+        console.log(`[Extended Hours] Fetching ${timeframe}-minute candles for ${ticker} using extended hours range: ${dateRange.from} to ${dateRange.to} (Session: ${dateRange.session})`);
+      } else {
+        dateRange = this.getDateRange(168); // Default 7 days
+      }
+      
+      const candles = await this.fetchOHLCV(ticker, timeframe, dateRange.from, dateRange.to);
+      
+      // Filter and validate candles for real-time accuracy
+      const validatedCandles = this.validateCandleData(candles, timeframe);
+      
+      console.log(`[Extended Hours] Retrieved ${validatedCandles.length} valid ${timeframe}-minute candles for ${ticker}`);
+      
+      return {
+        candles: validatedCandles,
+        session: dateRange.session,
+        isExtendedHours: dateRange.isExtendedHours,
+        dataRange: {
+          from: dateRange.from,
+          to: dateRange.to
+        }
+      };
+      
+    } catch (error) {
+      console.error(`[Extended Hours] Error fetching ${timeframe}-minute candles for ${ticker}:`, error);
+      throw error;
+    }
+  }
+
+  // Validate and filter candle data for real-time accuracy
+  validateCandleData(candles, timeframe) {
+    if (!candles || candles.length === 0) {
+      return [];
+    }
+
+    const now = new Date();
+    const timeframeMinutes = parseInt(timeframe);
+    const maxAgeMinutes = timeframeMinutes * 3; // Allow up to 3 intervals old
+    
+    return candles.filter(candle => {
+      const candleTime = new Date(candle.timestamp);
+      const ageMinutes = (now - candleTime) / (1000 * 60);
+      
+      // Validate data freshness
+      const isFresh = ageMinutes <= maxAgeMinutes;
+      
+      // Validate OHLC data integrity
+      const hasValidOHLC = candle.open > 0 && candle.high > 0 && candle.low > 0 && candle.close > 0;
+      const hasValidVolume = candle.volume >= 0;
+      
+      return isFresh && hasValidOHLC && hasValidVolume;
+    }).sort((a, b) => a.timestamp - b.timestamp);
+  }
+
+  // Helper method to format date for Polygon API
+  formatDateForAPI(date) {
+    return date.toISOString().split('T')[0]; // YYYY-MM-DD format
+  }
+
+  // Get current price for a ticker
+  async getCurrentPrice(ticker) {
+    try {
+      const url = `${this.baseUrl}/v2/last/trade/${ticker}?apikey=${this.apiKey}`;
+      
+      const response = await fetch(url);
+      
+      if (!response.ok) {
+        throw new Error(`Polygon API error: ${response.status} ${response.statusText}`);
+      }
+      
+      const data = await response.json();
+      
+      if (data.status !== 'OK') {
+        throw new Error(`Polygon API returned error: ${data.status}`);
+      }
+      
+      const result = data.results;
+      
+      if (!result || !result.p) {
+        throw new Error(`No price data available for ${ticker}`);
+      }
+      
+      const price = result.p;
+      
+      return price;
+      
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  // Helper method to get date range - prioritize recent data with extended hours support
+  getDateRange(hoursBack = 168) { // Default to 7 days for recent data
+    const to = new Date();
+    const from = new Date(to.getTime() - (hoursBack * 60 * 60 * 1000));
+    
+    return {
+      from: this.formatDateForAPI(from),
+      to: this.formatDateForAPI(to)
+    };
+  }
+
+  // Get Eastern Time from UTC
+  getEasternTime() {
+    const now = new Date();
+    // Convert to Eastern Time (handles both EST and EDT)
+    const easternTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    return easternTime;
+  }
+
+  // Get extended trading hours date range with adaptive logic
+  getExtendedTradingHoursRange() {
+    const now = new Date();
+    const easternTime = this.getEasternTime();
+    const currentHour = easternTime.getHours();
+    const currentMinute = easternTime.getMinutes();
+    
+    // Define trading sessions (EST/EDT)
+    const premarketStart = 4; // 4:00 AM
+    const regularStart = 9; // 9:30 AM
+    const regularEnd = 16; // 4:00 PM
+    const afterhoursEnd = 20; // 8:00 PM
+    
+    let to = new Date(now);
+    let from;
+    
+    // Determine current session and adjust date range accordingly
+    if (currentHour >= premarketStart && currentHour < regularStart) {
+      // Premarket session (4:00 AM - 9:30 AM)
+      // Include data from previous day's close + current premarket
+      from = new Date(now.getTime() - (24 * 60 * 60 * 1000)); // 24 hours back
+      console.log(`[Extended Hours] Premarket session detected: ${currentHour}:${currentMinute.toString().padStart(2, '0')} ET`);
+    } else if (currentHour >= regularStart && currentHour < regularEnd) {
+      // Regular trading session (9:30 AM - 4:00 PM)
+      // Include current day's data
+      from = new Date(now.getTime() - (12 * 60 * 60 * 1000)); // 12 hours back
+      console.log(`[Extended Hours] Regular trading session detected: ${currentHour}:${currentMinute.toString().padStart(2, '0')} ET`);
+    } else if (currentHour >= regularEnd && currentHour < afterhoursEnd) {
+      // After-hours session (4:00 PM - 8:00 PM)
+      // Include current day's full data
+      from = new Date(now.getTime() - (20 * 60 * 60 * 1000)); // 20 hours back
+      console.log(`[Extended Hours] After-hours session detected: ${currentHour}:${currentMinute.toString().padStart(2, '0')} ET`);
+    } else {
+      // Outside trading hours (8:00 PM - 4:00 AM)
+      // Include previous day's full data
+      from = new Date(now.getTime() - (24 * 60 * 60 * 1000)); // 24 hours back
+      console.log(`[Extended Hours] Outside trading hours: ${currentHour}:${currentMinute.toString().padStart(2, '0')} ET`);
+    }
+    
+    return {
+      from: this.formatDateForAPI(from),
+      to: this.formatDateForAPI(to),
+      session: this.getCurrentTradingSession(),
+      isExtendedHours: this.isExtendedHours()
+    };
+  }
+
+  // Determine current trading session
+  getCurrentTradingSession() {
+    const easternTime = this.getEasternTime();
+    const currentHour = easternTime.getHours();
+    
+    if (currentHour >= 4 && currentHour < 9) {
+      return 'premarket';
+    } else if (currentHour >= 9 && currentHour < 16) {
+      return 'regular';
+    } else if (currentHour >= 16 && currentHour < 20) {
+      return 'afterhours';
+    } else {
+      return 'closed';
+    }
+  }
+
+  // Check if currently in extended hours
+  isExtendedHours() {
+    const session = this.getCurrentTradingSession();
+    return session === 'premarket' || session === 'afterhours';
+  }
+
+  // Get extended date range for EMA200 calculation (when needed)
+  getExtendedDateRange(hoursBack = 720) { // 30 days for EMA200
+    const to = new Date();
+    const from = new Date(to.getTime() - (hoursBack * 60 * 60 * 1000));
+    
+    return {
+      from: this.formatDateForAPI(from),
+      to: this.formatDateForAPI(to)
+    };
+  }
+
+  // Calculate EMA using pandas-like exponential weighted moving average
+  calculateEMA(values, span, adjust = false) {
+    if (!values || values.length === 0) {
+      return null;
+    }
+
+    if (values.length < span) {
+      return null;
+    }
+
+    try {
+      // Calculate alpha (smoothing factor)
+      const alpha = 2 / (span + 1);
+      
+      // Initialize with first value
+      let ema = values[0];
+      
+      // Calculate EMA for remaining values
+      for (let i = 1; i < values.length; i++) {
+        ema = alpha * values[i] + (1 - alpha) * ema;
+      }
+      
+      return ema;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  // Fetch MACD indicator from Polygon.io
+  async fetchMACD(ticker, timespan = 'minute', shortWindow = 12, longWindow = 26, signalWindow = 9) {
+    try {
+      // Validate timespan parameter according to Polygon.io documentation
+      const supportedTimespans = ['minute', 'hour', 'day', 'week', 'month', 'quarter', 'year'];
+      
+      if (!supportedTimespans.includes(timespan)) {
+        throw new Error(`Unsupported timespan '${timespan}'. Supported values: ${supportedTimespans.join(', ')}`);
+      }
+      
+      const url = `${this.baseUrl}/v1/indicators/macd/${ticker}?timespan=${timespan}&adjusted=true&short_window=${shortWindow}&long_window=${longWindow}&signal_window=${signalWindow}&series_type=close&expand_underlying=false&order=desc&limit=200&apikey=${this.apiKey}`;
+      
+      
+      const response = await fetch(url);
+      
+      if (!response.ok) {
+        throw new Error(`Polygon API error: ${response.status} ${response.statusText}`);
+      }
+      
+      const data = await response.json();
+      
+      if (data.status !== 'OK') {
+        throw new Error(`Polygon API returned error: ${data.status}`);
+      }
+      
+      const results = data.results;
+      
+      if (!results || !results.values || results.values.length === 0) {
+        throw new Error(`No MACD data returned from Polygon API for ${ticker}`);
+      }
+      
+      // Get the most recent MACD values (first in the array since it's ordered desc)
+      const latestMACD = results.values[0];
+      
+      
+      return {
+        macd: latestMACD.value,
+        signal: latestMACD.signal,
+        histogram: latestMACD.histogram,
+        timestamp: new Date(latestMACD.timestamp)
+      };
+      
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  // Fetch EMA values using Polygon aggregates and calculate locally with extended hours support
+  async fetchEMAValues(ticker, timeframe, period, hoursBack = 168, useExtendedHours = true) {
+    try {
+      let candleData;
+      
+      if (useExtendedHours) {
+        // Use extended trading hours data for more accurate real-time calculations
+        const extendedData = await this.fetchExtendedHoursCandles(ticker, timeframe, true);
+        candleData = extendedData.candles;
+        console.log(`[Extended Hours] EMA ${period} calculation using ${extendedData.session} session data`);
+      } else {
+        const dateRange = this.getDateRange(hoursBack);
+        candleData = await this.fetchOHLCV(ticker, timeframe, dateRange.from, dateRange.to);
+      }
+      
+      if (!candleData || candleData.length === 0) {
+        throw new Error(`No candle data available for EMA calculation`);
+      }
+      
+      // Extract close prices
+      const closes = candleData.map(candle => candle.close);
+      
+      // Calculate EMA with enhanced precision
+      const emaValue = this.calculateEMA(closes, period);
+      
+      if (emaValue === null) {
+        throw new Error(`Cyber EMA ${period} from ${closes.length} candles`);
+      }
+      
+      console.log(`[Extended Hours] EMA ${period} calculated: ${emaValue.toFixed(4)} from ${closes.length} candles`);
+      
+      return {
+        value: emaValue,
+        timestamp: candleData[candleData.length - 1].timestamp,
+        candleCount: candleData.length,
+        dataRange: {
+          first: closes[0],
+          last: closes[closes.length - 1]
+        },
+        isExtendedHours: useExtendedHours
+      };
+      
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  // Fetch all EMA values needed for trading conditions
+  async fetchAllEMAValues(ticker) {
+    try {
+      
+      // Fetch 1-minute EMAs (recent data - 7 days)
+      const ema1m18 = await this.fetchEMAValues(ticker, 1, 18, 168); // 7 days
+      const ema1m200 = await this.fetchEMAValues(ticker, 1, 200, 168); // 7 days
+      
+      // Fetch 5-minute EMAs (recent data - 7 days, fallback to 30 days if needed)
+      let ema5m18, ema5m200;
+      
+      try {
+        ema5m18 = await this.fetchEMAValues(ticker, 5, 18, 168); // 7 days
+        ema5m200 = await this.fetchEMAValues(ticker, 5, 200, 168); // 7 days
+      } catch (error) {
+        ema5m18 = await this.fetchEMAValues(ticker, 5, 18, 720); // 30 days
+        ema5m200 = await this.fetchEMAValues(ticker, 5, 200, 720); // 30 days
+      }
+      
+      const results = {
+        ema1m18: ema1m18.value,
+        ema1m200: ema1m200.value,
+        ema5m18: ema5m18.value,
+        ema5m200: ema5m200.value,
+        metadata: {
+          ema1m18: ema1m18,
+          ema1m200: ema1m200,
+          ema5m18: ema5m18,
+          ema5m200: ema5m200
+        }
+      };
+      
+      
+      return results;
+      
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  // Calculate MACD locally using technicalindicators library
+  calculateMACDLocal(candles, timeframe = '1m', fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
+    if (!candles || candles.length === 0) {
+      return null;
+    }
+
+    const closes = candles.map(candle => candle.close);
+    
+    // MACD needs at least slowPeriod + signalPeriod candles
+    const minCandles = slowPeriod + signalPeriod;
+    if (closes.length < minCandles) {
+      return null;
+    }
+    
+    try {
+      
+      const { MACD } = require('technicalindicators');
+      
+      const macd = MACD.calculate({
+        values: closes,
+        fastPeriod: fastPeriod,
+        slowPeriod: slowPeriod,
+        signalPeriod: signalPeriod,
+        SimpleMAOscillator: false,
+        SimpleMASignal: false
+      });
+      
+      if (macd.length > 0) {
+        const lastMACD = macd[macd.length - 1];
+        
+        return {
+          macd: lastMACD.MACD,
+          signal: lastMACD.signal,
+          histogram: lastMACD.histogram,
+          timestamp: new Date(),
+          lastClose: closes[closes.length-1],
+          candleCount: closes.length
+        };
+      }
+      
+      return null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  // Calculate MACD using EMA results for accurate TradingView matching
+  calculateMACDWithEMA(candles, timeframe = '1m', fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
+    if (!candles || candles.length === 0) {
+      return null;
+    }
+
+    const closes = candles.map(candle => candle.close);
+    
+    // Need enough data for the slowest EMA + signal period
+    const minCandles = slowPeriod + signalPeriod;
+    if (closes.length < minCandles) {
+      return null;
+    }
+    
+    try {
+      
+      // Calculate EMAs for each period to build MACD line
+      const macdLine = [];
+      const fastEMAs = [];
+      const slowEMAs = [];
+      
+      // Calculate EMAs for each period starting from slowPeriod
+      for (let i = slowPeriod - 1; i < closes.length; i++) {
+        const fastEMA = this.calculateEMA(closes.slice(0, i + 1), fastPeriod);
+        const slowEMA = this.calculateEMA(closes.slice(0, i + 1), slowPeriod);
+        
+        if (fastEMA !== null && slowEMA !== null) {
+          fastEMAs.push(fastEMA);
+          slowEMAs.push(slowEMA);
+          macdLine.push(fastEMA - slowEMA);
+        }
+      }
+      
+      if (macdLine.length === 0) {
+        return null;
+      }
+      
+      // Calculate signal line (EMA of MACD line)
+      const signalLine = this.calculateEMA(macdLine, signalPeriod);
+      
+      if (signalLine === null) {
+        return null;
+      }
+      
+      // Get the latest values
+      const latestMACD = macdLine[macdLine.length - 1];
+      const latestSignal = signalLine;
+      const histogram = latestMACD - latestSignal;
+      
+      
+      return {
+        macd: latestMACD,
+        signal: latestSignal,
+        histogram: histogram,
+        timestamp: new Date(),
+        lastClose: closes[closes.length-1],
+        candleCount: closes.length,
+        fastEMA: fastEMAs[fastEMAs.length - 1],
+        slowEMA: slowEMAs[slowEMAs.length - 1],
+        macdLine: macdLine,
+        signalLine: signalLine
+      };
+    } catch (error) {
+      return null;
+    }
+  }
+
+  // Fetch all MACD values needed for trading conditions with extended hours support
+  async fetchAllMACDValues(ticker, useExtendedHours = true) {
+    try {
+      console.log(`[Extended Hours] Fetching MACD values for ${ticker} with extended hours: ${useExtendedHours}`);
+      
+      // Fetch 1-minute MACD: Try Polygon.io first, fallback to local calculation with extended hours
+      let macd1m;
+      
+      try {
+        macd1m = await this.fetchMACD(ticker, 'minute', 12, 26, 9);
+        console.log(`[Extended Hours] 1-minute MACD from Polygon.io: ${macd1m.macd?.toFixed(4)}`);
+      } catch (error) {
+        console.log(`[Extended Hours] Polygon.io MACD failed, using local calculation with extended hours`);
+        
+        // Get 1-minute candles using extended hours data
+        if (useExtendedHours) {
+          const extendedData1m = await this.fetchExtendedHoursCandles(ticker, 1, true);
+          macd1m = this.calculateMACDWithEMA(extendedData1m.candles, '1m', 12, 26, 9);
+          console.log(`[Extended Hours] 1-minute MACD calculated using ${extendedData1m.session} session`);
+        } else {
+          const dateRange = this.getDateRange(168); // 7 days
+          const candles1m = await this.fetch1MinuteCandles(ticker, dateRange.from, dateRange.to);
+          macd1m = this.calculateMACDWithEMA(candles1m, '1m', 12, 26, 9);
+        }
+        
+        if (!macd1m) {
+          throw new Error('Both Polygon.io and local 1-minute MACD calculations failed');
+        }
+      }
+      
+      // 5-minute MACD: Try Polygon.io hour timeframe first, fallback to local calculation with extended hours
+      let macd5m;
+      
+      try {
+        // Try using hour timeframe from Polygon.io as proxy for 5-minute
+        macd5m = await this.fetchMACD(ticker, 'hour', 12, 26, 9);
+        console.log(`[Extended Hours] 5-minute MACD from Polygon.io: ${macd5m.macd?.toFixed(4)}`);
+      } catch (error) {
+        console.log(`[Extended Hours] Polygon.io 5-minute MACD failed, using local calculation with extended hours`);
+        
+        // Get 5-minute candles using extended hours data
+        if (useExtendedHours) {
+          const extendedData5m = await this.fetchExtendedHoursCandles(ticker, 5, true);
+          const candles5m = extendedData5m.candles;
+          console.log(`[Extended Hours] 5-minute MACD calculation using ${extendedData5m.session} session`);
+          
+          // Try different calculation methods to find the best match
+          const macd5mLocal = this.calculateMACDLocal(candles5m, '5m', 12, 26, 9);
+          const macd5mEMA = this.calculateMACDWithEMA(candles5m, '5m', 12, 26, 9);
+          
+          // Use the EMA-based calculation (most accurate for TradingView matching)
+          macd5m = macd5mEMA || macd5mLocal;
+        } else {
+          const dateRange = this.getDateRange(168); // 7 days
+          const candles5m = await this.fetch5MinuteCandles(ticker, dateRange.from, dateRange.to);
+          
+          const macd5mLocal = this.calculateMACDLocal(candles5m, '5m', 12, 26, 9);
+          const macd5mEMA = this.calculateMACDWithEMA(candles5m, '5m', 12, 26, 9);
+          macd5m = macd5mEMA || macd5mLocal;
+        }
+        
+        if (!macd5m) {
+          throw new Error('Both local and manual 5-minute MACD calculations failed');
+        }
+      }
+      
+      const results = {
+        macd1m: {
+          macd: macd1m.macd,
+          signal: macd1m.signal,
+          histogram: macd1m.histogram
+        },
+        macd5m: {
+          macd: macd5m.macd,
+          signal: macd5m.signal,
+          histogram: macd5m.histogram
+        },
+        metadata: {
+          macd1m: macd1m,
+          macd5m: macd5m,
+          useExtendedHours: useExtendedHours
+        }
+      };
+      
+      console.log(`[Extended Hours] MACD values calculated for ${ticker} - 1m: ${macd1m.macd?.toFixed(4)}, 5m: ${macd5m.macd?.toFixed(4)}`);
+      
+      return results;
+      
+    } catch (error) {
+      throw error;
+    }
+  }
+}
+
+module.exports = PolygonService;

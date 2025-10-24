@@ -1,0 +1,39 @@
+{
+  "name": "trading-alerts-tool",
+  "version": "1.0.0",
+  "description": "A Node.js + React tool for processing trading alerts with technical indicators",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "install-client": "cd client && npm install",
+    "build-client": "cd client && npm run build",
+    "dev-client": "cd client && npm run dev",
+    "dev-full": "concurrently \"npm run dev\" \"npm run dev-client\"",
+    "start-full": "./start-clean.sh",
+    "start-full-original": "concurrently \"npm start\" \"npm run dev-client\"",
+    "kill-ports": "lsof -ti:3001,5173 | xargs kill -9 2>/dev/null || true",
+    "vercel-build": "cd client && npm install && npm run build"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "node-fetch": "^2.7.0",
+    "technicalindicators": "^3.1.0",
+    "ws": "^8.18.3",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "nodemon": "^3.0.1"
+  },
+  "keywords": [
+    "trading",
+    "alerts",
+    "technical-analysis",
+    "nodejs",
+    "react"
+  ],
+  "author": "",
+  "license": "MIT"
+}
