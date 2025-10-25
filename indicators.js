@@ -57,75 +57,79 @@ class IndicatorsService {
     }
   }
 
-  // Manual MACD calculation function with proper signal line - TradingView compatible
-  calculateManualMACD(closes, fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
+  // TradingView-compatible MACD calculation
+  calculateTradingViewMACD(closes, fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
     if (!closes || closes.length === 0) {
       return null;
     }
 
-    // MACD needs at least slowPeriod + signalPeriod candles
+    // Need enough data for slowPeriod + signalPeriod
     const minCandles = slowPeriod + signalPeriod;
     if (closes.length < minCandles) {
       return null;
     }
 
-    // Calculate EMA_fast and EMA_slow efficiently
-    const emaFastMultiplier = 2 / (fastPeriod + 1);
-    const emaSlowMultiplier = 2 / (slowPeriod + 1);
+    // Calculate EMAs using TradingView method
+    const fastMultiplier = 2 / (fastPeriod + 1);
+    const slowMultiplier = 2 / (slowPeriod + 1);
     
-    // Calculate fast EMA - seed with SMA
+    // Initialize EMAs with SMA
     let fastSum = 0;
     for (let i = 0; i < fastPeriod; i++) {
       fastSum += closes[i];
     }
     let emaFast = fastSum / fastPeriod;
     
-    // Calculate slow EMA - seed with SMA
     let slowSum = 0;
     for (let i = 0; i < slowPeriod; i++) {
       slowSum += closes[i];
     }
     let emaSlow = slowSum / slowPeriod;
     
-    // Calculate MACD line values efficiently
-    const macdLineValues = [];
+    // Calculate MACD line values
+    const macdLine = [];
     
-    // Start from slowPeriod (when we have both EMAs)
+    // Start from slowPeriod (when both EMAs are valid)
     for (let i = slowPeriod; i < closes.length; i++) {
       // Update fast EMA
       if (i >= fastPeriod) {
-        emaFast = (closes[i] - emaFast) * emaFastMultiplier + emaFast;
+        emaFast = (closes[i] - emaFast) * fastMultiplier + emaFast;
       }
       
       // Update slow EMA
-      emaSlow = (closes[i] - emaSlow) * emaSlowMultiplier + emaSlow;
+      emaSlow = (closes[i] - emaSlow) * slowMultiplier + emaSlow;
       
       // Calculate MACD line
-      macdLineValues.push(emaFast - emaSlow);
+      macdLine.push(emaFast - emaSlow);
     }
-
-    // Get the latest MACD line value
-    const latestMacdLine = macdLineValues[macdLineValues.length - 1];
-    if (latestMacdLine === null || macdLineValues.length === 0) {
+    
+    if (macdLine.length === 0) {
       return null;
     }
-
-    // Calculate signal line (EMA of MACD line values)
-    if (macdLineValues.length < signalPeriod) {
-      return null;
+    
+    // Calculate signal line (EMA of MACD line)
+    const signalMultiplier = 2 / (signalPeriod + 1);
+    
+    // Initialize signal EMA with SMA of first signalPeriod MACD values
+    let signalSum = 0;
+    for (let i = 0; i < signalPeriod; i++) {
+      signalSum += macdLine[i];
     }
-
-    const signalLine = this.calculateManualEMA(macdLineValues, signalPeriod);
-    if (signalLine === null) {
-      return null;
+    let emaSignal = signalSum / signalPeriod;
+    
+    // Calculate signal line for remaining values
+    for (let i = signalPeriod; i < macdLine.length; i++) {
+      emaSignal = (macdLine[i] - emaSignal) * signalMultiplier + emaSignal;
     }
-
-    // Histogram = MACD line - Signal line
-    const histogram = latestMacdLine - signalLine;
-
+    
+    // Get latest values
+    const latestMacd = macdLine[macdLine.length - 1];
+    const latestSignal = emaSignal;
+    const histogram = latestMacd - latestSignal;
+    
     return {
-      macd: latestMacdLine,
-      signal: signalLine,
+      macd: latestMacd,
+      signal: latestSignal,
       histogram: histogram
     };
   }
@@ -145,8 +149,8 @@ class IndicatorsService {
     
     try {
       
-      // Use manual MACD calculation
-      const result = this.calculateManualMACD(closes, fastPeriod, slowPeriod, signalPeriod);
+      // Use TradingView-compatible MACD calculation
+      const result = this.calculateTradingViewMACD(closes, fastPeriod, slowPeriod, signalPeriod);
       
       if (result === null) {
         return null;

@@ -570,7 +570,7 @@ class PolygonService {
     }
   }
 
-  // Calculate MACD using EMA results for accurate TradingView matching - optimized
+  // Calculate MACD using TradingView-compatible method
   calculateMACDWithEMA(candles, timeframe = '1m', fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
     if (!candles || candles.length === 0) {
       return null;
@@ -585,42 +585,37 @@ class PolygonService {
     }
     
     try {
-      // Calculate EMAs efficiently (similar to indicators.js)
-      const emaFastMultiplier = 2 / (fastPeriod + 1);
-      const emaSlowMultiplier = 2 / (slowPeriod + 1);
+      // Calculate EMAs using TradingView method
+      const fastMultiplier = 2 / (fastPeriod + 1);
+      const slowMultiplier = 2 / (slowPeriod + 1);
       
-      // Calculate fast EMA - seed with SMA
+      // Initialize EMAs with SMA
       let fastSum = 0;
       for (let i = 0; i < fastPeriod; i++) {
         fastSum += closes[i];
       }
       let emaFast = fastSum / fastPeriod;
       
-      // Calculate slow EMA - seed with SMA
       let slowSum = 0;
       for (let i = 0; i < slowPeriod; i++) {
         slowSum += closes[i];
       }
       let emaSlow = slowSum / slowPeriod;
       
-      // Calculate MACD line values efficiently
+      // Calculate MACD line values
       const macdLine = [];
-      const fastEMAs = [];
-      const slowEMAs = [];
       
-      // Start from slowPeriod (when we have both EMAs)
+      // Start from slowPeriod (when both EMAs are valid)
       for (let i = slowPeriod; i < closes.length; i++) {
         // Update fast EMA
         if (i >= fastPeriod) {
-          emaFast = (closes[i] - emaFast) * emaFastMultiplier + emaFast;
+          emaFast = (closes[i] - emaFast) * fastMultiplier + emaFast;
         }
         
         // Update slow EMA
-        emaSlow = (closes[i] - emaSlow) * emaSlowMultiplier + emaSlow;
+        emaSlow = (closes[i] - emaSlow) * slowMultiplier + emaSlow;
         
         // Calculate MACD line
-        fastEMAs.push(emaFast);
-        slowEMAs.push(emaSlow);
         macdLine.push(emaFast - emaSlow);
       }
       
@@ -629,15 +624,23 @@ class PolygonService {
       }
       
       // Calculate signal line (EMA of MACD line)
-      const signalLine = this.calculateEMA(macdLine, signalPeriod);
+      const signalMultiplier = 2 / (signalPeriod + 1);
       
-      if (signalLine === null) {
-        return null;
+      // Initialize signal EMA with SMA of first signalPeriod MACD values
+      let signalSum = 0;
+      for (let i = 0; i < signalPeriod; i++) {
+        signalSum += macdLine[i];
+      }
+      let emaSignal = signalSum / signalPeriod;
+      
+      // Calculate signal line for remaining values
+      for (let i = signalPeriod; i < macdLine.length; i++) {
+        emaSignal = (macdLine[i] - emaSignal) * signalMultiplier + emaSignal;
       }
       
-      // Get the latest values
+      // Get latest values
       const latestMACD = macdLine[macdLine.length - 1];
-      const latestSignal = signalLine;
+      const latestSignal = emaSignal;
       const histogram = latestMACD - latestSignal;
       
       
@@ -648,10 +651,10 @@ class PolygonService {
         timestamp: new Date(),
         lastClose: closes[closes.length-1],
         candleCount: closes.length,
-        fastEMA: fastEMAs[fastEMAs.length - 1],
-        slowEMA: slowEMAs[slowEMAs.length - 1],
+        fastEMA: emaFast,
+        slowEMA: emaSlow,
         macdLine: macdLine,
-        signalLine: signalLine
+        signalLine: latestSignal
       };
     } catch (error) {
       return null;
@@ -661,69 +664,41 @@ class PolygonService {
   // Fetch all MACD values needed for trading conditions with extended hours support
   async fetchAllMACDValues(ticker, useExtendedHours = true) {
     try {
-      console.log(`[Extended Hours] Fetching MACD values for ${ticker} with extended hours: ${useExtendedHours}`);
+      console.log(`[TradingView MACD] Fetching MACD values for ${ticker} with extended hours: ${useExtendedHours}`);
       
-      // Fetch 1-minute MACD: Try Polygon.io first, fallback to local calculation with extended hours
-      let macd1m;
+      // Use only local TradingView-compatible calculation for both 1m and 5m
+      let macd1m, macd5m;
       
-      try {
-        macd1m = await this.fetchMACD(ticker, 'minute', 12, 26, 9);
-        console.log(`[Extended Hours] 1-minute MACD from Polygon.io: ${macd1m.macd?.toFixed(4)}`);
-      } catch (error) {
-        console.log(`[Extended Hours] Polygon.io MACD failed, using local calculation with extended hours`);
-        
-        // Get 1-minute candles using extended hours data
-        if (useExtendedHours) {
-          const extendedData1m = await this.fetchExtendedHoursCandles(ticker, 1, true);
-          macd1m = this.calculateMACDWithEMA(extendedData1m.candles, '1m', 12, 26, 9);
-          console.log(`[Extended Hours] 1-minute MACD calculated using ${extendedData1m.session} session`);
-        } else {
-          const dateRange = this.getDateRange(168); // 7 days
-          const candles1m = await this.fetch1MinuteCandles(ticker, dateRange.from, dateRange.to);
-          macd1m = this.calculateMACDWithEMA(candles1m, '1m', 12, 26, 9);
-        }
-        
-        if (!macd1m) {
-          throw new Error('Both Polygon.io and local 1-minute MACD calculations failed');
-        }
+      // Get 1-minute candles using extended hours data
+      if (useExtendedHours) {
+        const extendedData1m = await this.fetchExtendedHoursCandles(ticker, 1, true);
+        macd1m = this.calculateMACDWithEMA(extendedData1m.candles, '1m', 12, 26, 9);
+        console.log(`[TradingView MACD] 1-minute MACD calculated using ${extendedData1m.session} session`);
+      } else {
+        const dateRange = this.getDateRange(168); // 7 days
+        const candles1m = await this.fetch1MinuteCandles(ticker, dateRange.from, dateRange.to);
+        macd1m = this.calculateMACDWithEMA(candles1m, '1m', 12, 26, 9);
       }
       
-      // 5-minute MACD: Try Polygon.io hour timeframe first, fallback to local calculation with extended hours
-      let macd5m;
-      
-      try {
-        // Try using hour timeframe from Polygon.io as proxy for 5-minute
-        macd5m = await this.fetchMACD(ticker, 'hour', 12, 26, 9);
-        console.log(`[Extended Hours] 5-minute MACD from Polygon.io: ${macd5m.macd?.toFixed(4)}`);
-      } catch (error) {
-        console.log(`[Extended Hours] Polygon.io 5-minute MACD failed, using local calculation with extended hours`);
-        
-        // Get 5-minute candles using extended hours data
-        if (useExtendedHours) {
-          const extendedData5m = await this.fetchExtendedHoursCandles(ticker, 5, true);
-          const candles5m = extendedData5m.candles;
-          console.log(`[Extended Hours] 5-minute MACD calculation using ${extendedData5m.session} session`);
-          
-          // Try different calculation methods to find the best match
-          const macd5mLocal = this.calculateMACDLocal(candles5m, '5m', 12, 26, 9);
-          const macd5mEMA = this.calculateMACDWithEMA(candles5m, '5m', 12, 26, 9);
-          
-          // Use the EMA-based calculation (most accurate for TradingView matching)
-          macd5m = macd5mEMA || macd5mLocal;
-        } else {
-          const dateRange = this.getDateRange(168); // 7 days
-          const candles5m = await this.fetch5MinuteCandles(ticker, dateRange.from, dateRange.to);
-          
-          const macd5mLocal = this.calculateMACDLocal(candles5m, '5m', 12, 26, 9);
-          const macd5mEMA = this.calculateMACDWithEMA(candles5m, '5m', 12, 26, 9);
-          macd5m = macd5mEMA || macd5mLocal;
-        }
-        
-        if (!macd5m) {
-          throw new Error('Both local and manual 5-minute MACD calculations failed');
-        }
+      if (!macd1m) {
+        throw new Error('1-minute MACD calculation failed');
       }
       
+      // Get 5-minute candles using extended hours data
+      if (useExtendedHours) {
+        const extendedData5m = await this.fetchExtendedHoursCandles(ticker, 5, true);
+        macd5m = this.calculateMACDWithEMA(extendedData5m.candles, '5m', 12, 26, 9);
+        console.log(`[TradingView MACD] 5-minute MACD calculated using ${extendedData5m.session} session`);
+      } else {
+        const dateRange = this.getDateRange(168); // 7 days
+        const candles5m = await this.fetch5MinuteCandles(ticker, dateRange.from, dateRange.to);
+        macd5m = this.calculateMACDWithEMA(candles5m, '5m', 12, 26, 9);
+      }
+      
+      if (!macd5m) {
+        throw new Error('5-minute MACD calculation failed');
+      }
+
       const results = {
         macd1m: {
           macd: macd1m.macd,
@@ -742,7 +717,7 @@ class PolygonService {
         }
       };
       
-      console.log(`[Extended Hours] MACD values calculated for ${ticker} - 1m: ${macd1m.macd?.toFixed(4)}, 5m: ${macd5m.macd?.toFixed(4)}`);
+      console.log(`[TradingView MACD] MACD values calculated for ${ticker} - 1m: ${macd1m.macd?.toFixed(4)}, 5m: ${macd5m.macd?.toFixed(4)}`);
       
       return results;
       
