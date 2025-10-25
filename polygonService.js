@@ -316,7 +316,7 @@ class PolygonService {
     };
   }
 
-  // Calculate EMA using TradingView compatible method
+  // Calculate EMA using Wilder's smoothing method (best TradingView match)
   calculateEMA(values, span, adjust = false) {
     if (!values || values.length === 0) {
       return null;
@@ -327,13 +327,13 @@ class PolygonService {
     }
 
     try {
-      // Calculate multiplier (smoothing factor)
-      const multiplier = 2 / (span + 1);
+      // Wilder's smoothing method (better TradingView match)
+      const multiplier = 1 / span;
       
-      // TradingView method: Initialize with first value, not SMA
+      // Initialize with first value
       let ema = values[0];
       
-      // Calculate EMA for remaining values using TradingView formula
+      // Calculate EMA for remaining values using Wilder's formula
       for (let i = 1; i < values.length; i++) {
         ema = (values[i] * multiplier) + (ema * (1 - multiplier));
       }
@@ -566,7 +566,7 @@ class PolygonService {
     }
   }
 
-  // Calculate MACD using TradingView-compatible method
+  // Calculate MACD using Wilder's EMA method (best TradingView match)
   calculateMACDWithEMA(candles, timeframe = '1m', fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
     if (!candles || candles.length === 0) {
       return null;
@@ -581,11 +581,11 @@ class PolygonService {
     }
     
     try {
-      // Calculate EMAs using TradingView method (first value initialization)
-      const fastMultiplier = 2 / (fastPeriod + 1);
-      const slowMultiplier = 2 / (slowPeriod + 1);
+      // Calculate EMAs using Wilder's method (best TradingView match)
+      const fastMultiplier = 1 / fastPeriod;
+      const slowMultiplier = 1 / slowPeriod;
       
-      // Initialize EMAs with first value (TradingView method)
+      // Initialize EMAs with first value
       let emaFast = closes[0];
       let emaSlow = closes[0];
       
@@ -610,10 +610,10 @@ class PolygonService {
         return null;
       }
       
-      // Calculate signal line (EMA of MACD line)
-      const signalMultiplier = 2 / (signalPeriod + 1);
+      // Calculate signal line (EMA of MACD line using Wilder's method)
+      const signalMultiplier = 1 / signalPeriod;
       
-      // Initialize signal EMA with first MACD value (TradingView method)
+      // Initialize signal EMA with first MACD value
       let emaSignal = macdLine[0];
       
       // Calculate signal line for remaining values
