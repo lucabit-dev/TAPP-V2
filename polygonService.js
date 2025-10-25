@@ -330,16 +330,12 @@ class PolygonService {
       // Calculate multiplier (smoothing factor)
       const multiplier = 2 / (span + 1);
       
-      // Seed with SMA of first period values (TradingView method)
-      let sum = 0;
-      for (let i = 0; i < span; i++) {
-        sum += values[i];
-      }
-      let ema = sum / span;
+      // TradingView method: Initialize with first value, not SMA
+      let ema = values[0];
       
       // Calculate EMA for remaining values using TradingView formula
-      for (let i = span; i < values.length; i++) {
-        ema = (values[i] - ema) * multiplier + ema;
+      for (let i = 1; i < values.length; i++) {
+        ema = (values[i] * multiplier) + (ema * (1 - multiplier));
       }
       
       return ema;
@@ -585,22 +581,13 @@ class PolygonService {
     }
     
     try {
-      // Calculate EMAs using TradingView method
+      // Calculate EMAs using TradingView method (first value initialization)
       const fastMultiplier = 2 / (fastPeriod + 1);
       const slowMultiplier = 2 / (slowPeriod + 1);
       
-      // Initialize EMAs with SMA
-      let fastSum = 0;
-      for (let i = 0; i < fastPeriod; i++) {
-        fastSum += closes[i];
-      }
-      let emaFast = fastSum / fastPeriod;
-      
-      let slowSum = 0;
-      for (let i = 0; i < slowPeriod; i++) {
-        slowSum += closes[i];
-      }
-      let emaSlow = slowSum / slowPeriod;
+      // Initialize EMAs with first value (TradingView method)
+      let emaFast = closes[0];
+      let emaSlow = closes[0];
       
       // Calculate MACD line values
       const macdLine = [];
@@ -609,11 +596,11 @@ class PolygonService {
       for (let i = slowPeriod; i < closes.length; i++) {
         // Update fast EMA
         if (i >= fastPeriod) {
-          emaFast = (closes[i] - emaFast) * fastMultiplier + emaFast;
+          emaFast = (closes[i] * fastMultiplier) + (emaFast * (1 - fastMultiplier));
         }
         
         // Update slow EMA
-        emaSlow = (closes[i] - emaSlow) * slowMultiplier + emaSlow;
+        emaSlow = (closes[i] * slowMultiplier) + (emaSlow * (1 - slowMultiplier));
         
         // Calculate MACD line
         macdLine.push(emaFast - emaSlow);
@@ -626,16 +613,12 @@ class PolygonService {
       // Calculate signal line (EMA of MACD line)
       const signalMultiplier = 2 / (signalPeriod + 1);
       
-      // Initialize signal EMA with SMA of first signalPeriod MACD values
-      let signalSum = 0;
-      for (let i = 0; i < signalPeriod; i++) {
-        signalSum += macdLine[i];
-      }
-      let emaSignal = signalSum / signalPeriod;
+      // Initialize signal EMA with first MACD value (TradingView method)
+      let emaSignal = macdLine[0];
       
       // Calculate signal line for remaining values
-      for (let i = signalPeriod; i < macdLine.length; i++) {
-        emaSignal = (macdLine[i] - emaSignal) * signalMultiplier + emaSignal;
+      for (let i = 1; i < macdLine.length; i++) {
+        emaSignal = (macdLine[i] * signalMultiplier) + (emaSignal * (1 - signalMultiplier));
       }
       
       // Get latest values
