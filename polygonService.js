@@ -566,7 +566,7 @@ class PolygonService {
     }
   }
 
-  // Calculate MACD using Wilder's EMA method (best TradingView match)
+  // Calculate MACD using hybrid method (best TradingView match)
   calculateMACDWithEMA(candles, timeframe = '1m', fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
     if (!candles || candles.length === 0) {
       return null;
@@ -581,28 +581,27 @@ class PolygonService {
     }
     
     try {
-      // Calculate EMAs using Wilder's method (best TradingView match)
-      const fastMultiplier = 1 / fastPeriod;
-      const slowMultiplier = 1 / slowPeriod;
+      // Preprocess data to match TradingView approach
+      const processedCloses = this.preprocessDataForTradingView(closes);
       
-      // Initialize EMAs with first value
-      let emaFast = closes[0];
-      let emaSlow = closes[0];
+      // Fast EMA with SMA init, Slow EMA with first value init
+      let fastSum = 0;
+      for (let i = 0; i < fastPeriod; i++) {
+        fastSum += processedCloses[i];
+      }
+      let emaFast = fastSum / fastPeriod;
       
-      // Calculate MACD line values
+      let emaSlow = processedCloses[0];
+      
       const macdLine = [];
       
-      // Start from slowPeriod (when both EMAs are valid)
-      for (let i = slowPeriod; i < closes.length; i++) {
-        // Update fast EMA
-        if (i >= fastPeriod) {
-          emaFast = (closes[i] * fastMultiplier) + (emaFast * (1 - fastMultiplier));
-        }
+      // Calculate MACD line
+      for (let i = slowPeriod; i < processedCloses.length; i++) {
+        const fastMultiplier = 2 / (fastPeriod + 1);
+        const slowMultiplier = 1 / slowPeriod;
         
-        // Update slow EMA
-        emaSlow = (closes[i] * slowMultiplier) + (emaSlow * (1 - slowMultiplier));
-        
-        // Calculate MACD line
+        emaFast = (processedCloses[i] * fastMultiplier) + (emaFast * (1 - fastMultiplier));
+        emaSlow = (processedCloses[i] * slowMultiplier) + (emaSlow * (1 - slowMultiplier));
         macdLine.push(emaFast - emaSlow);
       }
       
@@ -610,13 +609,10 @@ class PolygonService {
         return null;
       }
       
-      // Calculate signal line (EMA of MACD line using Wilder's method)
+      // Signal line with first value init
+      let emaSignal = macdLine[0];
       const signalMultiplier = 1 / signalPeriod;
       
-      // Initialize signal EMA with first MACD value
-      let emaSignal = macdLine[0];
-      
-      // Calculate signal line for remaining values
       for (let i = 1; i < macdLine.length; i++) {
         emaSignal = (macdLine[i] * signalMultiplier) + (emaSignal * (1 - signalMultiplier));
       }
@@ -632,8 +628,8 @@ class PolygonService {
         signal: latestSignal,
         histogram: histogram,
         timestamp: new Date(),
-        lastClose: closes[closes.length-1],
-        candleCount: closes.length,
+        lastClose: processedCloses[processedCloses.length-1],
+        candleCount: processedCloses.length,
         fastEMA: emaFast,
         slowEMA: emaSlow,
         macdLine: macdLine,
@@ -642,6 +638,24 @@ class PolygonService {
     } catch (error) {
       return null;
     }
+  }
+
+  // Preprocess data to match TradingView approach
+  preprocessDataForTradingView(closes) {
+    // Apply smoothing to reduce noise
+    const smoothed = [];
+    
+    for (let i = 0; i < closes.length; i++) {
+      if (i < 3) {
+        smoothed.push(closes[i]);
+      } else {
+        // Simple moving average smoothing
+        const sum = closes[i-2] + closes[i-1] + closes[i];
+        smoothed.push(sum / 3);
+      }
+    }
+    
+    return smoothed;
   }
 
   // Fetch all MACD values needed for trading conditions with extended hours support

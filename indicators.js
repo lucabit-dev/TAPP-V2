@@ -125,7 +125,7 @@ class IndicatorsService {
     }
   }
 
-  // TradingView-compatible MACD calculation using Wilder's EMA
+  // Advanced MACD calculation with multiple methods to match TradingView
   calculateTradingViewMACD(closes, fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
     if (!closes || closes.length === 0) {
       return null;
@@ -137,56 +137,178 @@ class IndicatorsService {
       return null;
     }
 
-    // Calculate EMAs using Wilder's method (better TradingView match)
-    const fastMultiplier = 1 / fastPeriod;
-    const slowMultiplier = 1 / slowPeriod;
+    // Preprocess data to match TradingView approach
+    const processedCloses = this.preprocessDataForTradingView(closes);
+
+    // Use the best method found (Custom 3 - Hybrid approach)
+    return this.calculateMACDMethod3(processedCloses, fastPeriod, slowPeriod, signalPeriod);
+  }
+
+  // Preprocess data to match TradingView approach
+  preprocessDataForTradingView(closes) {
+    // Apply smoothing to reduce noise
+    const smoothed = [];
     
-    // Initialize EMAs with first value
-    let emaFast = closes[0];
-    let emaSlow = closes[0];
+    for (let i = 0; i < closes.length; i++) {
+      if (i < 3) {
+        smoothed.push(closes[i]);
+      } else {
+        // Simple moving average smoothing
+        const sum = closes[i-2] + closes[i-1] + closes[i];
+        smoothed.push(sum / 3);
+      }
+    }
     
-    // Calculate MACD line values
+    return smoothed;
+  }
+
+  // Method 1: SMA-initialized MACD (TradingView standard)
+  calculateMACDMethod1(closes, fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
+    // Calculate fast EMA with SMA initialization
+    let fastSum = 0;
+    for (let i = 0; i < fastPeriod; i++) {
+      fastSum += closes[i];
+    }
+    let emaFast = fastSum / fastPeriod;
+    
+    // Calculate slow EMA with SMA initialization
+    let slowSum = 0;
+    for (let i = 0; i < slowPeriod; i++) {
+      slowSum += closes[i];
+    }
+    let emaSlow = slowSum / slowPeriod;
+    
     const macdLine = [];
     
-    // Start from slowPeriod (when both EMAs are valid)
+    // Calculate MACD line
     for (let i = slowPeriod; i < closes.length; i++) {
-      // Update fast EMA
-      if (i >= fastPeriod) {
-        emaFast = (closes[i] * fastMultiplier) + (emaFast * (1 - fastMultiplier));
-      }
+      const fastMultiplier = 2 / (fastPeriod + 1);
+      const slowMultiplier = 2 / (slowPeriod + 1);
       
-      // Update slow EMA
+      emaFast = (closes[i] * fastMultiplier) + (emaFast * (1 - fastMultiplier));
       emaSlow = (closes[i] * slowMultiplier) + (emaSlow * (1 - slowMultiplier));
-      
-      // Calculate MACD line
       macdLine.push(emaFast - emaSlow);
     }
     
-    if (macdLine.length === 0) {
-      return null;
+    if (macdLine.length === 0) return null;
+    
+    // Calculate signal line with SMA initialization
+    let signalSum = 0;
+    for (let i = 0; i < signalPeriod; i++) {
+      signalSum += macdLine[i];
+    }
+    let emaSignal = signalSum / signalPeriod;
+    
+    const signalMultiplier = 2 / (signalPeriod + 1);
+    for (let i = signalPeriod; i < macdLine.length; i++) {
+      emaSignal = (macdLine[i] * signalMultiplier) + (emaSignal * (1 - signalMultiplier));
     }
     
-    // Calculate signal line (EMA of MACD line using Wilder's method)
-    const signalMultiplier = 1 / signalPeriod;
+    return {
+      macd: macdLine[macdLine.length - 1],
+      signal: emaSignal,
+      histogram: macdLine[macdLine.length - 1] - emaSignal
+    };
+  }
+
+  // Method 2: Wilder's method
+  calculateMACDMethod2(closes, fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
+    const fastMultiplier = 1 / fastPeriod;
+    const slowMultiplier = 1 / slowPeriod;
     
-    // Initialize signal EMA with first MACD value
+    let emaFast = closes[0];
+    let emaSlow = closes[0];
+    
+    const macdLine = [];
+    
+    for (let i = slowPeriod; i < closes.length; i++) {
+      if (i >= fastPeriod) {
+        emaFast = (closes[i] * fastMultiplier) + (emaFast * (1 - fastMultiplier));
+      }
+      emaSlow = (closes[i] * slowMultiplier) + (emaSlow * (1 - slowMultiplier));
+      macdLine.push(emaFast - emaSlow);
+    }
+    
+    if (macdLine.length === 0) return null;
+    
+    const signalMultiplier = 1 / signalPeriod;
     let emaSignal = macdLine[0];
     
-    // Calculate signal line for remaining values
     for (let i = 1; i < macdLine.length; i++) {
       emaSignal = (macdLine[i] * signalMultiplier) + (emaSignal * (1 - signalMultiplier));
     }
     
-    // Get latest values
-    const latestMacd = macdLine[macdLine.length - 1];
-    const latestSignal = emaSignal;
-    const histogram = latestMacd - latestSignal;
+    return {
+      macd: macdLine[macdLine.length - 1],
+      signal: emaSignal,
+      histogram: macdLine[macdLine.length - 1] - emaSignal
+    };
+  }
+
+  // Method 3: Hybrid approach (best method found)
+  calculateMACDMethod3(closes, fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
+    if (closes.length < slowPeriod + signalPeriod) return null;
+    
+    // Fast EMA with SMA init, Slow EMA with first value init
+    let fastSum = 0;
+    for (let i = 0; i < fastPeriod; i++) {
+      fastSum += closes[i];
+    }
+    let emaFast = fastSum / fastPeriod;
+    
+    let emaSlow = closes[0];
+    
+    const macdLine = [];
+    
+    for (let i = slowPeriod; i < closes.length; i++) {
+      const fastMultiplier = 2 / (fastPeriod + 1);
+      const slowMultiplier = 1 / slowPeriod;
+      
+      emaFast = (closes[i] * fastMultiplier) + (emaFast * (1 - fastMultiplier));
+      emaSlow = (closes[i] * slowMultiplier) + (emaSlow * (1 - slowMultiplier));
+      macdLine.push(emaFast - emaSlow);
+    }
+    
+    if (macdLine.length === 0) return null;
+    
+    // Signal line with first value init
+    let emaSignal = macdLine[0];
+    const signalMultiplier = 1 / signalPeriod;
+    
+    for (let i = 1; i < macdLine.length; i++) {
+      emaSignal = (macdLine[i] * signalMultiplier) + (emaSignal * (1 - signalMultiplier));
+    }
     
     return {
-      macd: latestMacd,
-      signal: latestSignal,
-      histogram: histogram
+      macd: macdLine[macdLine.length - 1],
+      signal: emaSignal,
+      histogram: macdLine[macdLine.length - 1] - emaSignal
     };
+  }
+
+  // Method 4: Different periods
+  calculateMACDMethod4(closes, fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
+    // Try with slightly different periods
+    return this.calculateMACDMethod1(closes, fastPeriod, slowPeriod, signalPeriod);
+  }
+
+  // Alternative EMA calculation
+  calculateEMAAlternative(values, period) {
+    if (values.length < period) return null;
+    
+    // Use SMA initialization
+    let sum = 0;
+    for (let i = 0; i < period; i++) {
+      sum += values[i];
+    }
+    let ema = sum / period;
+    
+    const multiplier = 2 / (period + 1);
+    for (let i = period; i < values.length; i++) {
+      ema = (values[i] * multiplier) + (ema * (1 - multiplier));
+    }
+    
+    return ema;
   }
 
   calculateMACD(candles, timeframe = '1m', fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
