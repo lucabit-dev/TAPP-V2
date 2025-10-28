@@ -1,29 +1,13 @@
+const { calculateEMA, calculateMACDSingle, calculateMultipleEMAs } = require('./utils/technical_indicators/macd_polygon');
+
 class IndicatorsService {
   constructor() {
     // All calculations are done manually, no need for instance variables
   }
 
-  // Adaptive EMA calculation that tries different methods to match TradingView
+  // Use Polygon's exact EMA calculation
   calculateAdaptiveEMA(values, period) {
-    if (!values || values.length === 0) {
-      return null;
-    }
-
-    if (values.length < period) {
-      return null;
-    }
-
-    // Method 1: TradingView standard (first value initialization)
-    const method1 = this.calculateTradingViewEMA(values, period);
-    
-    // Method 2: SMA initialization for first period
-    const method2 = this.calculateSMAInitializedEMA(values, period);
-    
-    // Method 3: Wilder's smoothing (different multiplier) - BEST MATCH
-    const method3 = this.calculateWildersEMA(values, period);
-    
-    // Use Wilder's method as it consistently matches TradingView better
-    return method3;
+    return calculateEMA(values, period);
   }
 
   // SMA-initialized EMA (alternative method)
@@ -110,38 +94,23 @@ class IndicatorsService {
     }
     
     try {
-      
-      // Use adaptive EMA calculation to find best match
-      const result = this.calculateAdaptiveEMA(closes, period);
+      // Use Polygon's exact EMA calculation
+      const result = calculateEMA(closes, period);
       
       if (result === null) {
         return null;
       }
       
-      
       return result;
     } catch (error) {
+      console.error('Error calculating EMA:', error);
       return null;
     }
   }
 
-  // Advanced MACD calculation with multiple methods to match TradingView
+  // Use Polygon's exact MACD calculation
   calculateTradingViewMACD(closes, fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
-    if (!closes || closes.length === 0) {
-      return null;
-    }
-
-    // Need enough data for slowPeriod + signalPeriod
-    const minCandles = slowPeriod + signalPeriod;
-    if (closes.length < minCandles) {
-      return null;
-    }
-
-    // Preprocess data to match TradingView approach
-    const processedCloses = this.preprocessDataForTradingView(closes);
-
-    // Use the best method found (Custom 3 - Hybrid approach)
-    return this.calculateMACDMethod3(processedCloses, fastPeriod, slowPeriod, signalPeriod);
+    return calculateMACDSingle(closes, fastPeriod, slowPeriod, signalPeriod);
   }
 
   // Preprocess data to match TradingView approach
@@ -325,17 +294,16 @@ class IndicatorsService {
     }
     
     try {
-      
-      // Use TradingView-compatible MACD calculation
-      const result = this.calculateTradingViewMACD(closes, fastPeriod, slowPeriod, signalPeriod);
+      // Use Polygon's exact MACD calculation
+      const result = calculateMACDSingle(closes, fastPeriod, slowPeriod, signalPeriod);
       
       if (result === null) {
         return null;
       }
       
-      
       return result;
     } catch (error) {
+      console.error('Error calculating MACD:', error);
       return null;
     }
   }

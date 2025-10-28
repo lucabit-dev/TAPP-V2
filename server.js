@@ -9,6 +9,7 @@ const PolygonService = require('./polygonService');
 const IndicatorsService = require('./indicators');
 const ConditionsService = require('./conditions');
 const FloatSegmentationService = require('./api/floatSegmentationService');
+const MACDEMAVerificationService = require('./macdEmaVerificationService');
 
 const app = express();
 const server = http.createServer(app);
@@ -32,6 +33,7 @@ const polygonService = new PolygonService();
 const indicatorsService = new IndicatorsService();
 const conditionsService = new ConditionsService();
 const floatService = new FloatSegmentationService();
+const verificationService = new MACDEMAVerificationService();
 
 // Alerts manual control state
 let alertsEnabled = false;
@@ -1841,14 +1843,88 @@ app.get('/api/chartswatcher/status', (req, res) => {
   });
 });
 
+// Helper function to recalculate indicators for a symbol
+async function recalculateIndicatorsForSymbol(symbol, groupKey) {
+  try {
+    // Fetch candles using extended hours
+    const extendedData1m = await polygonService.fetchExtendedHoursCandles(symbol, 1, true, 7);
+    const extendedData5m = await polygonService.fetchExtendedHoursCandles(symbol, 5, true, 7);
+    
+    if (!extendedData1m?.candles || extendedData5m?.candles || 
+        extendedData1m.candles.length === 0 || extendedData5m.candles.length === 0) {
+      return null;
+    }
+
+    const candles1m = extendedData1m.candles;
+    const candles5m = extendedData5m.candles;
+
+    // Calculate indicators using Polygon-compliant logic
+    const isExtendedHours = new Date().getHours() >= 4 && new Date().getHours() < 20;
+    const indicatorData = await indicatorsService.calculateAllIndicators(symbol, candles1m, candles5m, isExtendedHours);
+
+    return indicatorData;
+  } catch (error) {
+    console.error(`[Toplist] Error recalculating indicators for ${symbol}:`, error.message);
+    return null;
+  }
+}
+
 // Toplist data endpoint
 app.get('/api/toplist', async (req, res) => {
   try {
     const toplistData = await toplistService.fetchToplistData();
+    
+    // Recalculate indicators for all symbols using Polygon-compliant logic
+    const enrichedToplistData = {};
+    
+    for (const [configId, rows] of Object.entries(toplistData)) {
+      enrichedToplistData[configId] = await Promise.all(rows.map(async (row) => {
+        const symbol = row.symbol || (Array.isArray(row.columns) ? (row.columns.find(c => c.key === 'SymbolColumn')?.value) : null);
+        
+        if (!symbol) return row;
+
+        try {
+          // Recalculate indicators for this symbol
+          const indicatorData = await recalculateIndicatorsForSymbol(symbol, configId);
+          
+          if (indicatorData && indicatorData.indicators) {
+            // Add recalculated indicator values to the row
+            const newColumns = [...(row.columns || [])];
+            
+            // Update MACD 1m values
+            if (indicatorData.indicators.macd1m) {
+              updateColumn(newColumns, 'MACD1mColumn', indicatorData.indicators.macd1m.macd);
+              updateColumn(newColumns, 'MACD1mSignalColumn', indicatorData.indicators.macd1m.signal);
+              updateColumn(newColumns, 'MACD1mHistogramColumn', indicatorData.indicators.macd1m.histogram);
+            }
+            
+            // Update MACD 5m values
+            if (indicatorData.indicators.macd5m) {
+              updateColumn(newColumns, 'MACD5mColumn', indicatorData.indicators.macd5m.macd);
+              updateColumn(newColumns, 'MACD5mSignalColumn', indicatorData.indicators.macd5m.signal);
+              updateColumn(newColumns, 'MACD5mHistogramColumn', indicatorData.indicators.macd5m.histogram);
+            }
+            
+            // Update EMA values
+            if (indicatorData.indicators.ema1m18 !== undefined) updateColumn(newColumns, 'EMA18_1m', indicatorData.indicators.ema1m18);
+            if (indicatorData.indicators.ema1m200 !== undefined) updateColumn(newColumns, 'EMA200_1m', indicatorData.indicators.ema1m200);
+            if (indicatorData.indicators.ema5m18 !== undefined) updateColumn(newColumns, 'EMA18_5m', indicatorData.indicators.ema5m18);
+            if (indicatorData.indicators.ema5m200 !== undefined) updateColumn(newColumns, 'EMA200_5m', indicatorData.indicators.ema5m200);
+            
+            row.columns = newColumns;
+          }
+        } catch (error) {
+          console.error(`[Toplist] Error enriching ${symbol}:`, error.message);
+        }
+        
+        return row;
+      }));
+    }
+    
     res.json({
       success: true,
-      data: toplistData,
-      count: Object.values(toplistData).reduce((acc, rows) => acc + rows.length, 0)
+      data: enrichedToplistData,
+      count: Object.values(enrichedToplistData).reduce((acc, rows) => acc + rows.length, 0)
     });
   } catch (error) {
     res.status(500).json({
@@ -1858,6 +1934,18 @@ app.get('/api/toplist', async (req, res) => {
     });
   }
 });
+
+// Helper function to update or add a column
+function updateColumn(columns, key, value) {
+  if (value === null || value === undefined) return;
+  
+  const existingIndex = columns.findIndex(c => c.key === key);
+  if (existingIndex >= 0) {
+    columns[existingIndex].value = value.toFixed(6);
+  } else {
+    columns.push({ key, value: value.toFixed(6), text_color: '#cccccc', color: '#cccccc' });
+  }
+}
 
 // Restart toplist WebSocket connection
 app.post('/api/toplist/restart', async (req, res) => {
@@ -2190,6 +2278,216 @@ app.get('/api/stock/:symbol', async (req, res) => {
   }
 });
 
+// ============================================
+// MACD/EMA Verification System
+// ============================================
+
+// Default symbols to monitor for verification
+const VERIFICATION_SYMBOLS = verificationService.getDefaultSymbols();
+let verificationInterval = null;
+
+/**
+ * Collect and log verification data for all tracking symbols
+ */
+async function collectVerificationData() {
+  const timestamp = new Date().toISOString();
+  console.log(`[Verification] Collecting data at ${timestamp}`);
+
+  let successCount = 0;
+  let errorCount = 0;
+
+  // Set tracking symbols if not already set
+  if (verificationService.trackingSymbols.length === 0) {
+    verificationService.trackingSymbols = VERIFICATION_SYMBOLS;
+    console.log(`[Verification] Set tracking symbols: ${VERIFICATION_SYMBOLS.join(', ')}`);
+  }
+
+  for (const symbol of VERIFICATION_SYMBOLS) {
+    try {
+      console.log(`[Verification] Fetching data for ${symbol}...`);
+      
+      // Use extended hours endpoint to get the most recent data including current candle
+      const extendedData1m = await polygonService.fetchExtendedHoursCandles(symbol, 1, true, 7);
+      const extendedData5m = await polygonService.fetchExtendedHoursCandles(symbol, 5, true, 7);
+      
+      const candles1m = extendedData1m?.candles || [];
+      const candles5m = extendedData5m?.candles || [];
+
+      if (!candles1m || !candles5m || candles1m.length === 0 || candles5m.length === 0) {
+        console.log(`[Verification] ⚠️ Skipping ${symbol} - insufficient data (1m: ${candles1m?.length || 0}, 5m: ${candles5m?.length || 0})`);
+        errorCount++;
+        continue;
+      }
+
+      // Get latest candle timestamp to verify fresh data
+      const latest1mTime = candles1m.length > 0 ? candles1m[candles1m.length - 1].timestamp : null;
+      const latest5mTime = candles5m.length > 0 ? candles5m[candles5m.length - 1].timestamp : null;
+      
+      console.log(`[Verification] ✓ Data fetched for ${symbol} (1m: ${candles1m.length} candles, latest: ${latest1mTime?.toISOString()}, 5m: ${candles5m.length} candles, latest: ${latest5mTime?.toISOString()})`);
+
+      // Calculate indicators
+      const isExtendedHours = new Date().getHours() >= 4 && new Date().getHours() < 20;
+      const indicatorData = await indicatorsService.calculateAllIndicators(symbol, candles1m, candles5m, isExtendedHours);
+
+      if (indicatorData && indicatorData.indicators) {
+        console.log(`[Verification] 📊 Indicators calculated for ${symbol}:`);
+        console.log(`[Verification]   MACD 1m: ${indicatorData.indicators.macd1m?.macd?.toFixed(4)}, Signal: ${indicatorData.indicators.macd1m?.signal?.toFixed(4)}, Histogram: ${indicatorData.indicators.macd1m?.histogram?.toFixed(4)}`);
+        console.log(`[Verification]   MACD 5m: ${indicatorData.indicators.macd5m?.macd?.toFixed(4)}, Signal: ${indicatorData.indicators.macd5m?.signal?.toFixed(4)}, Histogram: ${indicatorData.indicators.macd5m?.histogram?.toFixed(4)}`);
+        console.log(`[Verification]   EMA 18 1m: ${indicatorData.indicators.ema1m18?.toFixed(6)}, EMA 200 1m: ${indicatorData.indicators.ema1m200?.toFixed(6)}`);
+        console.log(`[Verification]   Close: ${indicatorData.lastCandle?.close?.toFixed(2)}`);
+        
+        // Log the data
+        verificationService.logVerificationData(symbol, indicatorData);
+        
+        console.log(`[Verification] ✅ Successfully logged data for ${symbol}`);
+        successCount++;
+      } else {
+        console.log(`[Verification] ⚠️ Skipping ${symbol} - no indicator data calculated`);
+        errorCount++;
+      }
+    } catch (error) {
+      console.error(`[Verification] ✗ Error collecting data for ${symbol}:`, error.message);
+      errorCount++;
+    }
+  }
+
+  console.log(`[Verification] Collection completed: ${successCount} success, ${errorCount} errors`);
+}
+
+/**
+ * Start verification monitoring
+ */
+function startVerificationMonitoring() {
+  if (verificationInterval) {
+    console.log('[Verification] Monitoring already active');
+    return;
+  }
+
+  console.log(`[Verification] Starting monitoring for symbols: ${VERIFICATION_SYMBOLS.join(', ')}`);
+  
+  // Mark as monitoring immediately
+  verificationService.isMonitoring = true;
+  
+  // Collect data immediately for all symbols
+  console.log('[Verification] Collecting initial data...');
+  collectVerificationData().then(() => {
+    console.log('[Verification] Initial data collection completed');
+  }).catch(error => {
+    console.error('[Verification] Error in initial data collection:', error);
+  });
+
+  // Start the monitoring interval (every minute)
+  verificationInterval = setInterval(() => {
+    console.log('[Verification] Collecting periodic data...');
+    collectVerificationData();
+  }, 60 * 1000);
+
+  console.log('[Verification] Monitoring started - collecting data every 60 seconds');
+}
+
+/**
+ * Stop verification monitoring
+ */
+function stopVerificationMonitoring() {
+  if (verificationInterval) {
+    clearInterval(verificationInterval);
+    verificationInterval = null;
+  }
+  verificationService.isMonitoring = false;
+  console.log('[Verification] Monitoring stopped');
+}
+
+// ============================================
+// Verification API Endpoints
+// ============================================
+
+app.get('/api/verification/status', (req, res) => {
+  const stats = verificationService.getStatistics();
+  const today = new Date().toISOString().split('T')[0];
+
+  res.json({
+    monitoring: verificationService.isMonitoring || false,
+    symbols: VERIFICATION_SYMBOLS,
+    statistics: stats,
+    logFile: `logs/macd_ema_verification/verification_${today}.json`
+  });
+});
+
+app.get('/api/verification/start', (req, res) => {
+  if (verificationService.isMonitoring) {
+    res.json({ message: 'Monitoring already active', active: true });
+    return;
+  }
+
+  startVerificationMonitoring();
+
+  res.json({
+    message: 'Verification monitoring started',
+    symbols: VERIFICATION_SYMBOLS,
+    interval: '60 seconds'
+  });
+});
+
+app.get('/api/verification/stop', (req, res) => {
+  stopVerificationMonitoring();
+
+  res.json({
+    message: 'Verification monitoring stopped',
+    active: false
+  });
+});
+
+app.get('/api/verification/export/:date?', (req, res) => {
+  try {
+    const date = req.params.date || null;
+    const csvFile = verificationService.exportAsCSV(date);
+    res.download(csvFile);
+  } catch (error) {
+    res.status(404).json({ error: error.message });
+  }
+});
+
+app.get('/api/verification/data', (req, res) => {
+  try {
+    const { symbol, date } = req.query;
+    let data = verificationService.getAllData(date);
+    
+    // Sort by timestamp descending (newest first)
+    data = data.sort((a, b) => {
+      const timeA = new Date(a.timestamp).getTime();
+      const timeB = new Date(b.timestamp).getTime();
+      return timeB - timeA;
+    });
+    
+    if (symbol) {
+      const filteredData = data.filter(entry => entry.symbol === symbol.toUpperCase());
+      res.json({ success: true, data: filteredData });
+    } else {
+      res.json({ success: true, data: data });
+    }
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/verification/collect-now', async (req, res) => {
+  try {
+    console.log('[Verification] Manual collection triggered');
+    await collectVerificationData();
+    res.json({ 
+      success: true, 
+      message: 'Data collection completed',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      success: false, 
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
 // Error handling middleware
 app.use((error, req, res, next) => {
   res.status(500).json({
@@ -2206,7 +2504,10 @@ app.use((req, res) => {
   });
 });
 
+// ============================================
 // Start server
+// ============================================
+
 server.listen(PORT, () => {
   console.log(`🚀 Trading Alerts API server running on port ${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
@@ -2219,11 +2520,22 @@ server.listen(PORT, () => {
   console.log(`🔍 Manual analysis: http://localhost:${PORT}/api/analyze/{SYMBOL}`);
   console.log(`📊 Condition stats: http://localhost:${PORT}/api/statistics/conditions`);
   console.log(`🌐 WebSocket server: ws://localhost:${PORT}`);
+  console.log(`\n🔬 MACD/EMA Verification:`);
+  console.log(`   Status: http://localhost:${PORT}/api/verification/status`);
+  console.log(`   Start: http://localhost:${PORT}/api/verification/start`);
+  console.log(`   Stop: http://localhost:${PORT}/api/verification/stop`);
+  console.log(`   Export: http://localhost:${PORT}/api/verification/export`);
+
+  // Auto-start verification monitoring (can be controlled via API)
+  if (process.env.ENABLE_VERIFICATION === 'true') {
+    startVerificationMonitoring();
+  }
 });
 
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n🛑 Received SIGINT. Graceful shutdown...');
+  stopVerificationMonitoring();
   chartsWatcherService.disconnect();
   toplistService.disconnect();
   if (wsHeartbeatInterval) { clearInterval(wsHeartbeatInterval); wsHeartbeatInterval = null; }
@@ -2236,6 +2548,7 @@ process.on('SIGINT', () => {
 
 process.on('SIGTERM', () => {
   console.log('\n🛑 Received SIGTERM. Graceful shutdown...');
+  stopVerificationMonitoring();
   chartsWatcherService.disconnect();
   toplistService.disconnect();
   if (wsHeartbeatInterval) { clearInterval(wsHeartbeatInterval); wsHeartbeatInterval = null; }

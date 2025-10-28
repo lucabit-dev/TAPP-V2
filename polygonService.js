@@ -1,4 +1,5 @@
 const fetch = require('node-fetch');
+const { calculateEMA, calculateMACDSingle } = require('./utils/technical_indicators/macd_polygon');
 
 class PolygonService {
   constructor() {
@@ -566,7 +567,7 @@ class PolygonService {
     }
   }
 
-  // Calculate MACD using hybrid method (best TradingView match)
+  // Calculate MACD using Polygon's exact formula
   calculateMACDWithEMA(candles, timeframe = '1m', fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
     if (!candles || candles.length === 0) {
       return null;
@@ -581,61 +582,23 @@ class PolygonService {
     }
     
     try {
-      // Preprocess data to match TradingView approach
-      const processedCloses = this.preprocessDataForTradingView(closes);
+      // Use Polygon's exact MACD calculation
+      const result = calculateMACDSingle(closes, fastPeriod, slowPeriod, signalPeriod);
       
-      // Fast EMA with SMA init, Slow EMA with first value init
-      let fastSum = 0;
-      for (let i = 0; i < fastPeriod; i++) {
-        fastSum += processedCloses[i];
-      }
-      let emaFast = fastSum / fastPeriod;
-      
-      let emaSlow = processedCloses[0];
-      
-      const macdLine = [];
-      
-      // Calculate MACD line
-      for (let i = slowPeriod; i < processedCloses.length; i++) {
-        const fastMultiplier = 2 / (fastPeriod + 1);
-        const slowMultiplier = 1 / slowPeriod;
-        
-        emaFast = (processedCloses[i] * fastMultiplier) + (emaFast * (1 - fastMultiplier));
-        emaSlow = (processedCloses[i] * slowMultiplier) + (emaSlow * (1 - slowMultiplier));
-        macdLine.push(emaFast - emaSlow);
-      }
-      
-      if (macdLine.length === 0) {
+      if (!result) {
         return null;
       }
       
-      // Signal line with first value init
-      let emaSignal = macdLine[0];
-      const signalMultiplier = 1 / signalPeriod;
-      
-      for (let i = 1; i < macdLine.length; i++) {
-        emaSignal = (macdLine[i] * signalMultiplier) + (emaSignal * (1 - signalMultiplier));
-      }
-      
-      // Get latest values
-      const latestMACD = macdLine[macdLine.length - 1];
-      const latestSignal = emaSignal;
-      const histogram = latestMACD - latestSignal;
-      
-      
       return {
-        macd: latestMACD,
-        signal: latestSignal,
-        histogram: histogram,
+        macd: result.macd,
+        signal: result.signal,
+        histogram: result.histogram,
         timestamp: new Date(),
-        lastClose: processedCloses[processedCloses.length-1],
-        candleCount: processedCloses.length,
-        fastEMA: emaFast,
-        slowEMA: emaSlow,
-        macdLine: macdLine,
-        signalLine: latestSignal
+        lastClose: closes[closes.length - 1],
+        candleCount: closes.length
       };
     } catch (error) {
+      console.error('Error calculating MACD with Polygon formula:', error);
       return null;
     }
   }

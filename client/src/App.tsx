@@ -7,6 +7,7 @@ const FloatListsSection = lazy(() => import('./components/FloatListsSection'));
 const FloatConfigPanel = lazy(() => import('./components/FloatConfigPanel'));
 const BuyListSection = lazy(() => import('./components/BuyListSection'));
 const FloatRawListsSection = lazy(() => import('./components/FloatRawListsSection'));
+const MACDEMAVerification = lazy(() => import('./components/MACDEMAVerification'));
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
@@ -97,7 +98,7 @@ function App() {
   const [newValidAlertsCount, setNewValidAlertsCount] = useState(0);
   const [conditionStats, setConditionStats] = useState<any>(null);
   const [showStats, setShowStats] = useState(false);
-  const [selectedTab, setSelectedTab] = useState<'all' | 'valid' | 'filtered' | 'dashboard' | 'testlist' | 'config-float' | 'listas-float-raw' | 'buy-list'>('dashboard');
+  const [selectedTab, setSelectedTab] = useState<'all' | 'valid' | 'filtered' | 'dashboard' | 'testlist' | 'config-float' | 'listas-float-raw' | 'buy-list' | 'verification'>('dashboard');
   const [manualSymbol, setManualSymbol] = useState('');
   const [manualAnalysis, setManualAnalysis] = useState<any>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -805,6 +806,26 @@ function App() {
             ))}
           </div>
 
+          {/* Tools group */}
+          <div className="flex items-center space-x-1 ml-6">
+            <span className="text-xs text-[#808080] mr-2">Tools</span>
+            {[
+              { key: 'verification', label: '🔬 Verification', count: 0 }
+            ].map(tab => (
+              <button
+                key={tab.key}
+                onClick={() => setSelectedTab(tab.key as any)}
+                className={`px-3 py-2 text-sm font-medium transition-all rounded-md ${
+                  selectedTab === tab.key
+                    ? 'text-[#ffffff] bg-[#2d2d30]'
+                    : 'text-[#969696] hover:text-[#cccccc]'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
           {/* Alerts toggle */}
           <div className="ml-auto flex items-center space-x-2">
             <button
@@ -1142,6 +1163,17 @@ function App() {
             }
           >
             <BuyListSection />
+          </Suspense>
+        ) : selectedTab === 'verification' ? (
+          <Suspense 
+            fallback={
+              <div className="flex items-center justify-center h-full text-[#969696]">
+                <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-[#4ec9b0] mr-2"></div>
+                Loading verification...
+              </div>
+            }
+          >
+            <MACDEMAVerification />
           </Suspense>
         ) : (
           <div className="h-full flex">
