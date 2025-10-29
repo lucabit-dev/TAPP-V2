@@ -447,163 +447,8 @@ toplistService.connect().catch(error => {
   console.error('Failed to initialize Toplist connection:', error);
 });
 
-// ============================================
-// Trading Station WebSocket Proxy (Positions & Orders)
-// ============================================
-
-const PNL_API_KEY = process.env.PNL_API_KEY || 'ruXNebYJhJ09H6D8lyQCKSfr9gcDvxQo';
-const TRADING_STATION_WS_BASE = 'wss://sections-bot.inbitme.com/ws';
-
-// Store active proxy connections: streamType -> Set of client connections
-const proxyConnections = {
-  positions: new Map(), // externalWS -> Set of clientWS
-  orders: new Map()
-};
-
-// Maintain one external WebSocket connection per stream type
-const externalConnections = {
-  positions: null,
-  orders: null
-};
-
-/**
- * Create or reuse external WebSocket connection for a stream type
- */
-function getOrCreateExternalConnection(streamType) {
-  if (externalConnections[streamType] && 
-      externalConnections[streamType].readyState === WebSocket.OPEN) {
-    return externalConnections[streamType];
-  }
-
-  const url = `${TRADING_STATION_WS_BASE}/${streamType}?api_key=${encodeURIComponent(PNL_API_KEY)}`;
-  console.log(`🔌 Creating external WebSocket connection for ${streamType}...`);
-  
-  const externalWs = new WebSocket(url);
-  
-  externalWs.on('open', () => {
-    console.log(`✅ External ${streamType} WebSocket connected`);
-  });
-  
-  externalWs.on('message', (data) => {
-    // Forward message to all connected clients
-    const clients = proxyConnections[streamType];
-    if (clients) {
-      clients.forEach((clientSet) => {
-        clientSet.forEach((clientWs) => {
-          if (clientWs.readyState === WebSocket.OPEN) {
-            try {
-              clientWs.send(data);
-            } catch (err) {
-              console.error(`Error forwarding ${streamType} message to client:`, err);
-            }
-          }
-        });
-      });
-    }
-  });
-  
-  externalWs.on('error', (error) => {
-    console.error(`❌ External ${streamType} WebSocket error:`, error);
-  });
-  
-  externalWs.on('close', () => {
-    console.log(`🔌 External ${streamType} WebSocket closed, will reconnect on next client connection`);
-    externalConnections[streamType] = null;
-    
-    // Clear all client connections for this stream
-    if (proxyConnections[streamType]) {
-      proxyConnections[streamType].forEach((clientSet) => {
-        clientSet.forEach((clientWs) => {
-          try {
-            clientWs.close();
-          } catch {}
-        });
-      });
-      proxyConnections[streamType].clear();
-    }
-  });
-  
-  externalConnections[streamType] = externalWs;
-  proxyConnections[streamType].set(externalWs, new Set());
-  
-  return externalWs;
-}
-
-/**
- * Handle client WebSocket connection for positions/orders proxy
- */
-function handleProxyConnection(clientWs, streamType) {
-  console.log(`📥 New client connected to ${streamType} proxy`);
-  
-  // Get or create external connection
-  const externalWs = getOrCreateExternalConnection(streamType);
-  const clientSet = proxyConnections[streamType].get(externalWs) || new Set();
-  clientSet.add(clientWs);
-  proxyConnections[streamType].set(externalWs, clientSet);
-  
-  // Forward messages from client to external (if needed - currently not used)
-  clientWs.on('message', (data) => {
-    // Clients typically don't send messages, but if they do, we can forward
-    if (externalWs.readyState === WebSocket.OPEN) {
-      try {
-        externalWs.send(data);
-      } catch (err) {
-        console.error(`Error forwarding client message to external ${streamType}:`, err);
-      }
-    }
-  });
-  
-  // Remove client on disconnect
-  clientWs.on('close', () => {
-    console.log(`📤 Client disconnected from ${streamType} proxy`);
-    const set = proxyConnections[streamType].get(externalWs);
-    if (set) {
-      set.delete(clientWs);
-      if (set.size === 0) {
-        // No more clients, but keep external connection open for a bit
-        // Close after 30 seconds if no new clients connect
-        setTimeout(() => {
-          const currentSet = proxyConnections[streamType].get(externalWs);
-          if (!currentSet || currentSet.size === 0) {
-            console.log(`🔄 Closing idle external ${streamType} connection`);
-            if (externalWs.readyState === WebSocket.OPEN) {
-              externalWs.close();
-            }
-            externalConnections[streamType] = null;
-            proxyConnections[streamType].delete(externalWs);
-          }
-        }, 30000);
-      }
-    }
-  });
-  
-  clientWs.on('error', (error) => {
-    console.error(`Client ${streamType} WebSocket error:`, error);
-    const set = proxyConnections[streamType].get(externalWs);
-    if (set) {
-      set.delete(clientWs);
-    }
-  });
-}
-
 // WebSocket connection handling for frontend clients
-wss.on('connection', (ws, req) => {
-  // Check if this is a proxy connection request (positions or orders)
-  const pathname = req.url || '/';
-  
-  // Handle positions proxy
-  if (pathname === '/ws/positions' || pathname === '/ws/positions/') {
-    handleProxyConnection(ws, 'positions');
-    return;
-  }
-  
-  // Handle orders proxy
-  if (pathname === '/ws/orders' || pathname === '/ws/orders/') {
-    handleProxyConnection(ws, 'orders');
-    return;
-  }
-  
-  // Default: Alert WebSocket handling
+wss.on('connection', (ws) => {
   // Track liveness for heartbeat
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
@@ -2914,33 +2759,31 @@ server.listen(PORT, () => {
 });
 
 // Graceful shutdown
-function shutdown() {
-  console.log('\n🛑 Graceful shutdown...');
+process.on('SIGINT', () => {
+  console.log('\n🛑 Received SIGINT. Graceful shutdown...');
   stopVerificationMonitoring();
   chartsWatcherService.disconnect();
   toplistService.disconnect();
-  
-  // Close external WebSocket connections
-  ['positions', 'orders'].forEach(streamType => {
-    if (externalConnections[streamType] && externalConnections[streamType].readyState === WebSocket.OPEN) {
-      try {
-        externalConnections[streamType].close();
-      } catch (err) {
-        console.error(`Error closing ${streamType} connection:`, err);
-      }
-    }
-  });
-  
   if (wsHeartbeatInterval) { clearInterval(wsHeartbeatInterval); wsHeartbeatInterval = null; }
   wss.close();
   server.close(() => {
     console.log('✅ Server closed');
     process.exit(0);
   });
-}
+});
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGTERM', () => {
+  console.log('\n🛑 Received SIGTERM. Graceful shutdown...');
+  stopVerificationMonitoring();
+  chartsWatcherService.disconnect();
+  toplistService.disconnect();
+  if (wsHeartbeatInterval) { clearInterval(wsHeartbeatInterval); wsHeartbeatInterval = null; }
+  wss.close();
+  server.close(() => {
+    console.log('✅ Server closed');
+    process.exit(0);
+  });
+});
 
 module.exports = app;
 

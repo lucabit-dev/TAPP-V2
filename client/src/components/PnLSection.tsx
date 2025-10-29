@@ -29,7 +29,8 @@ interface Position {
 const PnLSection: React.FC = () => {
   const [positions, setPositions] = React.useState<Map<string, Position>>(new Map());
   const [isConnected, setIsConnected] = React.useState(false);
-  const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
+  const API_KEY = import.meta.env.PNL_API_KEY; // Use env var with fallback
+  const WS_BASE_URL = import.meta.env.VITE_PNL_WS_BASE_URL || 'wss://sections-bot.inbitme.com';
   const [loading, setLoading] = React.useState(true); // Start with loading true
   const [initialLoad, setInitialLoad] = React.useState(true); // Track initial connection attempt
   const [error, setError] = React.useState<string | null>(null);
@@ -45,9 +46,17 @@ const PnLSection: React.FC = () => {
       connectionTimeoutRef.current = null;
     }
 
+    if (!API_KEY) {
+      setError('API key is required');
+      setLoading(false);
+      setInitialLoad(false);
+      return;
+    }
+
+    const url = `${WS_BASE_URL}/ws/positions?api_key=${encodeURIComponent(API_KEY)}`;
+    console.log('🔌 Connecting to positions WebSocket:', url.replace(API_KEY, '***'));
+    
     try {
-      // Connect to backend proxy (API key is handled server-side)
-      const url = `${WS_BASE_URL}/ws/positions`;
       setLoading(true);
       
       // Only clear error if not initial load (to avoid flashing errors)
@@ -110,6 +119,7 @@ const PnLSection: React.FC = () => {
 
       ws.onerror = (error) => {
         console.error('WebSocket error:', error);
+        console.error('Attempted connection URL:', url.replace(API_KEY, '***'));
         // Only show error after initial load is complete
         if (!initialLoad) {
           setError('Connection error. Reconnecting...');
@@ -160,7 +170,7 @@ const PnLSection: React.FC = () => {
       setLoading(false);
       setError('Failed to connect. Please try again.');
     }
-  }, [WS_BASE_URL, initialLoad]);
+  }, [API_KEY, WS_BASE_URL, initialLoad]);
 
   const disconnectWebSocket = React.useCallback(() => {
     if (wsRef.current) {

@@ -792,7 +792,7 @@ function App() {
           {/* Lists group */}
           <div className="flex items-center space-x-1 ml-6">
             <span className="text-xs text-[#808080] mr-2">Lists</span>
-            {[
+            {[ 
               { key: 'listas-float-raw', label: 'Listas FLOAT (RAW)', count: 0 },
               { key: 'config-float', label: 'Config FLOAT', count: 0 },
               { key: 'buy-list', label: 'Buy List', count: 0 },
@@ -1157,7 +1157,7 @@ function App() {
             fallback={
               <div className="flex items-center justify-center h-full text-[#969696]">
                 <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-[#4ec9b0] mr-2"></div>
-                Loading Orders section...
+                Loading Orders...
               </div>
             }
           >
