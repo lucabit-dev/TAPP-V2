@@ -1,4 +1,5 @@
 import React from 'react';
+import { formatTimeUTC4 } from '../utils/timeFormat';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
@@ -54,12 +55,7 @@ const BuyListSection: React.FC<Props> = ({ onSymbolClick }) => {
   const theme = 'bg-[#252526] text-[#cccccc] border-[#3e3e42]';
 
   const formatTime = (iso: string) => {
-    try {
-      const d = new Date(iso);
-      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    } catch {
-      return iso;
-    }
+    return formatTimeUTC4(iso, { includeSeconds: true, includeAMPM: true, includeET: true });
   };
 
   return (

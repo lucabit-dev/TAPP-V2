@@ -1,0 +1,463 @@
+import React from 'react';
+import { Virtuoso } from 'react-virtuoso';
+
+interface OrderLeg {
+  AssetType: string;
+  BuyOrSell: string;
+  ExecQuantity: string;
+  OpenOrClose: string;
+  QuantityOrdered: string;
+  QuantityRemaining: string;
+  Symbol: string;
+}
+
+interface Order {
+  OrderID: string;
+  AccountID: string;
+  Status: string;
+  StatusDescription: string;
+  OrderType: string;
+  LimitPrice: string;
+  FilledPrice: string;
+  OpenedDateTime: string;
+  Legs: OrderLeg[];
+  Routing: string;
+  Duration: string;
+  GoodTillDate: string;
+  CommissionFee: string;
+  UnbundledRouteFee: string;
+  Currency: string;
+  PriceUsedForBuyingPower: string;
+}
+
+const OrdersSection: React.FC = () => {
+  const [orders, setOrders] = React.useState<Map<string, Order>>(new Map());
+  const [isConnected, setIsConnected] = React.useState(false);
+  const API_KEY = import.meta.env.VITE_PNL_API_KEY || 'ruXNebYJhJ09H6D8lyQCKSfr9gcDvxQo'; // Use same env var as P&L
+  const [loading, setLoading] = React.useState(true); // Start with loading true
+  const [initialLoad, setInitialLoad] = React.useState(true); // Track initial connection attempt
+  const [error, setError] = React.useState<string | null>(null);
+  const wsRef = React.useRef<WebSocket | null>(null);
+  const reconnectAttemptsRef = React.useRef(0);
+  const reconnectTimerRef = React.useRef<number | null>(null);
+  const connectionTimeoutRef = React.useRef<number | null>(null);
+
+  const connectWebSocket = React.useCallback(() => {
+    // Clear any existing connection timeout
+    if (connectionTimeoutRef.current) {
+      window.clearTimeout(connectionTimeoutRef.current);
+      connectionTimeoutRef.current = null;
+    }
+
+    try {
+      const url = `wss://sections-bot.inbitme.com/ws/orders?api_key=${encodeURIComponent(API_KEY)}`;
+      setLoading(true);
+      
+      // Only clear error if not initial load (to avoid flashing errors)
+      if (!initialLoad) {
+        setError(null);
+      }
+      
+      const ws = new WebSocket(url);
+      wsRef.current = ws;
+
+      // Set a timeout for initial connection attempt (10 seconds)
+      if (initialLoad) {
+        connectionTimeoutRef.current = window.setTimeout(() => {
+          // Check if still not connected after timeout
+          if (wsRef.current?.readyState !== WebSocket.OPEN) {
+            setInitialLoad(false);
+            setLoading(false);
+            setError('Connection timeout. Please check your connection and try again.');
+          }
+        }, 10000);
+      }
+
+      ws.onopen = () => {
+        console.log('✅ Connected to orders WebSocket');
+        setIsConnected(true);
+        setLoading(false);
+        setInitialLoad(false);
+        setError(null);
+        reconnectAttemptsRef.current = 0;
+        
+        // Clear connection timeout
+        if (connectionTimeoutRef.current) {
+          window.clearTimeout(connectionTimeoutRef.current);
+          connectionTimeoutRef.current = null;
+        }
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          // Skip heartbeat messages and stream status messages
+          if (data.Heartbeat || data.StreamStatus) {
+            return;
+          }
+
+          // Handle order updates
+          if (data.OrderID) {
+            const order: Order = data;
+            setOrders(prev => {
+              const newMap = new Map(prev);
+              newMap.set(order.OrderID, order);
+              return newMap;
+            });
+          }
+        } catch (err) {
+          console.error('Error parsing WebSocket message:', err);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        // Only show error after initial load is complete
+        if (!initialLoad) {
+          setError('Connection error. Reconnecting...');
+        }
+        setIsConnected(false);
+        
+        // Don't set loading to false during initial load
+        if (!initialLoad) {
+          setLoading(false);
+        }
+      };
+
+      ws.onclose = (event) => {
+        console.log('🔌 WebSocket connection closed', event.code, event.reason || '');
+        setIsConnected(false);
+        
+        // Clear connection timeout
+        if (connectionTimeoutRef.current) {
+          window.clearTimeout(connectionTimeoutRef.current);
+          connectionTimeoutRef.current = null;
+        }
+        
+        // Only set loading to false and show error if not initial load
+        if (!initialLoad) {
+          setLoading(false);
+          if (event.code !== 1000) {
+            setError('Connection closed. Reconnecting...');
+          }
+        }
+        
+        // Only reconnect if it wasn't a manual close
+        if (event.code !== 1000) {
+          const attempts = reconnectAttemptsRef.current + 1;
+          reconnectAttemptsRef.current = attempts;
+          const delay = Math.min(15000, 1000 * Math.pow(2, attempts - 1));
+          
+          if (reconnectTimerRef.current) {
+            window.clearTimeout(reconnectTimerRef.current);
+          }
+          reconnectTimerRef.current = window.setTimeout(() => {
+            connectWebSocket();
+          }, delay);
+        }
+      };
+    } catch (err) {
+      console.error('Failed to connect to WebSocket:', err);
+      setInitialLoad(false);
+      setLoading(false);
+      setError('Failed to connect. Please try again.');
+    }
+  }, [API_KEY, initialLoad]);
+
+  const disconnectWebSocket = React.useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.close(1000, 'Manual disconnect');
+      wsRef.current = null;
+    }
+    setIsConnected(false);
+    if (reconnectTimerRef.current) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    if (connectionTimeoutRef.current) {
+      window.clearTimeout(connectionTimeoutRef.current);
+      connectionTimeoutRef.current = null;
+    }
+    reconnectAttemptsRef.current = 0;
+  }, []);
+
+  // Auto-connect on mount
+  React.useEffect(() => {
+    connectWebSocket();
+    return () => {
+      disconnectWebSocket();
+    };
+  }, [connectWebSocket, disconnectWebSocket]);
+
+  const ordersArray = Array.from(orders.values()).sort((a, b) => {
+    // Sort by OpenedDateTime (newest first)
+    return new Date(b.OpenedDateTime).getTime() - new Date(a.OpenedDateTime).getTime();
+  });
+
+  const formatPrice = (price: string): string => {
+    const num = parseFloat(price);
+    if (isNaN(num)) return 'N/A';
+    if (num === 0) return '$0.00';
+    return `$${num.toFixed(2)}`;
+  };
+
+  const formatQuantity = (qty: string): string => {
+    const num = parseFloat(qty);
+    if (isNaN(num)) return 'N/A';
+    return num.toLocaleString();
+  };
+
+  const formatTimestamp = (timestamp: string): string => {
+    try {
+      const date = new Date(timestamp);
+      return date.toLocaleTimeString();
+    } catch {
+      return timestamp;
+    }
+  };
+
+  const formatDate = (timestamp: string): string => {
+    try {
+      const date = new Date(timestamp);
+      return date.toLocaleDateString();
+    } catch {
+      return timestamp;
+    }
+  };
+
+  const getStatusColor = (status: string): string => {
+    switch (status.toUpperCase()) {
+      case 'DON':
+      case 'FILLED':
+      case 'FLL':
+        return 'text-[#4ec9b0]';
+      case 'QUEUED':
+      case 'OPEN':
+      case 'OPN':
+        return 'text-[#007acc]';
+      case 'CANCELLED':
+      case 'CXL':
+        return 'text-[#808080]';
+      case 'REJECTED':
+      case 'REJ':
+        return 'text-[#f44747]';
+      default:
+        return 'text-[#969696]';
+    }
+  };
+
+  const getStatusBgColor = (status: string): string => {
+    switch (status.toUpperCase()) {
+      case 'DON':
+      case 'FILLED':
+      case 'FLL':
+        return 'bg-[#0d3a2e] text-[#4ec9b0]';
+      case 'QUEUED':
+      case 'OPEN':
+      case 'OPN':
+        return 'bg-[#1a3a47] text-[#007acc]';
+      case 'CANCELLED':
+      case 'CXL':
+        return 'bg-[#2d2d30] text-[#808080]';
+      case 'REJECTED':
+      case 'REJ':
+        return 'bg-[#5a1d1d] text-[#f44747]';
+      default:
+        return 'bg-[#2d2d30] text-[#969696]';
+    }
+  };
+
+  return (
+    <div className="h-full flex flex-col bg-[#1e1e1e]">
+      {/* Header */}
+      <div className="p-3 border-b border-[#3e3e42] bg-[#252526]">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-semibold text-[#cccccc] tracking-wide">Orders</h2>
+          <div className="flex items-center space-x-2">
+            <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-[#4ec9b0]' : 'bg-[#f44747]'}`}></div>
+            <span className="text-xs text-[#969696]">
+              {isConnected ? 'Connected' : 'Disconnected'}
+            </span>
+            {ordersArray.length > 0 && (
+              <span className="text-xs text-[#969696] ml-2">
+                ({ordersArray.length} orders)
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Error Message - Only show if not loading */}
+      {error && !loading && (
+        <div className="mx-3 mt-3 bg-[#5a1d1d] border border-[#f44747] rounded-lg p-3">
+          <div className="flex items-center space-x-2">
+            <svg className="w-4 h-4 text-[#f44747]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <p className="text-sm text-[#f44747]">{error}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Orders Table */}
+      <div className="flex-1 overflow-hidden">
+        {loading ? (
+          <div className="h-full flex items-center justify-center">
+            <div className="text-center">
+              <div className="w-12 h-12 bg-[#2d2d30] rounded-lg flex items-center justify-center mx-auto mb-4">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#4ec9b0]"></div>
+              </div>
+              <h3 className="text-lg font-medium text-[#cccccc] mb-2">Connecting...</h3>
+              <p className="text-[#969696] text-sm">
+                Establishing WebSocket connection...
+              </p>
+            </div>
+          </div>
+        ) : ordersArray.length === 0 ? (
+          <div className="h-full flex items-center justify-center">
+            <div className="text-center">
+              <div className="w-12 h-12 bg-[#2d2d30] rounded-lg flex items-center justify-center mx-auto mb-4">
+                <svg className="w-6 h-6 text-[#808080]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                </svg>
+              </div>
+              <h3 className="text-lg font-medium text-[#cccccc] mb-2">No orders yet</h3>
+              <p className="text-[#969696] text-sm">
+                {isConnected 
+                  ? 'Waiting for order data from WebSocket...'
+                  : 'Connection established. Waiting for order updates...'
+                }
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="h-full flex flex-col">
+            {/* Table Header */}
+            <div className="bg-[#252526] border-b border-[#3e3e42] px-4 py-2 sticky top-0 z-10">
+              <div className="grid grid-cols-12 gap-2 text-xs font-medium text-[#969696] uppercase tracking-wide">
+                <div className="col-span-2">Symbol</div>
+                <div className="col-span-1 text-center">Side</div>
+                <div className="col-span-1 text-right">Qty</div>
+                <div className="col-span-1 text-right">Order Type</div>
+                <div className="col-span-1 text-right">Limit Price</div>
+                <div className="col-span-1 text-right">Filled Price</div>
+                <div className="col-span-1 text-right">Exec Qty</div>
+                <div className="col-span-2 text-center">Status</div>
+                <div className="col-span-1 text-right">Time</div>
+                <div className="col-span-1 text-right">Date</div>
+              </div>
+            </div>
+
+            {/* Table Body - Virtualized */}
+            <div className="flex-1">
+              <Virtuoso
+                style={{ height: '100%' }}
+                data={ordersArray}
+                overscan={200}
+                itemContent={(index, order) => {
+                  const leg = order.Legs && order.Legs.length > 0 ? order.Legs[0] : null;
+                  const isBuy = leg?.BuyOrSell === 'Buy';
+                  const limitPrice = parseFloat(order.LimitPrice);
+                  const filledPrice = parseFloat(order.FilledPrice);
+                  const execQty = leg ? parseFloat(leg.ExecQuantity) : 0;
+                  const qtyOrdered = leg ? parseFloat(leg.QuantityOrdered) : 0;
+                  const qtyRemaining = leg ? parseFloat(leg.QuantityRemaining) : 0;
+                  const isFilled = execQty > 0 && qtyRemaining === 0;
+                  
+                  return (
+                    <div
+                      key={order.OrderID}
+                      className={`px-4 py-2 border-b border-[#3e3e42] hover:bg-[#252526] transition-colors ${
+                        index % 2 === 0 ? 'bg-[#1e1e1e]' : 'bg-[#252526]'
+                      }`}
+                    >
+                      <div className="grid grid-cols-12 gap-2 items-center text-sm">
+                        {/* Symbol */}
+                        <div className="col-span-2">
+                          <div className="font-semibold text-[#cccccc]">{leg?.Symbol || 'N/A'}</div>
+                          <div className="text-xs text-[#808080]">{order.OrderID}</div>
+                        </div>
+
+                        {/* Side */}
+                        <div className="col-span-1 text-center">
+                          <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                            isBuy ? 'bg-[#0d3a2e] text-[#4ec9b0]' : 'bg-[#5a1d1d] text-[#f44747]'
+                          }`}>
+                            {isBuy ? 'Buy' : 'Sell'}
+                          </span>
+                        </div>
+
+                        {/* Quantity Ordered */}
+                        <div className="col-span-1 text-right">
+                          <div className="text-[#cccccc] font-mono">{formatQuantity(leg?.QuantityOrdered || '0')}</div>
+                          {qtyRemaining > 0 && (
+                            <div className="text-xs text-[#808080] font-mono">
+                              Rem: {formatQuantity(leg?.QuantityRemaining || '0')}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Order Type */}
+                        <div className="col-span-1 text-right">
+                          <div className="text-[#cccccc] text-xs">{order.OrderType}</div>
+                        </div>
+
+                        {/* Limit Price */}
+                        <div className="col-span-1 text-right">
+                          <div className="text-[#cccccc] font-mono text-xs">{formatPrice(order.LimitPrice)}</div>
+                        </div>
+
+                        {/* Filled Price */}
+                        <div className="col-span-1 text-right">
+                          <div className={`font-mono text-xs ${isFilled && filledPrice > 0 ? 'text-[#4ec9b0]' : 'text-[#969696]'}`}>
+                            {formatPrice(order.FilledPrice)}
+                          </div>
+                        </div>
+
+                        {/* Exec Quantity */}
+                        <div className="col-span-1 text-right">
+                          <div className={`font-mono ${execQty > 0 ? 'text-[#4ec9b0]' : 'text-[#969696]'}`}>
+                            {formatQuantity(leg?.ExecQuantity || '0')}
+                          </div>
+                          {qtyOrdered > 0 && (
+                            <div className={`text-xs font-mono ${execQty === qtyOrdered ? 'text-[#4ec9b0]' : 'text-[#808080]'}`}>
+                              {Math.round((execQty / qtyOrdered) * 100)}%
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Status */}
+                        <div className="col-span-2 text-center">
+                          <div className={`px-2 py-0.5 rounded text-xs font-medium inline-block ${getStatusBgColor(order.Status)}`}>
+                            {order.StatusDescription || order.Status}
+                          </div>
+                          {order.Routing && (
+                            <div className="text-xs text-[#808080] mt-0.5">{order.Routing}</div>
+                          )}
+                        </div>
+
+                        {/* Time */}
+                        <div className="col-span-1 text-right">
+                          <div className="text-xs text-[#969696] font-mono">{formatTimestamp(order.OpenedDateTime)}</div>
+                        </div>
+
+                        {/* Date */}
+                        <div className="col-span-1 text-right">
+                          <div className="text-xs text-[#808080] font-mono">{formatDate(order.OpenedDateTime)}</div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                }}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default OrdersSection;
+

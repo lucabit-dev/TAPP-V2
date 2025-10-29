@@ -48,6 +48,73 @@ let buyTriggerMode = 'positive'; // 'cross' | 'positive'
 // Track last buy timestamp per ticker to prevent duplicate buys on the same UTC day
 const lastBuyTsByTicker = new Map();
 
+// Helper function to normalize timestamp (keeps UTC, formatting is done on frontend)
+// This function is here for consistency but doesn't actually change the timestamp
+// The frontend will format timestamps as UTC-4 for display
+function toUTC4(isoString) {
+  // Keep timestamp as UTC, frontend will format as UTC-4
+  return isoString;
+}
+
+// Helper function to extract momentum conditions from a toplist row
+function extractMomentumConditions(row, origin) {
+  try {
+    if (!row || !Array.isArray(row.columns)) return null;
+    
+    const thresholds = floatService.getThresholds?.();
+    const t = thresholds ? thresholds[origin] : null;
+    if (!t) return null;
+    
+    const columnsByKey = new Map(row.columns.map(c => [c.key, c]));
+    
+    const pickVal = (candidates, fallback) => {
+      for (const k of candidates) { 
+        if (columnsByKey.has(k)) return columnsByKey.get(k)?.value; 
+      }
+      if (fallback) {
+        for (const [k, c] of columnsByKey.entries()) { 
+          if (fallback(k)) return c?.value; 
+        }
+      }
+      return null;
+    };
+    
+    // Extract momentum values
+    const change5mStr = pickVal([
+      'PrzChangeFilterMIN5','ChangeMIN5','Change5MIN'
+    ], k => /change/i.test(k) && /(min5|5min|fm5)/i.test(k));
+    const change5mPct = parsePercent(change5mStr);
+    
+    const trades1mStr = pickVal([
+      'TradeCountMIN1','TradesMIN1','TradeCountFM1'
+    ], k => /trade/i.test(k) && /(min1|1min|fm1)/i.test(k));
+    const trades1m = parseIntLike(trades1mStr);
+    
+    const vol5mStr = pickVal([
+      'PrzVolumeFilterFM5','VolumeMIN5','Volume5MIN','PrzVolumeFM5'
+    ], k => /volume/i.test(k) && /(min5|5min|fm5)/i.test(k));
+    const vol5m = parseVolume(vol5mStr);
+    
+    const chgOpenStr = pickVal([
+      'ChangeFromOpenPRZ','ChangeFromOpen'
+    ], k => /change/i.test(k) && /open/i.test(k));
+    const changeFromOpenPct = parsePercent(chgOpenStr);
+    
+    return {
+      values: {
+        change5mPct,
+        trades1m,
+        vol5m,
+        changeFromOpenPct
+      },
+      thresholds: t,
+      groupKey: origin
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
 // Stock color cache to maintain colored state until conditions change
 const stockColorCache = new Map(); // symbol -> { meetsTech: boolean, meetsMomentum: boolean, lastUpdate: timestamp }
 const COLOR_CACHE_TIMEOUT = 60 * 60 * 1000; // 60 minutes cache timeout (increased from 30 minutes)
@@ -206,22 +273,67 @@ async function analyzeSymbol(symbol) {
       log('debug', `⚠️ ${symbol}: insufficient candles (1m=${candles1m?.length || 0},5m=${candles5m?.length || 0})`);
       return { symbol, meetsTech: false, meetsMomentum: false };
     }
+    // Fetch real-time current price from Polygon (includes extended hours) BEFORE calculating indicators
+    let currentPrice = null;
+    try { 
+      currentPrice = await polygonService.getCurrentPrice(symbol);
+      console.log(`[Price] Fetched real-time price for ${symbol}: ${currentPrice} (extended hours supported)`);
+    } catch {}
+    
+    // Update last candle close prices with real-time price (most recent value)
+    // This ensures indicators are calculated with the most current price
+    if (currentPrice !== null && candles1m.length > 0) {
+      const lastCandle1m = candles1m[candles1m.length - 1];
+      if (lastCandle1m) {
+        lastCandle1m.close = currentPrice;
+        // Also update high if price is higher
+        if (currentPrice > lastCandle1m.high) {
+          lastCandle1m.high = currentPrice;
+        }
+        // Also update low if price is lower
+        if (currentPrice < lastCandle1m.low) {
+          lastCandle1m.low = currentPrice;
+        }
+      }
+    }
+    
+    if (currentPrice !== null && candles5m.length > 0) {
+      const lastCandle5m = candles5m[candles5m.length - 1];
+      if (lastCandle5m) {
+        lastCandle5m.close = currentPrice;
+        // Also update high if price is higher
+        if (currentPrice > lastCandle5m.high) {
+          lastCandle5m.high = currentPrice;
+        }
+        // Also update low if price is lower
+        if (currentPrice < lastCandle5m.low) {
+          lastCandle5m.low = currentPrice;
+        }
+      }
+    }
+    
+    // Calculate indicators with extended hours support (now using updated candle data with real-time price)
     const indicatorData = await indicatorsService.calculateAllIndicators(symbol, candles1m, candles5m, isExtendedHours);
     if (!indicatorData || !indicatorData.indicators) {
       log('warn', `⚠️ ${symbol}: indicators calculation failed`);
       return { symbol, meetsTech: false, meetsMomentum: false };
     }
-    let currentPrice = null;
-    try { currentPrice = await polygonService.getCurrentPrice(symbol); } catch {}
     const closePrice = currentPrice || indicatorData.lastCandle?.close || null;
     indicatorData.currentPrice = closePrice;
     if (indicatorData.lastCandle && closePrice != null) indicatorData.lastCandle.close = closePrice;
     const evaluation = conditionsService.evaluateConditions(indicatorData);
     const meetsTech = !!evaluation?.allConditionsMet;
-    // Meets Config FLOAT (server-side) treated as momentum/green gate
-    // Find latest row + origin from toplist maps
-    let meetsConfigFloat = false;
+    
+    // Calculate momentum conditions directly from candles (at exact moment)
+    let momentumData = null;
+    let meetsMomentum = false;
+    let groupKey = null;
+    
     try {
+      // Compute momentum from candles
+      const computedMomentum = floatService.computeMomentum(candles1m, candles5m, closePrice);
+      
+      // Find the group key for this symbol
       const toplistMap = toplistService.toplistByConfig || {};
       outer: for (const configId of Object.keys(toplistMap)) {
         const groupInfo = floatService.getGroupInfoByConfig(configId);
@@ -230,16 +342,32 @@ async function analyzeSymbol(symbol) {
         for (const row of rows) {
           const sym = row?.symbol || (Array.isArray(row?.columns) ? (row.columns.find(c => c.key === 'SymbolColumn')?.value) : null);
           if ((sym || '').toUpperCase() === String(symbol).toUpperCase()) {
-            meetsConfigFloat = evaluateConfigFloat(row, origin);
+            groupKey = origin;
+            // Check if momentum conditions are met
+            meetsMomentum = floatService.meetsMomentum(origin, computedMomentum);
+            
+            // Get thresholds for this group
+            const thresholds = floatService.getThresholds?.();
+            const t = thresholds ? thresholds[origin] : null;
+            
+            if (t) {
+              momentumData = {
+                values: computedMomentum,
+                thresholds: t,
+                groupKey: origin
+              };
+            }
             break outer;
           }
         }
       }
-    } catch {}
-    const meetsMomentum = !!meetsConfigFloat;
+    } catch (e) {
+      log('debug', `Error calculating momentum for ${symbol}: ${e.message}`);
+    }
+    
     setCachedStockColor(symbol, meetsTech, meetsMomentum);
-    logIfDebugTicker(symbol, `Eval ${symbol}: tech=${meetsTech} failed=[${(evaluation.failedConditions||[]).map(f=>f.name).join(', ')}] cp=${closePrice}`);
-    return { symbol, meetsTech, meetsMomentum, indicators: indicatorData.indicators, lastClose: closePrice, evaluation };
+    logIfDebugTicker(symbol, `Eval ${symbol}: tech=${meetsTech} momentum=${meetsMomentum} failed=[${(evaluation.failedConditions||[]).map(f=>f.name).join(', ')}] cp=${closePrice}`);
+    return { symbol, meetsTech, meetsMomentum, indicators: indicatorData.indicators, lastClose: closePrice, evaluation, momentum: momentumData, candles1m, candles5m };
   } catch (e) {
     log('error', `Error analyzing ${symbol}: ${e?.message || e}`);
     return { symbol, meetsTech: false, meetsMomentum: false };
@@ -598,13 +726,29 @@ async function processCatchupBuys() {
           } catch (notifyErr) {
             notifyStatus = `ERROR: ${notifyErr.message}`;
           }
+          const groupKey = floatService.getGroupInfoByConfig(configId)?.key || null;
+          // Calculate momentum at exact buy moment using fresh analysis
+          let momentum = null;
+          try {
+            const analysis = await analyzeSymbol(ticker);
+            momentum = analysis.momentum || null;
+            // Also update indicators if they're more recent
+            if (analysis.indicators) {
+              item.indicators = analysis.indicators;
+            }
+          } catch (e) {
+            console.error(`Error calculating momentum for ${ticker} at buy moment: ${e.message}`);
+          }
+          
           const entry = {
             ticker,
-            timestamp: nowIso,
+            timestamp: toUTC4(nowIso),
             price: item.lastCandle?.close || item.price || null,
             configId: configId,
-            group: floatService.getGroupInfoByConfig(configId)?.key || null,
-            notifyStatus
+            group: groupKey,
+            notifyStatus,
+            indicators: item.indicators || null,
+            momentum: momentum
           };
           buyList.unshift(entry);
           if (typeof lastBuyTsByTicker !== 'undefined') {
@@ -672,13 +816,29 @@ async function revalidateCurrentFloatLists() {
             } catch (notifyErr) {
               notifyStatus = `ERROR: ${notifyErr.message}`;
             }
+            const groupKey = floatService.getGroupInfoByConfig(configId)?.key || null;
+            // Calculate momentum at exact buy moment using fresh analysis
+            let momentum = null;
+            try {
+              const analysis = await analyzeSymbol(ticker);
+              momentum = analysis.momentum || null;
+              // Also update indicators if they're more recent
+              if (analysis.indicators) {
+                item.indicators = analysis.indicators;
+              }
+            } catch (e) {
+              console.error(`Error calculating momentum for ${ticker} at buy moment: ${e.message}`);
+            }
+            
             const entry = {
               ticker,
-              timestamp: nowIso,
+              timestamp: toUTC4(nowIso),
               price: item.lastCandle?.close || item.price || null,
               configId: configId,
-              group: floatService.getGroupInfoByConfig(configId)?.key || null,
-              notifyStatus
+              group: groupKey,
+              notifyStatus,
+              indicators: item.indicators || null,
+              momentum: momentum
             };
             buyList.unshift(entry);
             lastBuyTsByTicker.set(ticker, nowIso);
@@ -910,7 +1070,7 @@ async function analyzeConfigStocksInstantly(configId) {
           analysisInProgress.add(normalizedSymbol);
           const res = await analyzeSymbol(normalizedSymbol);
           analysisInProgress.delete(normalizedSymbol);
-          return res ? { symbol: normalizedSymbol, meetsTech: !!res.meetsTech, meetsMomentum: !!res.meetsMomentum, indicators: res.indicators || null, lastClose: res.lastClose || null } : null;
+          return res ? { symbol: normalizedSymbol, meetsTech: !!res.meetsTech, meetsMomentum: !!res.meetsMomentum, indicators: res.indicators || null, lastClose: res.lastClose || null, momentum: res.momentum || null } : null;
         } catch (e) {
           const sym = row?.symbol || 'unknown';
           const normalized = String(sym).trim().toUpperCase();
@@ -957,13 +1117,16 @@ async function analyzeConfigStocksInstantly(configId) {
                 notifyStatus = `ERROR: ${notifyErr.message}`;
               }
               
+              // Use momentum calculated from analyzeSymbol (at exact buy moment)
               const entry = {
                 ticker: r.symbol,
-                timestamp: nowIso,
+                timestamp: toUTC4(nowIso),
                 price: r.lastClose || null,
                 configId: configId,
                 group: origin,
-                notifyStatus
+                notifyStatus,
+                indicators: r.indicators || null,
+                momentum: r.momentum || null
               };
               buyList.unshift(entry);
               lastBuyTsByTicker.set(r.symbol, nowIso);
@@ -1025,7 +1188,7 @@ async function computeRawFiveTechChecks() {
       const results = await Promise.all(batch.map(async (symbol) => {
         try {
           const res = await analyzeSymbol(symbol);
-          return { symbol, meetsTech: !!res.meetsTech, meetsMomentum: !!res.meetsMomentum, indicators: res.indicators || null, lastClose: res.lastClose || null };
+          return { symbol, meetsTech: !!res.meetsTech, meetsMomentum: !!res.meetsMomentum, indicators: res.indicators || null, lastClose: res.lastClose || null, momentum: res.momentum || null };
         } catch (e) {
           return { symbol, meetsTech: false, meetsMomentum: false, indicators: null, lastClose: null };
         }
@@ -1110,13 +1273,16 @@ async function computeRawFiveTechChecks() {
               }
               
               const origin = symbolOriginMap.get(ticker) || '?';
+              // Use momentum calculated from analyzeSymbol (at exact buy moment)
               const entry = {
                 ticker,
-                timestamp: nowIso,
+                timestamp: toUTC4(nowIso),
                 price: r.lastClose || null,
                 configId: null,
                 group: origin,
-                notifyStatus
+                notifyStatus,
+                indicators: r.indicators || null,
+                momentum: r.momentum || null
               };
               buyList.unshift(entry);
               lastBuyTsByTicker.set(ticker, nowIso);
@@ -1182,13 +1348,29 @@ async function scanBuySignalsForConfig(configId) {
       } catch (notifyErr) {
         notifyStatus = `ERROR: ${notifyErr.message}`;
       }
+      const groupKey = floatService.getGroupInfoByConfig(configId)?.key || null;
+      // Calculate momentum at exact buy moment using fresh analysis
+      let momentum = null;
+      try {
+        const analysis = await analyzeSymbol(ticker);
+        momentum = analysis.momentum || null;
+        // Also update indicators if they're more recent
+        if (analysis.indicators) {
+          item.indicators = analysis.indicators;
+        }
+      } catch (e) {
+        console.error(`Error calculating momentum for ${ticker} at buy moment: ${e.message}`);
+      }
+      
       const entry = {
         ticker,
-        timestamp: nowIso,
+        timestamp: toUTC4(nowIso),
         price: item.lastCandle?.close || item.price || null,
         configId: configId,
-        group: floatService.getGroupInfoByConfig(configId)?.key || null,
-        notifyStatus
+        group: groupKey,
+        notifyStatus,
+        indicators: item.indicators || null,
+        momentum: momentum
       };
       buyList.unshift(entry);
       if (typeof lastBuyTsByTicker !== 'undefined') {
@@ -1551,11 +1733,55 @@ async function processAlertNormally(alert, validateNASDAQ = false) {
     const hoursSinceLast1m = Math.round((now - last1mTime) / (1000 * 60 * 60));
     const hoursSinceLast5m = Math.round((now - last5mTime) / (1000 * 60 * 60));
     
-    // Calculate indicators with extended hours support
+    // Fetch real-time current price from Polygon (includes extended hours)
+    let realTimePrice = null;
+    try {
+      realTimePrice = await polygonService.getCurrentPrice(ticker);
+      console.log(`[Price] Fetched real-time price for ${ticker}: ${realTimePrice} (extended hours supported)`);
+    } catch (priceError) {
+      console.log(`[Price] Could not fetch real-time price for ${ticker}, using alert price: ${currentPrice}`);
+      realTimePrice = currentPrice;
+    }
+    
+    // Update last candle close prices with real-time price (most recent value)
+    // This ensures indicators are calculated with the most current price
+    if (realTimePrice !== null && candles1m.length > 0) {
+      const lastCandle1m = candles1m[candles1m.length - 1];
+      if (lastCandle1m) {
+        lastCandle1m.close = realTimePrice;
+        // Also update high if price is higher
+        if (realTimePrice > lastCandle1m.high) {
+          lastCandle1m.high = realTimePrice;
+        }
+        // Also update low if price is lower
+        if (realTimePrice < lastCandle1m.low) {
+          lastCandle1m.low = realTimePrice;
+        }
+        console.log(`[Price] Updated last 1m candle close for ${ticker} with real-time price: ${realTimePrice}`);
+      }
+    }
+    
+    if (realTimePrice !== null && candles5m.length > 0) {
+      const lastCandle5m = candles5m[candles5m.length - 1];
+      if (lastCandle5m) {
+        lastCandle5m.close = realTimePrice;
+        // Also update high if price is higher
+        if (realTimePrice > lastCandle5m.high) {
+          lastCandle5m.high = realTimePrice;
+        }
+        // Also update low if price is lower
+        if (realTimePrice < lastCandle5m.low) {
+          lastCandle5m.low = realTimePrice;
+        }
+        console.log(`[Price] Updated last 5m candle close for ${ticker} with real-time price: ${realTimePrice}`);
+      }
+    }
+    
+    // Calculate indicators with extended hours support (now using updated candle data with real-time price)
     const indicatorData = await indicatorsService.calculateAllIndicators(ticker, candles1m, candles5m, isExtendedHours);
     
-    // Add current price to indicator data for condition evaluation
-    indicatorData.currentPrice = currentPrice;
+    // Add current price to indicator data for condition evaluation (use real-time price)
+    indicatorData.currentPrice = realTimePrice || currentPrice;
     
     // Evaluate conditions
     const evaluation = conditionsService.evaluateConditions(indicatorData);
@@ -1564,7 +1790,7 @@ async function processAlertNormally(alert, validateNASDAQ = false) {
     console.log(`\n🏢 STOCK API EVALUATION for ${ticker}:`);
     console.log(`  All conditions met: ${evaluation.allConditionsMet}`);
     console.log(`  Failed conditions:`, evaluation.failedConditions.map(fc => fc.name));
-    console.log(`  Close price used: ${currentPrice}`);
+    console.log(`  Real-time price used: ${realTimePrice || currentPrice} (includes extended hours)`);
     console.log(`  Indicators:`, {
       macd5mHistogram: indicatorData.indicators.macd5m?.histogram,
       macd5mMacd: indicatorData.indicators.macd5m?.macd,
@@ -1579,7 +1805,7 @@ async function processAlertNormally(alert, validateNASDAQ = false) {
     return {
       ticker,
       timestamp,
-      price: currentPrice,
+      price: realTimePrice || currentPrice, // Use real-time price (includes extended hours)
       volume: alert.volume || 0,
       change: alert.change || 0,
       changePercent: alert.changePercent || 0,

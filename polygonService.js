@@ -202,9 +202,66 @@ class PolygonService {
     return date.toISOString().split('T')[0]; // YYYY-MM-DD format
   }
 
-  // Get current price for a ticker
+  // Get current price for a ticker (includes extended hours)
   async getCurrentPrice(ticker) {
     try {
+      // First try snapshot endpoint which provides most comprehensive real-time data including extended hours
+      const snapshotUrl = `${this.baseUrl}/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}?apikey=${this.apiKey}`;
+      
+      try {
+        const snapshotResponse = await fetch(snapshotUrl);
+        
+        if (snapshotResponse.ok) {
+          const snapshotData = await snapshotResponse.json();
+          
+          if (snapshotData.status === 'OK' && snapshotData.ticker) {
+            const tickerData = snapshotData.ticker;
+            
+            // Prioritize most recent data (extended hours trades)
+            // 1. Last trade price (most recent, includes extended hours)
+            if (tickerData.lastTrade && tickerData.lastTrade.p) {
+              const lastTradePrice = tickerData.lastTrade.p;
+              console.log(`[Price] Using snapshot lastTrade for ${ticker}: ${lastTradePrice} (includes extended hours)`);
+              return lastTradePrice;
+            }
+            
+            // 2. Last quote bid/ask midpoint (real-time quote)
+            if (tickerData.lastQuote) {
+              const bid = tickerData.lastQuote.bp || 0;
+              const ask = tickerData.lastQuote.ap || 0;
+              if (bid > 0 && ask > 0) {
+                const midPrice = (bid + ask) / 2;
+                console.log(`[Price] Using snapshot quote midpoint for ${ticker}: ${midPrice}`);
+                return midPrice;
+              } else if (bid > 0) {
+                console.log(`[Price] Using snapshot quote bid for ${ticker}: ${bid}`);
+                return bid;
+              } else if (ask > 0) {
+                console.log(`[Price] Using snapshot quote ask for ${ticker}: ${ask}`);
+                return ask;
+              }
+            }
+            
+            // 3. Day close (regular session close)
+            if (tickerData.day && tickerData.day.c) {
+              const dayClose = tickerData.day.c;
+              console.log(`[Price] Using snapshot day close for ${ticker}: ${dayClose}`);
+              return dayClose;
+            }
+            
+            // 4. Previous day close (fallback)
+            if (tickerData.prevDay && tickerData.prevDay.c) {
+              const prevClose = tickerData.prevDay.c;
+              console.log(`[Price] Using snapshot prevDay close for ${ticker}: ${prevClose}`);
+              return prevClose;
+            }
+          }
+        }
+      } catch (snapshotError) {
+        console.log(`[Price] Snapshot endpoint failed for ${ticker}, trying last trade endpoint...`);
+      }
+      
+      // Fallback to last trade endpoint
       const url = `${this.baseUrl}/v2/last/trade/${ticker}?apikey=${this.apiKey}`;
       
       const response = await fetch(url);
@@ -226,10 +283,11 @@ class PolygonService {
       }
       
       const price = result.p;
-      
+      console.log(`[Price] Using last trade price for ${ticker}: ${price}`);
       return price;
       
     } catch (error) {
+      console.error(`[Price] Error fetching current price for ${ticker}:`, error.message);
       throw error;
     }
   }
@@ -317,7 +375,7 @@ class PolygonService {
     };
   }
 
-  // Calculate EMA using Wilder's smoothing method (best TradingView match)
+  // Calculate EMA using Wilder's smoothing method
   calculateEMA(values, span, adjust = false) {
     if (!values || values.length === 0) {
       return null;
@@ -328,7 +386,7 @@ class PolygonService {
     }
 
     try {
-      // Wilder's smoothing method (better TradingView match)
+      // Wilder's smoothing method
       const multiplier = 1 / span;
       
       // Initialize with first value

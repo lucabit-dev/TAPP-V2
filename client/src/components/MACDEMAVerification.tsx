@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { formatTimeUTC4 } from '../utils/timeFormat';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 
@@ -229,7 +230,7 @@ const MACDEMAVerification: React.FC = () => {
           <div>
             <div className="text-xs text-[#808080]">Last Update</div>
             <div className="text-sm font-mono text-[#cccccc]">
-              {lastCollectionTime ? lastCollectionTime.toLocaleTimeString() : 'Never'}
+              {lastCollectionTime ? formatTimeUTC4(lastCollectionTime.toISOString(), { includeAMPM: true, includeET: true }) : 'Never'}
             </div>
           </div>
           <div>
@@ -310,7 +311,7 @@ const MACDEMAVerification: React.FC = () => {
               </div>
               {verificationData.length > 0 && (
                 <div className="text-xs text-green-400 font-medium">
-                  Latest: {verificationData[0] ? new Date(verificationData[0].timestamp).toLocaleTimeString() : 'N/A'}
+                  Latest: {verificationData[0] ? formatTimeUTC4(verificationData[0].timestamp, { includeAMPM: true, includeET: true }) : 'N/A'}
                 </div>
               )}
             </div>
@@ -370,7 +371,7 @@ const MACDEMAVerification: React.FC = () => {
                         <td className="px-4 py-3 text-xs text-[#cccccc] font-mono whitespace-nowrap">
                           <div className="flex items-center space-x-2">
                             {isRecent && <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></div>}
-                            <span>{entryTime.toLocaleTimeString()}</span>
+                            <span>{formatTimeUTC4(entry.timestamp, { includeAMPM: true, includeET: false })}</span>
                           </div>
                         </td>
                         <td className="px-4 py-3">

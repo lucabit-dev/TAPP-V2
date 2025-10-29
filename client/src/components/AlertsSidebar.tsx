@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from 'react';
 import { Virtuoso } from 'react-virtuoso';
+import { formatTimestampRelative } from '../utils/timeFormat';
 
 interface Alert {
   ticker: string;
@@ -54,19 +55,7 @@ const AlertsSidebar: React.FC<AlertsSidebarProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
 
   const formatTimestamp = (timestamp: string) => {
-    const date = new Date(timestamp);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffSecs = Math.floor(diffMs / 1000);
-    const diffMins = Math.floor(diffSecs / 60);
-    
-    if (diffSecs < 60) {
-      return `${diffSecs}s`;
-    } else if (diffMins < 60) {
-      return `${diffMins}m`;
-    } else {
-      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    }
+    return formatTimestampRelative(timestamp);
   };
 
   const formatPrice = (price: number) => {

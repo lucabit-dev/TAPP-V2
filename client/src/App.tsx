@@ -1,13 +1,14 @@
 import { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
 import { Virtuoso } from 'react-virtuoso';
+import { formatTimestampRelative } from './utils/timeFormat';
 import './App.css';
 const TradingDashboard = lazy(() => import('./components/TradingDashboard'));
-const TestListSection = lazy(() => import('./components/TestListSection'));
 const FloatListsSection = lazy(() => import('./components/FloatListsSection'));
 const FloatConfigPanel = lazy(() => import('./components/FloatConfigPanel'));
 const BuyListSection = lazy(() => import('./components/BuyListSection'));
 const FloatRawListsSection = lazy(() => import('./components/FloatRawListsSection'));
-const MACDEMAVerification = lazy(() => import('./components/MACDEMAVerification'));
+const PnLSection = lazy(() => import('./components/PnLSection'));
+const OrdersSection = lazy(() => import('./components/OrdersSection'));
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
@@ -98,7 +99,8 @@ function App() {
   const [newValidAlertsCount, setNewValidAlertsCount] = useState(0);
   const [conditionStats, setConditionStats] = useState<any>(null);
   const [showStats, setShowStats] = useState(false);
-  const [selectedTab, setSelectedTab] = useState<'all' | 'valid' | 'filtered' | 'dashboard' | 'testlist' | 'config-float' | 'listas-float-raw' | 'buy-list' | 'verification'>('dashboard');
+  const [selectedTab, setSelectedTab] = useState<'all' | 'valid' | 'filtered' | 'dashboard' | 'config-float' | 'listas-float-raw' | 'buy-list' | 'pnl' | 'orders'>('dashboard');
+  const [alertsCollapsed, setAlertsCollapsed] = useState(true); // Start collapsed
   const [manualSymbol, setManualSymbol] = useState('');
   const [manualAnalysis, setManualAnalysis] = useState<any>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -432,19 +434,9 @@ function App() {
   }, []);
 
   const formatTimestamp = (timestamp: string) => {
-    const date = new Date(timestamp);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffSecs = Math.floor(diffMs / 1000);
-    const diffMins = Math.floor(diffSecs / 60);
-    
-    if (diffSecs < 60) {
-      return `${diffSecs}s ago`;
-    } else if (diffMins < 60) {
-      return `${diffMins}m ago`;
-    } else {
-      return date.toLocaleTimeString();
-    }
+    // Use the relative formatter which shows UTC-4 for times older than 1 hour
+    const relative = formatTimestampRelative(timestamp);
+    return relative.endsWith('m') || relative.endsWith('s') ? `${relative} ago` : relative;
   };
 
   const formatPrice = (price: number) => {
@@ -760,10 +752,24 @@ function App() {
       {/* Navigation with grouped tabs and Alerts toggle */}
       <div className="bg-[#252526] border-b border-[#3e3e42]">
         <div className="flex px-6 items-center">
-          {/* Alerts group */}
+          {/* Alerts group - Collapsible */}
           <div className="flex items-center space-x-1">
-            <span className="text-xs text-[#808080] mr-2">Alerts</span>
-            {[
+            <button
+              onClick={() => setAlertsCollapsed(!alertsCollapsed)}
+              className="flex items-center space-x-1 px-2 py-1 text-xs text-[#808080] hover:text-[#cccccc] transition-colors"
+              title={alertsCollapsed ? 'Expand Alerts' : 'Collapse Alerts'}
+            >
+              <span>Alerts</span>
+              <svg 
+                className={`w-3 h-3 transition-transform ${alertsCollapsed ? 'rotate-0' : 'rotate-180'}`} 
+                fill="none" 
+                stroke="currentColor" 
+                viewBox="0 0 24 24"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {!alertsCollapsed && [
               { key: 'dashboard', label: 'Dashboard', count: validAlerts.length },
               { key: 'all', label: 'All', count: allAlerts.length },
               { key: 'valid', label: 'Valid', count: validAlerts.length },
@@ -787,10 +793,11 @@ function App() {
           <div className="flex items-center space-x-1 ml-6">
             <span className="text-xs text-[#808080] mr-2">Lists</span>
             {[
-              { key: 'testlist', label: 'Test List', count: 0 },
               { key: 'listas-float-raw', label: 'Listas FLOAT (RAW)', count: 0 },
               { key: 'config-float', label: 'Config FLOAT', count: 0 },
-              { key: 'buy-list', label: 'Buy List', count: 0 }
+              { key: 'buy-list', label: 'Buy List', count: 0 },
+              { key: 'pnl', label: 'P&L', count: 0 },
+              { key: 'orders', label: 'Orders', count: 0 }
             ].map(tab => (
               <button
                 key={tab.key}
@@ -806,25 +813,6 @@ function App() {
             ))}
           </div>
 
-          {/* Tools group */}
-          <div className="flex items-center space-x-1 ml-6">
-            <span className="text-xs text-[#808080] mr-2">Tools</span>
-            {[
-              { key: 'verification', label: '🔬 Verification', count: 0 }
-            ].map(tab => (
-              <button
-                key={tab.key}
-                onClick={() => setSelectedTab(tab.key as any)}
-                className={`px-3 py-2 text-sm font-medium transition-all rounded-md ${
-                  selectedTab === tab.key
-                    ? 'text-[#ffffff] bg-[#2d2d30]'
-                    : 'text-[#969696] hover:text-[#cccccc]'
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
 
           {/* Alerts toggle */}
           <div className="ml-auto flex items-center space-x-2">
@@ -1113,17 +1101,6 @@ function App() {
               loading={loading}
             />
           </Suspense>
-        ) : selectedTab === 'testlist' ? (
-          <Suspense 
-            fallback={
-              <div className="flex items-center justify-center h-full text-[#969696]">
-                <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-[#4ec9b0] mr-2"></div>
-                Loading test list...
-              </div>
-            }
-          >
-            <TestListSection />
-          </Suspense>
         ) : selectedTab === 'config-float' ? (
           <Suspense 
             fallback={
@@ -1164,16 +1141,27 @@ function App() {
           >
             <BuyListSection />
           </Suspense>
-        ) : selectedTab === 'verification' ? (
+        ) : selectedTab === 'pnl' ? (
           <Suspense 
             fallback={
               <div className="flex items-center justify-center h-full text-[#969696]">
                 <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-[#4ec9b0] mr-2"></div>
-                Loading verification...
+                Loading P&L section...
               </div>
             }
           >
-            <MACDEMAVerification />
+            <PnLSection />
+          </Suspense>
+        ) : selectedTab === 'orders' ? (
+          <Suspense 
+            fallback={
+              <div className="flex items-center justify-center h-full text-[#969696]">
+                <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-[#4ec9b0] mr-2"></div>
+                Loading Orders section...
+              </div>
+            }
+          >
+            <OrdersSection />
           </Suspense>
         ) : (
           <div className="h-full flex">
