@@ -33,7 +33,7 @@ interface Order {
 const OrdersSection: React.FC = () => {
   const [orders, setOrders] = React.useState<Map<string, Order>>(new Map());
   const [isConnected, setIsConnected] = React.useState(false);
-  const API_KEY = import.meta.env.VITE_PNL_API_KEY || 'ruXNebYJhJ09H6D8lyQCKSfr9gcDvxQo'; // Use same env var as P&L
+  const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
   const [loading, setLoading] = React.useState(true); // Start with loading true
   const [initialLoad, setInitialLoad] = React.useState(true); // Track initial connection attempt
   const [error, setError] = React.useState<string | null>(null);
@@ -50,7 +50,8 @@ const OrdersSection: React.FC = () => {
     }
 
     try {
-      const url = `wss://sections-bot.inbitme.com/ws/orders?api_key=${encodeURIComponent(API_KEY)}`;
+      // Connect to backend proxy (API key is handled server-side)
+      const url = `${WS_BASE_URL}/ws/orders`;
       setLoading(true);
       
       // Only clear error if not initial load (to avoid flashing errors)
@@ -163,7 +164,7 @@ const OrdersSection: React.FC = () => {
       setLoading(false);
       setError('Failed to connect. Please try again.');
     }
-  }, [API_KEY, initialLoad]);
+  }, [WS_BASE_URL, initialLoad]);
 
   const disconnectWebSocket = React.useCallback(() => {
     if (wsRef.current) {
