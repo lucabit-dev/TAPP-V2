@@ -41,6 +41,16 @@ function requireDbReady(req, res, next) {
   next();
 }
 
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  const dbReady = mongoose.connection && mongoose.connection.readyState === 1;
+  res.json({ 
+    status: 'ok', 
+    db: dbReady ? 'connected' : 'disconnected',
+    dbState: mongoose.connection?.readyState || 'unknown'
+  });
+});
+
 // Auth routes
 const authRoutes = require('./auth/auth.routes');
 const { requireAuth } = require('./auth/auth.middleware');

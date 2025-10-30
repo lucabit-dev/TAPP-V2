@@ -21,7 +21,11 @@ async function register(req, res) {
     const token = signJwt(user);
     return res.status(201).json({ token, user: { id: user._id, email: user.email, name: user.name } });
   } catch (err) {
-    return res.status(500).json({ error: err.message || 'Registration failed' });
+    console.error('Registration error:', err);
+    const isDev = process.env.NODE_ENV !== 'production';
+    return res.status(500).json({ 
+      error: isDev ? err.message : 'Registration failed. Please try again.' 
+    });
   }
 }
 
@@ -39,7 +43,11 @@ async function login(req, res) {
     const token = signJwt(user);
     return res.json({ token, user: { id: user._id, email: user.email, name: user.name } });
   } catch (err) {
-    return res.status(500).json({ error: err.message || 'Login failed' });
+    console.error('Login error:', err);
+    const isDev = process.env.NODE_ENV !== 'production';
+    return res.status(500).json({ 
+      error: isDev ? err.message : 'Login failed. Please try again.' 
+    });
   }
 }
 
