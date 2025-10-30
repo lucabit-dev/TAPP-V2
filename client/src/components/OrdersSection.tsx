@@ -33,8 +33,8 @@ interface Order {
 const OrdersSection: React.FC = () => {
   const [orders, setOrders] = React.useState<Map<string, Order>>(new Map());
   const [isConnected, setIsConnected] = React.useState(false);
-  const API_KEY = import.meta.env.VITE_PNL_API_KEY || 'ruXNebYJhJ09H6D8lyQCKSfr9gcDvxQo';
-  const WS_BASE_URL = import.meta.env.VITE_PNL_WS_BASE_URL || 'wss://sections-bot.inbitme.com';
+  const API_KEY = import.meta.env.VITE_PNL_API_KEY;
+  const WS_BASE_URL = import.meta.env.VITE_PNL_WS_BASE_URL;
   const [loading, setLoading] = React.useState(true);
   const [initialLoad, setInitialLoad] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);

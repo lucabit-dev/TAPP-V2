@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
+import { useAuth } from './auth/AuthContext';
 import { Virtuoso } from 'react-virtuoso';
 import { formatTimestampRelative } from './utils/timeFormat';
 import './App.css';
@@ -90,6 +91,7 @@ interface ChartsWatcherStatus {
 }
 
 function App() {
+  const { isAuthenticated } = useAuth();
   const [allAlerts, setAllAlerts] = useState<Alert[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -506,6 +508,15 @@ function App() {
         return allAlerts;
     }
   }, [selectedTab, allAlerts, validAlerts, filteredAlerts]);
+
+  if (!isAuthenticated) {
+    const Login = lazy(() => import('./components/Login'));
+    return (
+      <Suspense fallback={<div className="h-screen w-screen flex items-center justify-center text-[#cccccc]">Loading...</div>}>
+        <Login />
+      </Suspense>
+    );
+  }
 
   return (
     <div className="h-screen bg-[#1e1e1e] text-[#cccccc] flex flex-col overflow-hidden">

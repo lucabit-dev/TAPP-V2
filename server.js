@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
@@ -25,6 +26,28 @@ let wsHeartbeatInterval = null;
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Database
+const { connectDatabase } = require('./auth/db');
+const mongoose = require('mongoose');
+connectDatabase().catch(() => {
+  console.warn('Server started without DB connection. Auth routes will return 503.');
+});
+
+// DB-ready guard for auth endpoints
+function requireDbReady(req, res, next) {
+  const ready = mongoose.connection && mongoose.connection.readyState === 1; // 1 = connected
+  if (!ready) return res.status(503).json({ error: 'Database not connected' });
+  next();
+}
+
+// Auth routes
+const authRoutes = require('./auth/auth.routes');
+const { requireAuth } = require('./auth/auth.middleware');
+app.use('/api/auth', requireDbReady, authRoutes);
+app.get('/api/protected/ping', requireDbReady, requireAuth, (req, res) => {
+  res.json({ ok: true, user: req.user });
+});
 
 // Initialize services
 const chartsWatcherService = new ChartsWatcherService();

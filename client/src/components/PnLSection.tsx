@@ -29,8 +29,8 @@ interface Position {
 const PnLSection: React.FC = () => {
   const [positions, setPositions] = React.useState<Map<string, Position>>(new Map());
   const [isConnected, setIsConnected] = React.useState(false);
-  const API_KEY = import.meta.env.VITE_PNL_API_KEY || 'ruXNebYJhJ09H6D8lyQCKSfr9gcDvxQo';
-  const WS_BASE_URL = import.meta.env.VITE_PNL_WS_BASE_URL || 'wss://sections-bot.inbitme.com';
+  const API_KEY = import.meta.env.VITE_PNL_API_KEY;
+  const WS_BASE_URL = import.meta.env.VITE_PNL_WS_BASE_URL;
   const [loading, setLoading] = React.useState(true); // Start with loading true
   const [initialLoad, setInitialLoad] = React.useState(true); // Track initial connection attempt
   const [error, setError] = React.useState<string | null>(null);
