@@ -33,8 +33,8 @@ interface Order {
 const OrdersSection: React.FC = () => {
   const [orders, setOrders] = React.useState<Map<string, Order>>(new Map());
   const [isConnected, setIsConnected] = React.useState(false);
-  // Connect to Railway backend proxy (API key is handled server-side)
-  const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
+  const API_KEY = import.meta.env.VITE_PNL_API_KEY || 'ruXNebYJhJ09H6D8lyQCKSfr9gcDvxQo';
+  const WS_BASE_URL = import.meta.env.VITE_PNL_WS_BASE_URL || 'wss://sections-bot.inbitme.com';
   const [loading, setLoading] = React.useState(true);
   const [initialLoad, setInitialLoad] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
@@ -49,9 +49,15 @@ const OrdersSection: React.FC = () => {
       connectionTimeoutRef.current = null;
     }
 
-    // Connect to Railway backend proxy (no API key needed - handled server-side)
-    const url = `${WS_BASE_URL}/ws/orders`;
-    console.log('🔌 Connecting to orders WebSocket proxy:', url);
+    if (!API_KEY) {
+      setError('API key is required');
+      setLoading(false);
+      setInitialLoad(false);
+      return;
+    }
+
+    const url = `${WS_BASE_URL}/ws/orders?api_key=${encodeURIComponent(API_KEY)}`;
+    console.log('🔌 Connecting to orders WebSocket:', url.replace(API_KEY, '***'));
     
     try {
       setLoading(true);
@@ -105,7 +111,7 @@ const OrdersSection: React.FC = () => {
 
       ws.onerror = (error) => {
         console.error('WebSocket error:', error);
-        console.error('Attempted connection URL:', url);
+        console.error('Attempted connection URL:', url.replace(API_KEY, '***'));
         setIsConnected(false);
         if (!initialLoad) setLoading(false);
         if (!initialLoad) setError('Connection error. Reconnecting...');
@@ -134,7 +140,7 @@ const OrdersSection: React.FC = () => {
       setLoading(false);
       setError('Failed to connect. Please try again.');
     }
-  }, [WS_BASE_URL, initialLoad]);
+  }, [API_KEY, WS_BASE_URL, initialLoad]);
 
   const disconnectWebSocket = React.useCallback(() => {
     if (wsRef.current) {

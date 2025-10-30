@@ -16,19 +16,11 @@ const server = http.createServer(app);
 const PORT = process.env.PORT || 3001;
 
 // WebSocket server for real-time alerts
-const wss = new WebSocket.Server({ server, path: '/ws' });
+const wss = new WebSocket.Server({ server });
 const clients = new Set();
 // Heartbeat (ping/pong) to prevent idle proxies from closing connections
 const HEARTBEAT_INTERVAL_MS = parseInt(process.env.WS_HEARTBEAT_MS || '30000', 10);
 let wsHeartbeatInterval = null;
-
-// PnL API Configuration (server-side only - not exposed to frontend)
-const PNL_API_KEY = process.env.PNL_API_KEY;
-const PNL_WS_BASE_URL = process.env.PNL_WS_BASE_URL || 'wss://sections-bot.inbitme.com';
-
-// WebSocket servers for PnL proxy/relay (positions and orders)
-const pnlPositionsWss = new WebSocket.Server({ server, path: '/ws/positions' });
-const pnlOrdersWss = new WebSocket.Server({ server, path: '/ws/orders' });
 
 // Middleware
 app.use(cors());
@@ -505,168 +497,6 @@ if (!wsHeartbeatInterval) {
     });
   }, HEARTBEAT_INTERVAL_MS);
 }
-
-// WebSocket relay/proxy for PnL Positions
-pnlPositionsWss.on('connection', (clientWs, req) => {
-  console.log('🔌 Client connected to /ws/positions proxy');
-  
-  if (!PNL_API_KEY) {
-    console.error('❌ PNL_API_KEY not configured. Cannot proxy positions WebSocket.');
-    clientWs.close(1008, 'Server configuration error: PNL_API_KEY missing');
-    return;
-  }
-
-  const externalUrl = `${PNL_WS_BASE_URL}/ws/positions?api_key=${encodeURIComponent(PNL_API_KEY)}`;
-  console.log(`🔗 Connecting to external service: ${PNL_WS_BASE_URL}/ws/positions`);
-  
-  let externalWs = null;
-  let isRelayActive = false;
-
-  try {
-    externalWs = new WebSocket(externalUrl);
-  } catch (error) {
-    console.error('❌ Failed to create external WebSocket connection:', error);
-    clientWs.close(1011, 'Failed to connect to external service');
-    return;
-  }
-
-  externalWs.on('open', () => {
-    console.log('✅ Connected to external positions service');
-    isRelayActive = true;
-  });
-
-  // Relay messages from external service to client
-  externalWs.on('message', (data) => {
-    try {
-      if (clientWs.readyState === WebSocket.OPEN && isRelayActive) {
-        clientWs.send(data);
-      }
-    } catch (error) {
-      console.error('Error relaying message to client:', error);
-    }
-  });
-
-  // Relay messages from client to external service
-  clientWs.on('message', (data) => {
-    try {
-      if (externalWs && externalWs.readyState === WebSocket.OPEN && isRelayActive) {
-        externalWs.send(data);
-      }
-    } catch (error) {
-      console.error('Error relaying message to external service:', error);
-    }
-  });
-
-  // Handle errors
-  externalWs.on('error', (error) => {
-    console.error('❌ External positions WebSocket error:', error);
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.close(1011, 'External service error');
-    }
-  });
-
-  clientWs.on('error', (error) => {
-    console.error('❌ Client positions WebSocket error:', error);
-  });
-
-  // Handle close events
-  externalWs.on('close', (code, reason) => {
-    console.log(`🔌 External positions connection closed: ${code} ${reason || ''}`);
-    isRelayActive = false;
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.close(code, reason);
-    }
-  });
-
-  clientWs.on('close', (code, reason) => {
-    console.log(`🔌 Client positions connection closed: ${code} ${reason || ''}`);
-    isRelayActive = false;
-    if (externalWs && externalWs.readyState === WebSocket.OPEN) {
-      externalWs.close();
-    }
-  });
-});
-
-// WebSocket relay/proxy for PnL Orders
-pnlOrdersWss.on('connection', (clientWs, req) => {
-  console.log('🔌 Client connected to /ws/orders proxy');
-  
-  if (!PNL_API_KEY) {
-    console.error('❌ PNL_API_KEY not configured. Cannot proxy orders WebSocket.');
-    clientWs.close(1008, 'Server configuration error: PNL_API_KEY missing');
-    return;
-  }
-
-  const externalUrl = `${PNL_WS_BASE_URL}/ws/orders?api_key=${encodeURIComponent(PNL_API_KEY)}`;
-  console.log(`🔗 Connecting to external service: ${PNL_WS_BASE_URL}/ws/orders`);
-  
-  let externalWs = null;
-  let isRelayActive = false;
-
-  try {
-    externalWs = new WebSocket(externalUrl);
-  } catch (error) {
-    console.error('❌ Failed to create external WebSocket connection:', error);
-    clientWs.close(1011, 'Failed to connect to external service');
-    return;
-  }
-
-  externalWs.on('open', () => {
-    console.log('✅ Connected to external orders service');
-    isRelayActive = true;
-  });
-
-  // Relay messages from external service to client
-  externalWs.on('message', (data) => {
-    try {
-      if (clientWs.readyState === WebSocket.OPEN && isRelayActive) {
-        clientWs.send(data);
-      }
-    } catch (error) {
-      console.error('Error relaying message to client:', error);
-    }
-  });
-
-  // Relay messages from client to external service
-  clientWs.on('message', (data) => {
-    try {
-      if (externalWs && externalWs.readyState === WebSocket.OPEN && isRelayActive) {
-        externalWs.send(data);
-      }
-    } catch (error) {
-      console.error('Error relaying message to external service:', error);
-    }
-  });
-
-  // Handle errors
-  externalWs.on('error', (error) => {
-    console.error('❌ External orders WebSocket error:', error);
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.close(1011, 'External service error');
-    }
-  });
-
-  clientWs.on('error', (error) => {
-    console.error('❌ Client orders WebSocket error:', error);
-  });
-
-  // Handle close events
-  externalWs.on('close', (code, reason) => {
-    console.log(`🔌 External orders connection closed: ${code} ${reason || ''}`);
-    isRelayActive = false;
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.close(code, reason);
-    }
-  });
-
-  clientWs.on('close', (code, reason) => {
-    console.log(`🔌 Client orders connection closed: ${code} ${reason || ''}`);
-    isRelayActive = false;
-    if (externalWs && externalWs.readyState === WebSocket.OPEN) {
-      externalWs.close();
-    }
-  });
-});
 
 // Broadcast processed alerts to all connected clients
 function broadcastToClients(data) {
@@ -2915,9 +2745,7 @@ server.listen(PORT, () => {
   console.log(`📊 Toplist status: http://localhost:${PORT}/api/toplist/status`);
   console.log(`🔍 Manual analysis: http://localhost:${PORT}/api/analyze/{SYMBOL}`);
   console.log(`📊 Condition stats: http://localhost:${PORT}/api/statistics/conditions`);
-  console.log(`🌐 WebSocket server: ws://localhost:${PORT}/ws`);
-  console.log(`📊 PnL Positions proxy: ws://localhost:${PORT}/ws/positions`);
-  console.log(`📋 PnL Orders proxy: ws://localhost:${PORT}/ws/orders`);
+  console.log(`🌐 WebSocket server: ws://localhost:${PORT}`);
   console.log(`\n🔬 MACD/EMA Verification:`);
   console.log(`   Status: http://localhost:${PORT}/api/verification/status`);
   console.log(`   Start: http://localhost:${PORT}/api/verification/start`);
@@ -2938,8 +2766,6 @@ process.on('SIGINT', () => {
   toplistService.disconnect();
   if (wsHeartbeatInterval) { clearInterval(wsHeartbeatInterval); wsHeartbeatInterval = null; }
   wss.close();
-  pnlPositionsWss.close();
-  pnlOrdersWss.close();
   server.close(() => {
     console.log('✅ Server closed');
     process.exit(0);
@@ -2953,8 +2779,6 @@ process.on('SIGTERM', () => {
   toplistService.disconnect();
   if (wsHeartbeatInterval) { clearInterval(wsHeartbeatInterval); wsHeartbeatInterval = null; }
   wss.close();
-  pnlPositionsWss.close();
-  pnlOrdersWss.close();
   server.close(() => {
     console.log('✅ Server closed');
     process.exit(0);
