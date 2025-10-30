@@ -34,8 +34,14 @@ async function login(req, res) {
     const { email, password } = req.body || {};
     if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
 
-    const user = await User.findOne({ email });
+    // Explicitly select passwordHash in case schema changes to select: false in future
+    const user = await User.findOne({ email }).select('email name passwordHash');
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
+    // Guard against legacy users without a passwordHash
+    if (!user.passwordHash) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
 
     const ok = await user.validatePassword(password);
     if (!ok) return res.status(401).json({ error: 'Invalid credentials' });

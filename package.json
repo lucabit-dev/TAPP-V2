@@ -13,7 +13,8 @@
     "start-full": "./start-clean.sh",
     "start-full-original": "concurrently \"npm start\" \"npm run dev-client\"",
     "kill-ports": "lsof -ti:3001,5173 | xargs kill -9 2>/dev/null || true",
-    "vercel-build": "cd client && npm install && npm run build"
+    "vercel-build": "cd client && npm install && npm run build",
+    "check-env": "node scripts/check-env.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",

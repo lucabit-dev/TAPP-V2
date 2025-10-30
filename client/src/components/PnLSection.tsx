@@ -29,8 +29,10 @@ interface Position {
 const PnLSection: React.FC = () => {
   const [positions, setPositions] = React.useState<Map<string, Position>>(new Map());
   const [isConnected, setIsConnected] = React.useState(false);
-  const API_KEY = import.meta.env.VITE_PNL_API_KEY;
-  const WS_BASE_URL = import.meta.env.VITE_PNL_WS_BASE_URL;
+  // Get auth token from localStorage and Railway URL from env
+  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
+  const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
+  const token = localStorage.getItem('auth_token');
   const [loading, setLoading] = React.useState(true); // Start with loading true
   const [initialLoad, setInitialLoad] = React.useState(true); // Track initial connection attempt
   const [error, setError] = React.useState<string | null>(null);
@@ -46,15 +48,16 @@ const PnLSection: React.FC = () => {
       connectionTimeoutRef.current = null;
     }
 
-    if (!API_KEY) {
-      setError('API key is required');
+    if (!token) {
+      setError('Authentication required. Please log in.');
       setLoading(false);
       setInitialLoad(false);
       return;
     }
 
-    const url = `${WS_BASE_URL}/ws/positions?api_key=${encodeURIComponent(API_KEY)}`;
-    console.log('🔌 Connecting to positions WebSocket:', url.replace(API_KEY, '***'));
+    // Connect to backend proxy which will handle the external API key
+    const url = `${WS_BASE_URL}/ws/positions?token=${encodeURIComponent(token)}`;
+    console.log('🔌 Connecting to positions WebSocket proxy:', url.replace(token, '***'));
     
     try {
       setLoading(true);
@@ -65,6 +68,7 @@ const PnLSection: React.FC = () => {
       }
       
       const ws = new WebSocket(url);
+      ws.binaryType = 'blob'; // Ensure we can handle blob data
       wsRef.current = ws;
 
       // Set a timeout for initial connection attempt (10 seconds)
@@ -94,9 +98,21 @@ const PnLSection: React.FC = () => {
         }
       };
 
-      ws.onmessage = (event) => {
+      ws.onmessage = async (event) => {
         try {
-          const data = JSON.parse(event.data);
+          // Handle Blob or string data
+          let dataStr: string;
+          if (event.data instanceof Blob) {
+            dataStr = await event.data.text();
+          } else if (typeof event.data === 'string') {
+            dataStr = event.data;
+          } else {
+            // ArrayBuffer or other format
+            dataStr = new TextDecoder().decode(event.data as ArrayBuffer);
+          }
+          
+          const data = JSON.parse(dataStr);
+          console.log('📨 Received positions WebSocket message:', data);
           
           // Skip heartbeat messages
           if (data.Heartbeat) {
@@ -106,27 +122,26 @@ const PnLSection: React.FC = () => {
           // Handle position updates
           if (data.PositionID) {
             const position: Position = data;
+            console.log('✅ Position update received:', position.Symbol, position.PositionID);
             setPositions(prev => {
               const newMap = new Map(prev);
               newMap.set(position.PositionID, position);
               return newMap;
             });
+          } else {
+            console.log('⚠️ Unknown message format:', data);
           }
         } catch (err) {
-          console.error('Error parsing WebSocket message:', err);
+          console.error('❌ Error parsing WebSocket message:', err, 'Raw data type:', typeof event.data, 'Is Blob:', event.data instanceof Blob);
         }
       };
 
       ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        console.error('Attempted connection URL:', url.replace(API_KEY, '***'));
-        // Only show error after initial load is complete
-        if (!initialLoad) {
-          setError('Connection error. Reconnecting...');
-        }
+        console.error('❌ Positions WebSocket error:', error);
+        console.error('Attempted connection URL:', url.replace(token || '', '***'));
+        // Show error even during initial load after timeout
+        setError('Connection error. Please check your connection and authentication.');
         setIsConnected(false);
-        
-        // Don't set loading to false during initial load
         if (!initialLoad) {
           setLoading(false);
         }
@@ -170,7 +185,7 @@ const PnLSection: React.FC = () => {
       setLoading(false);
       setError('Failed to connect. Please try again.');
     }
-  }, [API_KEY, WS_BASE_URL, initialLoad]);
+  }, [token, WS_BASE_URL, initialLoad]);
 
   const disconnectWebSocket = React.useCallback(() => {
     if (wsRef.current) {

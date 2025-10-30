@@ -74,15 +74,61 @@ npm start
 
 ## Environment Variables
 
+### Backend (Root Directory `.env`)
+
 Create a `.env` file in the root directory:
 
 ```env
-POLYGON_API_KEY=your_polygon_api_key
-CHARTSWATCHER_USER_ID=your_user_id
-CHARTSWATCHER_API_KEY=your_api_key
-CHARTSWATCHER_CONFIG_ID=your_config_id
+# Polygon.io API Configuration
+POLYGON_API_KEY=your_polygon_api_key_here
+
+# ChartsWatcher API Configuration
+CHARTSWATCHER_USER_ID=your_user_id_here
+CHARTSWATCHER_API_KEY=your_api_key_here
+CHARTSWATCHER_CONFIG_ID=your_config_id_here
+
+# Server Configuration
 PORT=3001
+NODE_ENV=development
+
+# Database Configuration
+# For localhost MongoDB:
+MONGODB_URI=mongodb://localhost:27017/tapp
+# OR for MongoDB Atlas:
+# MONGODB_URI=mongodb+srv://username:password@cluster.mongodb.net/tapp?retryWrites=true&w=majority
+
+# Auth / Security
+JWT_SECRET=change_me_to_a_long_random_secret_string
+
+# P&L API Configuration (External service)
+PNL_API_KEY=your_pnl_api_key_here
+PNL_WS_BASE_URL=wss://sections-bot.inbitme.com
+
+# Optional
+WS_HEARTBEAT_MS=30000
+ENABLE_VERIFICATION=false
 ```
+
+### Frontend (Client Directory `.env`)
+
+Create a `.env` file in the `client/` directory:
+
+```env
+# For localhost development:
+VITE_API_BASE_URL=http://localhost:3001/api
+VITE_WS_BASE_URL=ws://localhost:3001
+
+# For production (Railway/Vercel), set these in Vercel:
+# VITE_API_BASE_URL=https://your-railway-app.up.railway.app/api
+# VITE_WS_BASE_URL=wss://your-railway-app.up.railway.app
+```
+
+**Important Notes:**
+- Backend uses `dotenv` - variables are loaded from root `.env` file
+- Frontend uses Vite - variables must start with `VITE_` prefix
+- Frontend variables are embedded at build time (not runtime)
+- For localhost: Both `.env` files will use localhost defaults
+- For production: Set variables in Railway (backend) and Vercel (frontend)
 
 ## Deployment
 

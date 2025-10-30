@@ -33,8 +33,9 @@ interface Order {
 const OrdersSection: React.FC = () => {
   const [orders, setOrders] = React.useState<Map<string, Order>>(new Map());
   const [isConnected, setIsConnected] = React.useState(false);
-  const API_KEY = import.meta.env.VITE_PNL_API_KEY;
-  const WS_BASE_URL = import.meta.env.VITE_PNL_WS_BASE_URL;
+  // Get auth token from localStorage and Railway URL from env
+  const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
+  const token = localStorage.getItem('auth_token');
   const [loading, setLoading] = React.useState(true);
   const [initialLoad, setInitialLoad] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
@@ -49,21 +50,23 @@ const OrdersSection: React.FC = () => {
       connectionTimeoutRef.current = null;
     }
 
-    if (!API_KEY) {
-      setError('API key is required');
+    if (!token) {
+      setError('Authentication required. Please log in.');
       setLoading(false);
       setInitialLoad(false);
       return;
     }
 
-    const url = `${WS_BASE_URL}/ws/orders?api_key=${encodeURIComponent(API_KEY)}`;
-    console.log('🔌 Connecting to orders WebSocket:', url.replace(API_KEY, '***'));
+    // Connect to backend proxy which will handle the external API key
+    const url = `${WS_BASE_URL}/ws/orders?token=${encodeURIComponent(token)}`;
+    console.log('🔌 Connecting to orders WebSocket proxy:', url.replace(token, '***'));
     
     try {
       setLoading(true);
       if (!initialLoad) setError(null);
 
       const ws = new WebSocket(url);
+      ws.binaryType = 'blob'; // Ensure we can handle blob data
       wsRef.current = ws;
 
       if (initialLoad) {
@@ -88,9 +91,21 @@ const OrdersSection: React.FC = () => {
         }
       };
 
-      ws.onmessage = (event) => {
+      ws.onmessage = async (event) => {
         try {
-          const data = JSON.parse(event.data);
+          // Handle Blob or string data
+          let dataStr: string;
+          if (event.data instanceof Blob) {
+            dataStr = await event.data.text();
+          } else if (typeof event.data === 'string') {
+            dataStr = event.data;
+          } else {
+            // ArrayBuffer or other format
+            dataStr = new TextDecoder().decode(event.data as ArrayBuffer);
+          }
+          
+          const data = JSON.parse(dataStr);
+          console.log('📨 Received orders WebSocket message:', data);
 
           // Ignore heartbeats and stream status markers
           if (data.Heartbeat || data.StreamStatus) return;
@@ -98,23 +113,26 @@ const OrdersSection: React.FC = () => {
           // Normalize and store by OrderID
           if (data.OrderID) {
             const order: Order = data;
+            console.log('✅ Order update received:', order.OrderID, order.Status);
             setOrders(prev => {
               const m = new Map(prev);
               m.set(order.OrderID, order);
               return m;
             });
+          } else {
+            console.log('⚠️ Unknown message format:', data);
           }
         } catch (err) {
-          // Swallow parse errors in production UI
+          console.error('❌ Error parsing WebSocket message:', err, 'Raw data type:', typeof event.data, 'Is Blob:', event.data instanceof Blob);
         }
       };
 
       ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        console.error('Attempted connection URL:', url.replace(API_KEY, '***'));
+        console.error('❌ Orders WebSocket error:', error);
+        console.error('Attempted connection URL:', url.replace(token || '', '***'));
         setIsConnected(false);
+        setError('Connection error. Please check your connection and authentication.');
         if (!initialLoad) setLoading(false);
-        if (!initialLoad) setError('Connection error. Reconnecting...');
       };
 
       ws.onclose = (event) => {
@@ -140,7 +158,7 @@ const OrdersSection: React.FC = () => {
       setLoading(false);
       setError('Failed to connect. Please try again.');
     }
-  }, [API_KEY, WS_BASE_URL, initialLoad]);
+  }, [token, WS_BASE_URL, initialLoad]);
 
   const disconnectWebSocket = React.useCallback(() => {
     if (wsRef.current) {

@@ -11,14 +11,65 @@ const IndicatorsService = require('./indicators');
 const ConditionsService = require('./conditions');
 const FloatSegmentationService = require('./api/floatSegmentationService');
 const MACDEMAVerificationService = require('./macdEmaVerificationService');
+const PnLProxyService = require('./pnlProxyService');
 
 const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3001;
 
 // WebSocket server for real-time alerts
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocket.Server({ noServer: true });
 const clients = new Set();
+
+// WebSocket servers for P&L proxy (positions and orders) - using noServer to handle routing manually
+const pnlProxyService = new PnLProxyService();
+const positionsWss = new WebSocket.Server({ noServer: true });
+const ordersWss = new WebSocket.Server({ noServer: true });
+
+// Handle positions proxy connections
+positionsWss.on('connection', async (ws, req) => {
+  console.log(`✅ Client positions WebSocket connection established (readyState: ${ws.readyState})`);
+  await pnlProxyService.handleProxyConnection(ws, req, req.url);
+});
+
+// Handle orders proxy connections
+ordersWss.on('connection', async (ws, req) => {
+  console.log(`✅ Client orders WebSocket connection established (readyState: ${ws.readyState})`);
+  await pnlProxyService.handleProxyConnection(ws, req, req.url);
+});
+
+// Manual upgrade handling to route to correct WebSocket server
+server.on('upgrade', (request, socket, head) => {
+  try {
+    // Parse pathname from URL (handle query string)
+    const url = request.url.split('?')[0]; // Remove query string for path matching
+    const pathname = url;
+
+    console.log(`🔌 WebSocket upgrade request: ${pathname}`);
+
+    if (pathname === '/ws/positions') {
+      console.log(`✅ Routing to positions WebSocket server`);
+      positionsWss.handleUpgrade(request, socket, head, (ws) => {
+        positionsWss.emit('connection', ws, request);
+      });
+    } else if (pathname === '/ws/orders') {
+      console.log(`✅ Routing to orders WebSocket server`);
+      ordersWss.handleUpgrade(request, socket, head, (ws) => {
+        ordersWss.emit('connection', ws, request);
+      });
+    } else {
+      // Default: route to main alerts WebSocket server
+      console.log(`✅ Routing to main alerts WebSocket server`);
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit('connection', ws, request);
+      });
+    }
+  } catch (error) {
+    console.error('❌ WebSocket upgrade error:', error);
+    socket.destroy();
+  }
+});
+
 // Heartbeat (ping/pong) to prevent idle proxies from closing connections
 const HEARTBEAT_INTERVAL_MS = parseInt(process.env.WS_HEARTBEAT_MS || '30000', 10);
 let wsHeartbeatInterval = null;
