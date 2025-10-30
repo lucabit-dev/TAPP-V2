@@ -69,8 +69,10 @@ After importing your project, you need to add environment variables:
 | `CHARTSWATCHER_USER_ID` | Your ChartsWatcher User ID | Production, Preview, Development |
 | `CHARTSWATCHER_API_KEY` | Your ChartsWatcher API Key | Production, Preview, Development |
 | `CHARTSWATCHER_CONFIG_ID` | Your ChartsWatcher Config ID | Production, Preview, Development |
-| `VITE_API_BASE_URL` | `https://YOUR_DOMAIN.vercel.app/api` | Production, Preview, Development |
-| `VITE_WS_BASE_URL` | `wss://YOUR_DOMAIN.vercel.app` | Production, Preview, Development |
+| `VITE_API_BASE_URL` | `https://YOUR_RAILWAY_DOMAIN.railway.app/api` | Production, Preview, Development |
+| `VITE_WS_BASE_URL` | `wss://YOUR_RAILWAY_DOMAIN.railway.app` | Production, Preview, Development |
+
+**Security Note**: `PNL_API_KEY` is now stored server-side in Railway, not in Vercel (see Railway variables below).
 
 **Note**: Replace `YOUR_DOMAIN` with your actual Vercel domain (you'll get this after first deployment).
 
@@ -90,13 +92,23 @@ After adding environment variables:
 4. Check "Use existing Build Cache"
 5. Click "Redeploy"
 
-## Step 5: Update Frontend URLs
+## Step 5: Configure PnL WebSocket Variables in Railway
 
-Once deployed, you'll get a URL like `https://your-project-name.vercel.app`
+**Security Update**: The PnL API key is now stored server-side in Railway for better security.
 
-Update these environment variables in Vercel:
-- `VITE_API_BASE_URL` = `https://your-project-name.vercel.app/api`
-- `VITE_WS_BASE_URL` = `wss://your-project-name.vercel.app`
+For the PnL (Orders/Positions) section, add these environment variables in **Railway** (not Vercel):
+
+- `PNL_API_KEY` = Your PnL API key (for authenticating with `sections-bot.inbitme.com`)
+- `PNL_WS_BASE_URL` = `wss://sections-bot.inbitme.com` (optional, defaults to this value)
+
+The backend will proxy WebSocket connections, so the frontend doesn't need the API key.
+
+## Step 6: Update Frontend URLs (if using Railway backend)
+
+If you're using Railway for the backend, update these environment variables in Vercel to point to your Railway domain:
+
+- `VITE_API_BASE_URL` = `https://YOUR-RAILWAY-PROJECT.railway.app/api`
+- `VITE_WS_BASE_URL` = `wss://YOUR-RAILWAY-PROJECT.railway.app` (for main app WebSocket)
 
 Then redeploy again.
 
@@ -119,9 +131,24 @@ For better WebSocket support, consider:
 
 1. Go to https://railway.app
 2. Create new project from GitHub
-3. Add environment variables
+3. Add environment variables (see Railway Environment Variables section below)
 4. Railway provides persistent WebSocket connections
-5. Update `VITE_API_BASE_URL` and `VITE_WS_BASE_URL` to point to Railway
+5. Update `VITE_API_BASE_URL` and `VITE_WS_BASE_URL` in Vercel to point to Railway
+
+#### Railway Environment Variables
+
+For the backend server on Railway, add these variables:
+
+| Variable Name | Value | Notes |
+|--------------|-------|-------|
+| `POLYGON_API_KEY` | Your Polygon.io API key | Required |
+| `CHARTSWATCHER_USER_ID` | Your ChartsWatcher User ID | Required |
+| `CHARTSWATCHER_API_KEY` | Your ChartsWatcher API Key | Required |
+| `CHARTSWATCHER_CONFIG_ID` | Your ChartsWatcher Config ID | Required |
+| `PNL_API_KEY` | Your PnL API key (for Orders/Positions WebSocket proxy) | Required |
+| `PNL_WS_BASE_URL` | `wss://sections-bot.inbitme.com` | Optional, defaults to sections-bot |
+| `PORT` | `3001` (or let Railway assign) | Optional, Railway can auto-assign |
+| `NODE_ENV` | `production` | Recommended |
 
 ## Troubleshooting
 
