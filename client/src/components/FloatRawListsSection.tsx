@@ -1,4 +1,5 @@
 import React from 'react';
+import { useAuth } from '../auth/AuthContext';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
@@ -19,6 +20,7 @@ interface Props {
 }
 
 const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
+  const { fetchWithAuth } = useAuth();
   const [raw, setRaw] = React.useState<Record<string, ToplistRow[]>>({});
   const [unified, setUnified] = React.useState<Array<ToplistRow & { origin: string }>>([]);
   const meetsTechRef = React.useRef<Set<string>>(new Set());
@@ -38,6 +40,8 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
   const restartMsgTimerRef = React.useRef<number | null>(null);
   const [buysEnabled, setBuysEnabled] = React.useState(false);
   const [isTogglingBuys, setIsTogglingBuys] = React.useState(false);
+  const [buyingSymbols, setBuyingSymbols] = React.useState<Set<string>>(new Set());
+  const [buyStatuses, setBuyStatuses] = React.useState<Record<string, 'success' | 'error' | null>>({});
 
   // Build unified list whenever raw changes
   React.useEffect(() => {
@@ -320,6 +324,65 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
     }
   };
 
+  const handleBuyClick = async (symbol: string | null | undefined) => {
+    if (!symbol) return;
+    
+    const cleanSymbol = String(symbol).trim().toUpperCase();
+    if (buyingSymbols.has(cleanSymbol)) return; // Prevent duplicate clicks
+    
+    setBuyingSymbols(prev => new Set(prev).add(cleanSymbol));
+    setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: null }));
+    
+    try {
+      const resp = await fetchWithAuth(`${API_BASE_URL}/buys/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: cleanSymbol })
+      });
+      
+      const data = await resp.json().catch(() => ({}));
+      
+      if (resp.ok && data?.success) {
+        console.log(`✅ Buy signal sent for ${cleanSymbol}:`, data.data?.notifyStatus);
+        setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'success' }));
+        // Clear status after 3 seconds
+        setTimeout(() => {
+          setBuyStatuses(prev => {
+            const next = { ...prev };
+            delete next[cleanSymbol];
+            return next;
+          });
+        }, 3000);
+      } else {
+        console.error(`❌ Failed to send buy signal for ${cleanSymbol}:`, data.error || 'Unknown error');
+        setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'error' }));
+        setTimeout(() => {
+          setBuyStatuses(prev => {
+            const next = { ...prev };
+            delete next[cleanSymbol];
+            return next;
+          });
+        }, 3000);
+      }
+    } catch (error) {
+      console.error(`❌ Error sending buy signal for ${cleanSymbol}:`, error);
+      setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'error' }));
+      setTimeout(() => {
+        setBuyStatuses(prev => {
+          const next = { ...prev };
+          delete next[cleanSymbol];
+          return next;
+        });
+      }, 3000);
+    } finally {
+      setBuyingSymbols(prev => {
+        const next = new Set(prev);
+        next.delete(cleanSymbol);
+        return next;
+      });
+    }
+  };
+
   const getColumnDisplayName = (key: string): string => {
     const map: Record<string,string> = {
       'SymbolColumn': 'Symbol',
@@ -557,17 +620,57 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
                                 })}
                                 {/* BUY button column at the end */}
                                 <div className="text-center leading-4 px-0.5">
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      // TODO: Implement buy action
-                                      console.log(`Buy action for ${symbolVal}`);
-                                    }}
-                                    className="px-2 py-0.5 bg-blue-600 hover:bg-blue-700 text-white text-[9px] font-semibold rounded transition-colors"
-                                    title={`Buy ${symbolVal}`}
-                                  >
-                                    BUY
-                                  </button>
+                                  {(() => {
+                                    const symbolForBuy = cleanSymbol || null;
+                                    const isBuying = symbolForBuy ? buyingSymbols.has(symbolForBuy) : false;
+                                    const status = symbolForBuy ? buyStatuses[symbolForBuy] : null;
+                                    const isDisabled = isBuying || !symbolForBuy;
+                                    
+                                    let buttonClass = 'px-2 py-0.5 text-white text-[9px] font-semibold rounded transition-colors';
+                                    let buttonText = 'BUY';
+                                    let buttonTitle = `Send buy signal for ${symbolVal}`;
+                                    
+                                    if (isBuying) {
+                                      buttonClass += ' bg-gray-600 cursor-not-allowed';
+                                      buttonText = '...';
+                                      buttonTitle = `Sending buy signal for ${symbolVal}...`;
+                                    } else if (status === 'success') {
+                                      buttonClass += ' bg-green-600';
+                                      buttonText = '✓';
+                                      buttonTitle = `Buy signal sent successfully for ${symbolVal}`;
+                                    } else if (status === 'error') {
+                                      buttonClass += ' bg-red-600';
+                                      buttonText = '✗';
+                                      buttonTitle = `Failed to send buy signal for ${symbolVal}`;
+                                    } else {
+                                      // Show different colors based on stock status
+                                      if (meetsAll) {
+                                        buttonClass += ' bg-green-600 hover:bg-green-700';
+                                        buttonTitle = `Send buy signal for ${symbolVal} (Tech + Momentum ready)`;
+                                      } else if (meetsTech) {
+                                        buttonClass += ' bg-yellow-600 hover:bg-yellow-700';
+                                        buttonTitle = `Send buy signal for ${symbolVal} (Tech only)`;
+                                      } else {
+                                        buttonClass += ' bg-blue-600 hover:bg-blue-700';
+                                      }
+                                    }
+                                    
+                                    return (
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          if (!isDisabled) {
+                                            handleBuyClick(symbolVal);
+                                          }
+                                        }}
+                                        disabled={isDisabled}
+                                        className={buttonClass}
+                                        title={buttonTitle}
+                                      >
+                                        {buttonText}
+                                      </button>
+                                    );
+                                  })()}
                                 </div>
                               </div>
                             );

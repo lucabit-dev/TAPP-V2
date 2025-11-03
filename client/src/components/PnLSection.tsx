@@ -1,5 +1,6 @@
 import React from 'react';
 import { Virtuoso } from 'react-virtuoso';
+import { useAuth } from '../auth/AuthContext';
 
 interface Position {
   PositionID: string;
@@ -27,6 +28,7 @@ interface Position {
 }
 
 const PnLSection: React.FC = () => {
+  const { fetchWithAuth } = useAuth();
   const [positions, setPositions] = React.useState<Map<string, Position>>(new Map());
   const [isConnected, setIsConnected] = React.useState(false);
   // Get auth token from localStorage and Railway URL from env
@@ -36,6 +38,9 @@ const PnLSection: React.FC = () => {
   const [loading, setLoading] = React.useState(true); // Start with loading true
   const [initialLoad, setInitialLoad] = React.useState(true); // Track initial connection attempt
   const [error, setError] = React.useState<string | null>(null);
+  const [sellingAll, setSellingAll] = React.useState(false);
+  const [sellAllStatus, setSellAllStatus] = React.useState<{ success: boolean; message: string } | null>(null);
+  const [sellingPositions, setSellingPositions] = React.useState<Set<string>>(new Set());
   const wsRef = React.useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = React.useRef(0);
   const reconnectTimerRef = React.useRef<number | null>(null);
@@ -254,6 +259,124 @@ const PnLSection: React.FC = () => {
     return sum + (isNaN(pl) ? 0 : pl);
   }, 0);
 
+  const handleSell = async (position: Position) => {
+    const positionId = position.PositionID;
+    const symbol = position.Symbol?.trim().toUpperCase();
+    const quantity = parseInt(position.Quantity || '0', 10);
+    
+    if (!symbol || sellingPositions.has(positionId)) return;
+    
+    if (!quantity || quantity <= 0) {
+      alert(`Invalid quantity for ${symbol}`);
+      return;
+    }
+    
+    // Confirm action
+    const action = position.LongShort === 'Long' ? 'sell' : 'close';
+    if (!confirm(`Are you sure you want to ${action} ${quantity} ${symbol}?`)) {
+      return;
+    }
+    
+    setSellingPositions(prev => new Set(prev).add(positionId));
+    
+    try {
+      // Send sell order using POST /order endpoint format
+      // https://inbitme.gitbook.io/sections-bot/xKy06Pb8j01LsqEnmSik/rest-api/ordenes
+      const response = await fetchWithAuth(`${API_BASE_URL}/sell`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          symbol,
+          quantity,
+          order_type: 'MARKET', // Use MARKET order for immediate execution
+          long_short: position.LongShort // Include position side for proper handling
+        })
+      });
+      
+      if (!response.ok) {
+        // HTTP error (500, etc) - try to get error message
+        const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}: ${response.statusText}` }));
+        alert(`Failed to ${action} ${symbol}: ${errorData.error || `HTTP ${response.status}`}`);
+        return;
+      }
+      
+      const data = await response.json();
+      
+      if (data.success) {
+        console.log(`✅ Sell order sent for ${quantity} ${symbol}:`, data.data?.notifyStatus);
+        // Position will be removed from the list via WebSocket update
+      } else {
+        // API returned error response
+        alert(`Failed to ${action} ${symbol}: ${data.error || data.data?.notifyStatus || 'Unknown error'}`);
+      }
+    } catch (err: any) {
+      alert(`Error ${action === 'sell' ? 'selling' : 'closing'} ${symbol}: ${err.message || 'Unknown error'}`);
+    } finally {
+      setSellingPositions(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(positionId);
+        return newSet;
+      });
+    }
+  };
+
+  const handleSellAll = async () => {
+    if (positionsArray.length === 0 || sellingAll) return;
+    
+    // Confirm action - warn user this is a panic sell
+    if (!confirm(`⚠️ PANIC SELL: This will cancel all pending orders and sell ALL positions.\n\nAre you sure you want to proceed?`)) {
+      return;
+    }
+    
+    setSellingAll(true);
+    setSellAllStatus(null);
+    
+    try {
+      // According to API documentation: POST /sell_all with no body
+      // Returns 200 with no content on success
+      // https://inbitme.gitbook.io/sections-bot/xKy06Pb8j01LsqEnmSik/rest-api/ordenes
+      const response = await fetchWithAuth(`${API_BASE_URL}/sell_all`, {
+        method: 'POST',
+        headers: { 'Accept': '*/*' }
+      });
+      
+      if (!response.ok) {
+        // HTTP error - try to get error message
+        const errorData = await response.json().catch(() => ({ 
+          error: `HTTP ${response.status}: ${response.statusText}` 
+        }));
+        setSellAllStatus({
+          success: false,
+          message: errorData.error || `HTTP ${response.status}`
+        });
+        return;
+      }
+      
+      const data = await response.json();
+      
+      if (data.success) {
+        setSellAllStatus({
+          success: true,
+          message: data.data?.message || 'Sell All executed successfully - all orders cancelled and positions sold'
+        });
+      } else {
+        setSellAllStatus({
+          success: false,
+          message: data.error || data.data?.message || 'Failed to execute Sell All'
+        });
+      }
+    } catch (err: any) {
+      setSellAllStatus({
+        success: false,
+        message: err.message || 'Error executing Sell All'
+      });
+    } finally {
+      setSellingAll(false);
+      // Clear status message after 8 seconds (longer for important message)
+      setTimeout(() => setSellAllStatus(null), 8000);
+    }
+  };
+
   return (
     <div className="h-full flex flex-col bg-[#1e1e1e]">
       {/* Header */}
@@ -270,9 +393,42 @@ const PnLSection: React.FC = () => {
                 ({positionsArray.length} positions)
               </span>
             )}
+            {positionsArray.length > 0 && (
+              <button
+                onClick={handleSellAll}
+                disabled={sellingAll}
+                className={`ml-3 px-3 py-1.5 rounded text-xs font-medium transition-colors ${
+                  sellingAll
+                    ? 'bg-[#3e3e42] text-[#808080] cursor-not-allowed'
+                    : 'bg-[#f44747] hover:bg-[#d93a3a] text-white'
+                }`}
+              >
+                {sellingAll ? (
+                  <span className="flex items-center space-x-1">
+                    <svg className="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span>Selling...</span>
+                  </span>
+                ) : (
+                  'Sell All'
+                )}
+              </button>
+            )}
           </div>
         </div>
         
+        {/* Sell All Status Message */}
+        {sellAllStatus && (
+          <div className={`mb-3 p-2 rounded text-xs ${
+            sellAllStatus.success 
+              ? 'bg-[#0d3a2e] border border-[#4ec9b0] text-[#4ec9b0]' 
+              : 'bg-[#5a1d1d] border border-[#f44747] text-[#f44747]'
+          }`}>
+            {sellAllStatus.message}
+          </div>
+        )}
 
         {/* Summary Stats */}
         {positionsArray.length > 0 && (
@@ -356,10 +512,11 @@ const PnLSection: React.FC = () => {
                 <div className="col-span-1 text-right">Avg Price</div>
                 <div className="col-span-1 text-right">Last</div>
                 <div className="col-span-1 text-right">Market Value</div>
-                <div className="col-span-2 text-right">Unrealized P&L</div>
+                <div className="col-span-1 text-right">Unrealized P&L</div>
                 <div className="col-span-1 text-right">P&L %</div>
                 <div className="col-span-1 text-right">Today's P&L</div>
                 <div className="col-span-1 text-right">Time</div>
+                <div className="col-span-1 text-center">Action</div>
               </div>
             </div>
 
@@ -419,12 +576,9 @@ const PnLSection: React.FC = () => {
                         </div>
 
                         {/* Unrealized P&L */}
-                        <div className="col-span-2 text-right">
-                          <div className={`font-semibold font-mono ${unrealizedPL >= 0 ? 'text-[#4ec9b0]' : 'text-[#f44747]'}`}>
+                        <div className="col-span-1 text-right">
+                          <div className={`font-semibold font-mono text-xs ${unrealizedPL >= 0 ? 'text-[#4ec9b0]' : 'text-[#f44747]'}`}>
                             {formatPrice(position.UnrealizedProfitLoss)}
-                          </div>
-                          <div className={`text-xs font-mono ${unrealizedPL >= 0 ? 'text-[#4ec9b0]' : 'text-[#f44747]'}`}>
-                            {formatPrice(position.UnrealizedProfitLossQty)}
                           </div>
                         </div>
 
@@ -445,6 +599,28 @@ const PnLSection: React.FC = () => {
                         {/* Time */}
                         <div className="col-span-1 text-right">
                           <div className="text-xs text-[#969696] font-mono">{formatTimestamp(position.Timestamp)}</div>
+                        </div>
+
+                        {/* Sell Button */}
+                        <div className="col-span-1 text-center">
+                          <button
+                            onClick={() => handleSell(position)}
+                            disabled={sellingPositions.has(position.PositionID)}
+                            className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
+                              sellingPositions.has(position.PositionID)
+                                ? 'bg-[#3e3e42] text-[#808080] cursor-not-allowed'
+                                : 'bg-[#f44747] hover:bg-[#d93a3a] text-white'
+                            }`}
+                          >
+                            {sellingPositions.has(position.PositionID) ? (
+                              <svg className="animate-spin h-3 w-3 mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                              </svg>
+                            ) : (
+                              'Sell'
+                            )}
+                          </button>
                         </div>
                       </div>
                     </div>

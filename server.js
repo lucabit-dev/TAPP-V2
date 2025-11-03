@@ -2332,6 +2332,10 @@ app.post('/api/buys/test', async (req, res) => {
     if (!symbol) {
       return res.status(400).json({ success: false, error: 'Missing symbol' });
     }
+    
+    console.log(`🛒 Manual buy signal for ${symbol}`);
+    
+    // Send buy signal to external service
     let notifyStatus = '';
     try {
       const resp = await fetch(`https://sections-bot.inbitme.com/buy/${encodeURIComponent(symbol)}`, { method: 'POST' });
@@ -2339,8 +2343,64 @@ app.post('/api/buys/test', async (req, res) => {
     } catch (err) {
       notifyStatus = `ERROR: ${err.message}`;
     }
-    return res.json({ success: true, data: { symbol, notifyStatus } });
+    
+    // Find which config/origin this symbol belongs to
+    let configId = null;
+    let groupKey = null;
+    const toplistMap = toplistService.toplistByConfig || {};
+    outer: for (const configIdKey of Object.keys(toplistMap)) {
+      const rows = toplistMap[configIdKey] || [];
+      for (const row of rows) {
+        const sym = row?.symbol || (Array.isArray(row?.columns) ? (row.columns.find(c => c.key === 'SymbolColumn')?.value) : null);
+        if ((sym || '').toUpperCase() === symbol) {
+          configId = configIdKey;
+          const groupInfo = floatService.getGroupInfoByConfig(configIdKey);
+          groupKey = groupInfo?.key || null;
+          break outer;
+        }
+      }
+    }
+    
+    // Analyze symbol to get indicators and momentum at buy moment
+    let indicators = null;
+    let momentum = null;
+    let price = null;
+    try {
+      const analysis = await analyzeSymbol(symbol);
+      if (analysis) {
+        indicators = analysis.indicators || null;
+        momentum = analysis.momentum || null;
+        price = analysis.lastClose || null;
+      }
+    } catch (analyzeErr) {
+      console.error(`Error analyzing ${symbol} for manual buy:`, analyzeErr.message);
+    }
+    
+    // Create buy entry and add to buy list
+    const nowIso = new Date().toISOString();
+    const entry = {
+      ticker: symbol,
+      timestamp: toUTC4(nowIso),
+      price: price,
+      configId: configId,
+      group: groupKey,
+      notifyStatus,
+      indicators: indicators,
+      momentum: momentum,
+      manual: true // Mark as manual buy
+    };
+    
+    buyList.unshift(entry);
+    lastBuyTsByTicker.set(symbol, nowIso);
+    
+    // Broadcast to clients
+    broadcastToClients({ type: 'BUY_SIGNAL', data: entry, timestamp: nowIso });
+    
+    console.log(`✅ Manual buy logged for ${symbol} - Added to buy list`);
+    
+    return res.json({ success: true, data: { symbol, notifyStatus, addedToBuyList: true } });
   } catch (e) {
+    console.error(`❌ Error in manual buy for ${req.body?.symbol}:`, e);
     res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -2352,6 +2412,10 @@ app.get('/api/buys/test', async (req, res) => {
     if (!symbol) {
       return res.status(400).json({ success: false, error: 'Missing symbol' });
     }
+    
+    console.log(`🛒 Manual buy signal (GET) for ${symbol}`);
+    
+    // Send buy signal to external service
     let notifyStatus = '';
     try {
       const resp = await fetch(`https://sections-bot.inbitme.com/buy/${encodeURIComponent(symbol)}`, { method: 'POST' });
@@ -2359,8 +2423,64 @@ app.get('/api/buys/test', async (req, res) => {
     } catch (err) {
       notifyStatus = `ERROR: ${err.message}`;
     }
-    return res.json({ success: true, data: { symbol, notifyStatus } });
+    
+    // Find which config/origin this symbol belongs to
+    let configId = null;
+    let groupKey = null;
+    const toplistMap = toplistService.toplistByConfig || {};
+    outer: for (const configIdKey of Object.keys(toplistMap)) {
+      const rows = toplistMap[configIdKey] || [];
+      for (const row of rows) {
+        const sym = row?.symbol || (Array.isArray(row?.columns) ? (row.columns.find(c => c.key === 'SymbolColumn')?.value) : null);
+        if ((sym || '').toUpperCase() === symbol) {
+          configId = configIdKey;
+          const groupInfo = floatService.getGroupInfoByConfig(configIdKey);
+          groupKey = groupInfo?.key || null;
+          break outer;
+        }
+      }
+    }
+    
+    // Analyze symbol to get indicators and momentum at buy moment
+    let indicators = null;
+    let momentum = null;
+    let price = null;
+    try {
+      const analysis = await analyzeSymbol(symbol);
+      if (analysis) {
+        indicators = analysis.indicators || null;
+        momentum = analysis.momentum || null;
+        price = analysis.lastClose || null;
+      }
+    } catch (analyzeErr) {
+      console.error(`Error analyzing ${symbol} for manual buy:`, analyzeErr.message);
+    }
+    
+    // Create buy entry and add to buy list
+    const nowIso = new Date().toISOString();
+    const entry = {
+      ticker: symbol,
+      timestamp: toUTC4(nowIso),
+      price: price,
+      configId: configId,
+      group: groupKey,
+      notifyStatus,
+      indicators: indicators,
+      momentum: momentum,
+      manual: true // Mark as manual buy
+    };
+    
+    buyList.unshift(entry);
+    lastBuyTsByTicker.set(symbol, nowIso);
+    
+    // Broadcast to clients
+    broadcastToClients({ type: 'BUY_SIGNAL', data: entry, timestamp: nowIso });
+    
+    console.log(`✅ Manual buy logged for ${symbol} - Added to buy list`);
+    
+    return res.json({ success: true, data: { symbol, notifyStatus, addedToBuyList: true } });
   } catch (e) {
+    console.error(`❌ Error in manual buy (GET) for ${req.query?.symbol}:`, e);
     res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -2379,6 +2499,228 @@ app.post('/api/buys/trigger-mode', (req, res) => {
     buyTriggerMode = mode;
     res.json({ success: true, data: { mode: buyTriggerMode } });
   } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// Individual sell endpoint - sells a single position
+app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
+  try {
+    const symbol = (req.body?.symbol || '').toString().trim().toUpperCase();
+    const quantity = parseInt(req.body?.quantity || '0', 10);
+    const orderType = (req.body?.order_type || 'MARKET').toString().toUpperCase();
+    const limitPrice = req.body?.limit_price ? parseFloat(req.body.limit_price) : undefined;
+    const longShort = (req.body?.long_short || req.body?.longShort || '').toString().trim();
+    
+    if (!symbol) {
+      return res.status(400).json({ success: false, error: 'Missing symbol' });
+    }
+    
+    if (!quantity || quantity <= 0) {
+      return res.status(400).json({ success: false, error: 'Missing or invalid quantity' });
+    }
+    
+    // Determine side: for Long positions, SELL to close; for Short positions, BUY to close
+    const isLong = longShort.toLowerCase() === 'long';
+    const side = isLong ? 'SELL' : 'BUY';
+    const action = isLong ? 'sell' : 'close (buy back)';
+    
+    console.log(`💸 Manual ${action} signal for ${quantity} ${symbol} (${orderType}, ${side})`);
+    
+    // Build request body according to Sections Bot API documentation
+    // https://inbitme.gitbook.io/sections-bot/xKy06Pb8j01LsqEnmSik/rest-api/ordenes
+    // Note: API expects quantity as integer, but let's ensure it's properly formatted
+    const orderBody = {
+      symbol: symbol,
+      side: side,
+      order_type: orderType,
+      quantity: quantity
+    };
+    
+    // Add limit_price only if order_type is LIMIT or STOP_LIMIT
+    if ((orderType === 'LIMIT' || orderType === 'STOP_LIMIT') && limitPrice) {
+      orderBody.limit_price = limitPrice;
+    }
+    
+    // Send sell order to external service using POST /order
+    let notifyStatus = '';
+    let responseData = null;
+    let errorMessage = null;
+    
+    try {
+      console.log(`📤 Sending sell order to external API:`, JSON.stringify(orderBody, null, 2));
+      
+      const resp = await fetch('https://sections-bot.inbitme.com/order', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(orderBody)
+      });
+      
+      notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
+      
+      // Try to get response body (both success and error cases)
+      let responseText = '';
+      try {
+        responseText = await resp.text();
+        if (responseText) {
+          try {
+            responseData = JSON.parse(responseText);
+          } catch {
+            // Not JSON, keep as text
+            responseData = responseText;
+          }
+        }
+      } catch (textErr) {
+        console.error(`⚠️ Could not read response body:`, textErr.message);
+      }
+      
+      if (resp.ok) {
+        console.log(`✅ Sell order sent for ${symbol}: ${notifyStatus}`, responseData ? `Response: ${JSON.stringify(responseData)}` : '');
+      } else {
+        errorMessage = `HTTP ${notifyStatus}`;
+        if (responseData) {
+          // If response is an object, try to extract error message
+          if (typeof responseData === 'object') {
+            errorMessage = responseData.message || responseData.error || responseData.detail || JSON.stringify(responseData);
+          } else {
+            errorMessage = String(responseData);
+          }
+        }
+        console.error(`❌ Error selling ${symbol}:`, {
+          status: notifyStatus,
+          response: responseData,
+          body: responseText
+        });
+      }
+    } catch (err) {
+      notifyStatus = `ERROR: ${err.message}`;
+      errorMessage = err.message;
+      console.error(`❌ Network/Parse error selling ${symbol}:`, {
+        message: err.message,
+        stack: err.stack
+      });
+    }
+    
+    const isSuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
+    
+    // Always return 200 with success flag, so frontend can handle API errors gracefully
+    // Only return 500 if there was a network/parsing error (notifyStatus starts with "ERROR:")
+    if (notifyStatus.startsWith('ERROR:')) {
+      // This is a backend/network error, return 500
+      return res.status(500).json({ 
+        success: false, 
+        error: errorMessage || `Failed to sell ${symbol}: Network or parsing error`,
+        data: { symbol, quantity, orderType, notifyStatus, response: responseData } 
+      });
+    }
+    
+    // External API responded (even if error), return 200 with success flag
+    return res.status(200).json({ 
+      success: isSuccess, 
+      error: !isSuccess ? (errorMessage || `Failed to sell ${symbol}`) : undefined,
+      data: { symbol, quantity, orderType, notifyStatus, response: responseData } 
+    });
+  } catch (e) {
+    console.error(`❌ Error in manual sell for ${req.body?.symbol}:`, e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// Sell All endpoint - panic sell: cancels pending orders and sells everything
+// According to Sections Bot API: https://inbitme.gitbook.io/sections-bot/xKy06Pb8j01LsqEnmSik/rest-api/ordenes
+// POST /sell_all - No body required, returns 200 with no content on success
+app.post('/api/sell_all', requireDbReady, requireAuth, async (req, res) => {
+  try {
+    console.log(`💸 Sell All: Executing panic sell (cancels orders & sells all positions)`);
+    
+    // According to API documentation: POST /sell_all with no body
+    // Returns 200 with no content on success
+    let notifyStatus = '';
+    let responseData = null;
+    let errorMessage = null;
+    
+    try {
+      const resp = await fetch('https://sections-bot.inbitme.com/sell_all', {
+        method: 'POST',
+        headers: {
+          'Accept': '*/*'
+        }
+      });
+      
+      notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
+      
+      // Try to get response body (only if there is content)
+      const contentLength = resp.headers.get('content-length');
+      if (contentLength && parseInt(contentLength, 10) > 0) {
+        try {
+          const responseText = await resp.text();
+          if (responseText) {
+            try {
+              responseData = JSON.parse(responseText);
+            } catch {
+              responseData = responseText;
+            }
+          }
+        } catch (textErr) {
+          console.error(`⚠️ Could not read response body:`, textErr.message);
+        }
+      }
+      
+      if (resp.ok) {
+        // Success - API returns 200 with no content according to documentation
+        console.log(`✅ Sell All executed successfully: ${notifyStatus}`);
+      } else {
+        errorMessage = `HTTP ${notifyStatus}`;
+        if (responseData) {
+          if (typeof responseData === 'object') {
+            errorMessage = responseData.message || responseData.error || responseData.detail || JSON.stringify(responseData);
+          } else {
+            errorMessage = String(responseData);
+          }
+        }
+        console.error(`❌ Error in Sell All:`, {
+          status: notifyStatus,
+          response: responseData
+        });
+      }
+    } catch (err) {
+      notifyStatus = `ERROR: ${err.message}`;
+      errorMessage = err.message;
+      console.error(`❌ Network/Parse error executing Sell All:`, {
+        message: err.message,
+        stack: err.stack
+      });
+    }
+    
+    const isSuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
+    
+    // Handle network errors with 500, otherwise return 200 with success flag
+    if (notifyStatus.startsWith('ERROR:')) {
+      return res.status(500).json({
+        success: false,
+        error: errorMessage || 'Network or parsing error executing Sell All',
+        data: { notifyStatus, response: responseData }
+      });
+    }
+    
+    // Return 200 with success flag (even if external API returned error)
+    return res.status(200).json({
+      success: isSuccess,
+      error: !isSuccess ? (errorMessage || 'Sell All failed') : undefined,
+      data: {
+        notifyStatus,
+        response: responseData,
+        message: isSuccess 
+          ? 'Sell All executed successfully - all pending orders cancelled and positions sold' 
+          : `Sell All failed: ${notifyStatus}`
+      }
+    });
+    
+  } catch (e) {
+    console.error('❌ Error in sell_all:', e);
     res.status(500).json({ success: false, error: e.message });
   }
 });
