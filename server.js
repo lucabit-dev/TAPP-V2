@@ -895,14 +895,12 @@ async function revalidateCurrentFloatLists() {
             if (hasBoughtToday && hasBoughtToday(ticker)) {
               continue;
             }
-            let notifyStatus = '';
-            try {
-              const resp = await fetch(`https://sections-bot.inbitme.com/buy/${encodeURIComponent(ticker)}`, { method: 'POST' });
-              notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
-            } catch (notifyErr) {
-              notifyStatus = `ERROR: ${notifyErr.message}`;
-            }
+            
             const groupKey = floatService.getGroupInfoByConfig(configId)?.key || null;
+            
+            // Use new buy order logic with LIMIT orders and quantity based on price
+            const buyResult = await sendBuyOrder(ticker, configId, groupKey);
+            
             // Calculate momentum at exact buy moment using fresh analysis
             let momentum = null;
             try {
@@ -919,12 +917,16 @@ async function revalidateCurrentFloatLists() {
             const entry = {
               ticker,
               timestamp: toUTC4(nowIso),
-              price: item.lastCandle?.close || item.price || null,
+              price: buyResult.limitPrice || item.lastCandle?.close || item.price || null,
               configId: configId,
               group: groupKey,
-              notifyStatus,
+              notifyStatus: buyResult.notifyStatus,
               indicators: item.indicators || null,
-              momentum: momentum
+              momentum: momentum,
+              quantity: buyResult.quantity,
+              orderType: 'LIMIT',
+              limitPrice: buyResult.limitPrice,
+              stopLoss: buyResult.stopLoss
             };
             buyList.unshift(entry);
             lastBuyTsByTicker.set(ticker, nowIso);
@@ -1435,14 +1437,12 @@ async function scanBuySignalsForConfig(configId) {
         : isPositive);
       if (!shouldTrigger) continue;
       if (hasBoughtToday && hasBoughtToday(ticker)) continue;
-      let notifyStatus = '';
-      try {
-        const resp = await fetch(`https://sections-bot.inbitme.com/buy/${encodeURIComponent(ticker)}`, { method: 'POST' });
-        notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
-      } catch (notifyErr) {
-        notifyStatus = `ERROR: ${notifyErr.message}`;
-      }
+      
       const groupKey = floatService.getGroupInfoByConfig(configId)?.key || null;
+      
+      // Use new buy order logic with LIMIT orders and quantity based on price
+      const buyResult = await sendBuyOrder(ticker, configId, groupKey);
+      
       // Calculate momentum at exact buy moment using fresh analysis
       let momentum = null;
       try {
@@ -1459,12 +1459,16 @@ async function scanBuySignalsForConfig(configId) {
       const entry = {
         ticker,
         timestamp: toUTC4(nowIso),
-        price: item.lastCandle?.close || item.price || null,
+        price: buyResult.limitPrice || item.lastCandle?.close || item.price || null,
         configId: configId,
         group: groupKey,
-        notifyStatus,
+        notifyStatus: buyResult.notifyStatus,
         indicators: item.indicators || null,
-        momentum: momentum
+        momentum: momentum,
+        quantity: buyResult.quantity,
+        orderType: 'LIMIT',
+        limitPrice: buyResult.limitPrice,
+        stopLoss: buyResult.stopLoss
       };
       buyList.unshift(entry);
       if (typeof lastBuyTsByTicker !== 'undefined') {
