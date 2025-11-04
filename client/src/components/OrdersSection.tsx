@@ -1,5 +1,6 @@
 import React from 'react';
 import { Virtuoso } from 'react-virtuoso';
+import { useAuth } from '../auth/AuthContext';
 
 interface OrderLeg {
   AssetType: string;
@@ -25,20 +26,23 @@ interface Order {
   OrderType: string; // e.g., Limit, Market
   PriceUsedForBuyingPower?: string;
   Routing?: string;
-  Status: string; // e.g., DON
-  StatusDescription: string; // e.g., Queued
+  Status: string; // e.g., DON, REC
+  StatusDescription: string; // e.g., Queued, Received
   UnbundledRouteFee?: string;
 }
 
 const OrdersSection: React.FC = () => {
   const [orders, setOrders] = React.useState<Map<string, Order>>(new Map());
   const [isConnected, setIsConnected] = React.useState(false);
+  const { fetchWithAuth } = useAuth();
   // Get auth token from localStorage and Railway URL from env
   const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
+  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
   const token = localStorage.getItem('auth_token');
   const [loading, setLoading] = React.useState(true);
   const [initialLoad, setInitialLoad] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
+  const [cancelingOrders, setCancelingOrders] = React.useState<Set<string>>(new Set());
   const wsRef = React.useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = React.useRef(0);
   const reconnectTimerRef = React.useRef<number | null>(null);
@@ -207,6 +211,61 @@ const OrdersSection: React.FC = () => {
     try { return new Date(iso).toLocaleTimeString(); } catch { return iso; }
   };
 
+  // Check if order can be cancelled (status is "received" and not filled)
+  const canCancelOrder = (order: Order): boolean => {
+    const leg = order.Legs && order.Legs.length > 0 ? order.Legs[0] : undefined;
+    if (!leg) return false;
+    
+    // Check if status indicates "received" (not filled)
+    const statusUpper = order.Status?.toUpperCase() || '';
+    const statusDescUpper = order.StatusDescription?.toUpperCase() || '';
+    
+    // Check if order is received (common statuses: REC, RECEIVED, QUEUED, PENDING, etc.)
+    const isReceived = statusUpper.includes('REC') || 
+                       statusDescUpper.includes('RECEIVED') || 
+                       statusDescUpper.includes('QUEUED') ||
+                       statusDescUpper.includes('PENDING') ||
+                       statusDescUpper.includes('OPEN');
+    
+    // Check if order hasn't been filled (QuantityRemaining > 0)
+    const qtyRemaining = typeof leg.QuantityRemaining === 'number' 
+      ? leg.QuantityRemaining 
+      : parseFloat(String(leg.QuantityRemaining || '0'));
+    
+    return isReceived && qtyRemaining > 0;
+  };
+
+  // Cancel order handler
+  const handleCancelOrder = async (orderId: string) => {
+    if (cancelingOrders.has(orderId)) return; // Already canceling
+    
+    setCancelingOrders(prev => new Set(prev).add(orderId));
+    
+    try {
+      const response = await fetchWithAuth(`${API_BASE_URL}/orders/${encodeURIComponent(orderId)}`, {
+        method: 'DELETE'
+      });
+      
+      const data = await response.json();
+      
+      if (response.ok && data.success) {
+        console.log(`✅ Order ${orderId} cancelled successfully`);
+        // Order will be removed from list via WebSocket update
+      } else {
+        alert(`Failed to cancel order: ${data.error || 'Unknown error'}`);
+      }
+    } catch (err: any) {
+      console.error(`❌ Error cancelling order ${orderId}:`, err);
+      alert(`Error cancelling order: ${err.message || 'Unknown error'}`);
+    } finally {
+      setCancelingOrders(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(orderId);
+        return newSet;
+      });
+    }
+  };
+
   return (
     <div className="h-full flex flex-col bg-[#1e1e1e]">
       {/* Header */}
@@ -272,7 +331,8 @@ const OrdersSection: React.FC = () => {
                 <div className="col-span-1 text-right">Limit</div>
                 <div className="col-span-1 text-right">Filled</div>
                 <div className="col-span-2 text-left">Status</div>
-                <div className="col-span-2 text-right">Opened</div>
+                <div className="col-span-1 text-right">Opened</div>
+                <div className="col-span-1 text-center">Action</div>
               </div>
             </div>
 
@@ -285,6 +345,9 @@ const OrdersSection: React.FC = () => {
                 itemContent={(index, order) => {
                   const leg = order.Legs && order.Legs.length > 0 ? order.Legs[0] : undefined;
                   const isBuy = leg?.BuyOrSell === 'Buy';
+                  const canCancel = canCancelOrder(order);
+                  const isCanceling = cancelingOrders.has(order.OrderID);
+                  
                   return (
                     <div
                       key={order.OrderID}
@@ -323,8 +386,24 @@ const OrdersSection: React.FC = () => {
                           <div className="text-[#cccccc] text-xs font-medium">{order.StatusDescription}</div>
                           <div className="text-[#808080] text-[11px]">{order.Status}</div>
                         </div>
-                        <div className="col-span-2 text-right">
+                        <div className="col-span-1 text-right">
                           <div className="text-[#969696] text-xs font-mono">{formatDate(order.OpenedDateTime)}</div>
+                        </div>
+                        <div className="col-span-1 text-center">
+                          {canCancel && (
+                            <button
+                              onClick={() => handleCancelOrder(order.OrderID)}
+                              disabled={isCanceling}
+                              className={`px-2 py-1 text-xs font-semibold rounded transition-colors ${
+                                isCanceling
+                                  ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                                  : 'bg-red-600 hover:bg-red-700 text-white'
+                              }`}
+                              title={isCanceling ? 'Cancelling...' : 'Cancel order'}
+                            >
+                              {isCanceling ? '...' : 'Cancel'}
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>

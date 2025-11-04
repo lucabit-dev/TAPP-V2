@@ -833,7 +833,8 @@ async function processCatchupBuys() {
             momentum: momentum,
             quantity: buyResult.quantity,
             orderType: 'LIMIT',
-            limitPrice: buyResult.limitPrice
+            limitPrice: buyResult.limitPrice,
+            stopLoss: buyResult.stopLoss
           };
           buyList.unshift(entry);
           if (typeof lastBuyTsByTicker !== 'undefined') {
@@ -1198,6 +1199,9 @@ async function analyzeConfigStocksInstantly(configId) {
               const buyResult = await sendBuyOrder(r.symbol, configId, origin);
               
               console.log(`🛒 INSTANT BUY: ${r.symbol} - MACD 1m histogram: ${hist1m.toFixed(4)}, Quantity: ${buyResult.quantity}, Limit Price: ${buyResult.limitPrice}`);
+              if (buyResult.stopLoss) {
+                console.log(`🛡️ Stop-loss created for ${r.symbol}: ${buyResult.stopLoss.stopLossPrice} (offset: -${buyResult.stopLoss.stopLossOffset?.toFixed(2)})`);
+              }
               
               // Use momentum calculated from analyzeSymbol (at exact buy moment)
               const entry = {
@@ -1211,7 +1215,8 @@ async function analyzeConfigStocksInstantly(configId) {
                 momentum: r.momentum || null,
                 quantity: buyResult.quantity,
                 orderType: 'LIMIT',
-                limitPrice: buyResult.limitPrice
+                limitPrice: buyResult.limitPrice,
+                stopLoss: buyResult.stopLoss
               };
               buyList.unshift(entry);
               lastBuyTsByTicker.set(r.symbol, nowIso);
@@ -1354,6 +1359,9 @@ async function computeRawFiveTechChecks() {
               const buyResult = await sendBuyOrder(ticker, null, origin);
               
               console.log(`🛒 BUY TRIGGERED: ${ticker} - MACD 1m histogram: ${hist1m.toFixed(4)}, Quantity: ${buyResult.quantity}, Limit Price: ${buyResult.limitPrice}`);
+              if (buyResult.stopLoss) {
+                console.log(`🛡️ Stop-loss created for ${ticker}: ${buyResult.stopLoss.stopLossPrice} (offset: -${buyResult.stopLoss.stopLossOffset?.toFixed(2)})`);
+              }
               
               // Use momentum calculated from analyzeSymbol (at exact buy moment)
               const entry = {
@@ -1367,7 +1375,8 @@ async function computeRawFiveTechChecks() {
                 momentum: r.momentum || null,
                 quantity: buyResult.quantity,
                 orderType: 'LIMIT',
-                limitPrice: buyResult.limitPrice
+                limitPrice: buyResult.limitPrice,
+                stopLoss: buyResult.stopLoss
               };
               buyList.unshift(entry);
               lastBuyTsByTicker.set(ticker, nowIso);
@@ -2455,13 +2464,20 @@ async function sendBuyOrder(symbol, configId = null, groupKey = null) {
     
     const isSuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
     
+    // If buy order was successful, create stop-loss sell order
+    let stopLossResult = null;
+    if (isSuccess) {
+      stopLossResult = await createStopLossOrder(symbol, currentPrice, quantity);
+    }
+    
     return {
       success: isSuccess,
       notifyStatus,
       responseData,
       errorMessage: !isSuccess ? errorMessage : null,
       quantity,
-      limitPrice: currentPrice
+      limitPrice: currentPrice,
+      stopLoss: stopLossResult
     };
   } catch (e) {
     console.error(`❌ Error in sendBuyOrder for ${symbol}:`, e);
@@ -2471,7 +2487,161 @@ async function sendBuyOrder(symbol, configId = null, groupKey = null) {
       responseData: null,
       errorMessage: e.message,
       quantity: 0,
-      limitPrice: null
+      limitPrice: null,
+      stopLoss: null
+    };
+  }
+}
+
+// Helper function to create stop-loss sell order
+// Returns { success: boolean, notifyStatus: string, responseData: any, errorMessage: string | null, stopLossPrice: number | null }
+async function createStopLossOrder(symbol, stockPrice, quantity) {
+  try {
+    // Calculate stop-loss price based on stock price ranges
+    // If price is 0-5: limit_price = stockPrice - 0.20
+    // If price is 5-10: limit_price = stockPrice - 0.35
+    // If price is 10-12: limit_price = stockPrice - 0.45
+    let stopLossPrice;
+    let stopLossOffset;
+    
+    if (stockPrice > 0 && stockPrice <= 5) {
+      stopLossOffset = 0.20;
+      stopLossPrice = stockPrice - stopLossOffset;
+    } else if (stockPrice > 5 && stockPrice <= 10) {
+      stopLossOffset = 0.35;
+      stopLossPrice = stockPrice - stopLossOffset;
+    } else if (stockPrice > 10 && stockPrice <= 12) {
+      stopLossOffset = 0.45;
+      stopLossPrice = stockPrice - stopLossOffset;
+    } else {
+      // Price outside supported range - skip stop-loss
+      console.warn(`⚠️ Skipping stop-loss for ${symbol}: price ${stockPrice} is outside supported range (0-12)`);
+      return {
+        success: false,
+        notifyStatus: `ERROR: Price ${stockPrice} outside supported range (0-12)`,
+        responseData: null,
+        errorMessage: `Price ${stockPrice} is outside supported range (0-12)`,
+        stopLossPrice: null
+      };
+    }
+    
+    // Ensure stop-loss price is positive
+    if (stopLossPrice <= 0) {
+      console.warn(`⚠️ Skipping stop-loss for ${symbol}: calculated stop-loss price ${stopLossPrice} is not positive`);
+      return {
+        success: false,
+        notifyStatus: `ERROR: Stop-loss price ${stopLossPrice} is not positive`,
+        responseData: null,
+        errorMessage: `Stop-loss price ${stopLossPrice} is not positive`,
+        stopLossPrice: null
+      };
+    }
+    
+    // Build stop-loss order body - using STOP_LIMIT for proper stop-loss functionality
+    // STOP_LIMIT orders need both stop_price (trigger) and limit_price (execution)
+    // For stop-loss, both are set to the stop-loss price
+    const stopLossOrderBody = {
+      symbol: symbol,
+      side: 'SELL',
+      order_type: 'STOP_LIMIT',
+      quantity: quantity,
+      limit_price: stopLossPrice,
+      stop_price: stopLossPrice // Trigger when price drops to this level
+    };
+    
+    console.log(`🛡️ Creating stop-loss order for ${symbol}: ${quantity} shares at STOP_LIMIT ${stopLossPrice} (offset: -${stopLossOffset.toFixed(2)})`);
+    
+    // Send stop-loss order to external service using POST /order
+    let notifyStatus = '';
+    let responseData = null;
+    let errorMessage = null;
+    
+    try {
+      const resp = await fetch('https://sections-bot.inbitme.com/order', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(stopLossOrderBody)
+      });
+      
+      notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
+      
+      // Try to get response body
+      let responseText = '';
+      try {
+        responseText = await resp.text();
+        if (responseText) {
+          try {
+            responseData = JSON.parse(responseText);
+          } catch {
+            responseData = responseText;
+          }
+        }
+      } catch (textErr) {
+        console.error(`⚠️ Could not read stop-loss response body:`, textErr.message);
+      }
+      
+      if (resp.ok) {
+        console.log(`✅ Stop-loss order created for ${symbol}: ${notifyStatus}`, responseData ? `Response: ${JSON.stringify(responseData)}` : '');
+      } else {
+        errorMessage = `HTTP ${notifyStatus}`;
+        if (responseData) {
+          if (typeof responseData === 'object') {
+            errorMessage = responseData.message || responseData.error || responseData.detail || JSON.stringify(responseData);
+          } else {
+            errorMessage = String(responseData);
+          }
+        }
+        console.error(`❌ Error creating stop-loss for ${symbol}:`, {
+          status: notifyStatus,
+          response: responseData,
+          body: responseText
+        });
+      }
+    } catch (err) {
+      notifyStatus = `ERROR: ${err.message}`;
+      errorMessage = err.message;
+      console.error(`❌ Network/Parse error creating stop-loss for ${symbol}:`, {
+        message: err.message,
+        stack: err.stack
+      });
+    }
+    
+    const isSuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
+    
+    // Extract order_id from response if available
+    let orderId = null;
+    if (isSuccess && responseData) {
+      if (typeof responseData === 'object') {
+        orderId = responseData.order_id || responseData.orderId || responseData.id || null;
+      }
+    }
+    
+    if (orderId) {
+      console.log(`📝 Stop-loss order_id saved for ${symbol}: ${orderId}`);
+    } else if (isSuccess) {
+      console.warn(`⚠️ Could not extract order_id from stop-loss response for ${symbol}. Response:`, JSON.stringify(responseData));
+    }
+    
+    return {
+      success: isSuccess,
+      notifyStatus,
+      responseData,
+      errorMessage: !isSuccess ? errorMessage : null,
+      stopLossPrice: stopLossPrice,
+      stopLossOffset: stopLossOffset,
+      orderId: orderId
+    };
+  } catch (e) {
+    console.error(`❌ Error in createStopLossOrder for ${symbol}:`, e);
+    return {
+      success: false,
+      notifyStatus: `ERROR: ${e.message}`,
+      responseData: null,
+      errorMessage: e.message,
+      stopLossPrice: null
     };
   }
 }
@@ -2638,6 +2808,14 @@ app.post('/api/buys/test', async (req, res) => {
       console.error(`Error analyzing ${symbol} for manual buy:`, analyzeErr.message);
     }
     
+    const isBuySuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
+    
+    // If buy order was successful, create stop-loss sell order
+    let stopLossResult = null;
+    if (isBuySuccess) {
+      stopLossResult = await createStopLossOrder(symbol, currentPrice, quantity);
+    }
+    
     // Create buy entry and add to buy list
     const nowIso = new Date().toISOString();
     const entry = {
@@ -2652,7 +2830,8 @@ app.post('/api/buys/test', async (req, res) => {
       manual: true, // Mark as manual buy
       quantity: quantity,
       orderType: 'LIMIT',
-      limitPrice: currentPrice
+      limitPrice: currentPrice,
+      stopLoss: stopLossResult
     };
     
     buyList.unshift(entry);
@@ -2661,7 +2840,7 @@ app.post('/api/buys/test', async (req, res) => {
     // Broadcast to clients
     broadcastToClients({ type: 'BUY_SIGNAL', data: entry, timestamp: nowIso });
     
-    const isSuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
+    const isSuccess = isBuySuccess;
     
     // Handle network errors with 500, otherwise return 200 with success flag
     if (notifyStatus.startsWith('ERROR:')) {
@@ -2915,6 +3094,149 @@ app.post('/api/buys/trigger-mode', (req, res) => {
   }
 });
 
+// Helper function to get active orders for a symbol
+// Returns array of order objects with order_id, side, symbol, etc.
+async function getActiveOrdersForSymbol(symbol) {
+  try {
+    // Note: This assumes the API has an endpoint to get orders by symbol
+    // If not available, we'll need to get all orders and filter
+    // For now, we'll try to get orders from WebSocket connection or assume we track them
+    // Since we don't have direct API access, we'll need to track orders in memory or use WebSocket
+    // For implementation, we'll create a function that can be called when needed
+    console.log(`📋 Getting active orders for ${symbol}...`);
+    
+    // TODO: Implement actual API call to get orders if available
+    // For now, return empty array - we'll track orders via WebSocket or store them
+    return [];
+  } catch (e) {
+    console.error(`❌ Error getting active orders for ${symbol}:`, e);
+    return [];
+  }
+}
+
+// Helper function to delete an order by order_id
+// Returns { success: boolean, error: string | null }
+async function deleteOrder(orderId) {
+  try {
+    if (!orderId || !orderId.toString().trim()) {
+      console.warn(`⚠️ Cannot delete order: invalid order ID`);
+      return { success: false, error: 'Invalid order ID' };
+    }
+
+    const orderIdStr = orderId.toString().trim();
+    console.log(`🗑️ Deleting order: ${orderIdStr}`);
+
+    const resp = await fetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(orderIdStr)}`, {
+      method: 'DELETE',
+      headers: {
+        'Accept': '*/*'
+      }
+    });
+
+    const status = `${resp.status} ${resp.statusText || ''}`.trim();
+    
+    // Check if deletion was successful (200 or 204 are success codes)
+    if (resp.ok || resp.status === 200 || resp.status === 204) {
+      console.log(`✅ Order ${orderIdStr} deleted successfully: ${status}`);
+      return { success: true, status };
+    } else {
+      let errorMessage = `HTTP ${status}`;
+      try {
+        const errorData = await resp.json();
+        if (errorData && typeof errorData === 'object') {
+          errorMessage = errorData.message || errorData.error || errorData.detail || JSON.stringify(errorData);
+        }
+      } catch {
+        // Response might not be JSON
+      }
+      console.error(`❌ Error deleting order ${orderIdStr}:`, errorMessage);
+      return { success: false, error: errorMessage, status };
+    }
+  } catch (err) {
+    console.error(`❌ Network error deleting order ${orderId}:`, err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+// Helper function to delete all SELL orders for a symbol
+// Uses WebSocket orders data if available, or tracks orders from buy entries
+async function deleteAllSellOrdersForSymbol(symbol) {
+  try {
+    console.log(`🗑️ Deleting all SELL orders for ${symbol}...`);
+    
+    // Track orders from buy entries - check if we have stop-loss order IDs stored
+    const ordersToDelete = [];
+    
+    // Check buy list for stop-loss order IDs for this symbol
+    for (const buyEntry of buyList) {
+      if (buyEntry.ticker === symbol && buyEntry.stopLoss?.orderId) {
+        ordersToDelete.push(buyEntry.stopLoss.orderId);
+      }
+    }
+    
+    // Also check if we have orders from WebSocket (if available)
+    // For now, we'll rely on stored order IDs from buy entries
+    
+    const deletionResults = [];
+    for (const orderId of ordersToDelete) {
+      const result = await deleteOrder(orderId);
+      deletionResults.push({ orderId, ...result });
+      
+      // Small delay between deletions to avoid rate limiting
+      if (ordersToDelete.length > 1) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+    
+    const successful = deletionResults.filter(r => r.success).length;
+    const failed = deletionResults.filter(r => !r.success).length;
+    
+    console.log(`✅ Deleted ${successful} SELL order(s) for ${symbol}${failed > 0 ? `, ${failed} failed` : ''}`);
+    
+    return {
+      success: successful > 0 || ordersToDelete.length === 0,
+      deleted: successful,
+      failed: failed,
+      results: deletionResults
+    };
+  } catch (e) {
+    console.error(`❌ Error deleting SELL orders for ${symbol}:`, e);
+    return { success: false, error: e.message, deleted: 0, failed: 0, results: [] };
+  }
+}
+
+// Delete order endpoint - cancels an order by order_id
+// According to Sections Bot API: DELETE /order/{order_id}
+app.delete('/api/orders/:orderId', requireDbReady, requireAuth, async (req, res) => {
+  try {
+    const orderId = req.params.orderId?.trim();
+    if (!orderId) {
+      return res.status(400).json({ success: false, error: 'Missing order ID' });
+    }
+    
+    console.log(`🗑️ Deleting order: ${orderId}`);
+    
+    const result = await deleteOrder(orderId);
+    
+    if (result.success) {
+      return res.status(200).json({ 
+        success: true, 
+        message: `Order ${orderId} deleted successfully`,
+        data: { orderId, status: result.status }
+      });
+    } else {
+      return res.status(400).json({ 
+        success: false, 
+        error: result.error || `Failed to delete order ${orderId}`,
+        data: { orderId, status: result.status }
+      });
+    }
+  } catch (e) {
+    console.error(`❌ Error deleting order ${req.params.orderId}:`, e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // Individual sell endpoint - sells a single position
 // According to Sections Bot API: POST /order with symbol, side, order_type, and quantity only (no price)
 app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
@@ -2938,6 +3260,18 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
     const action = isLong ? 'sell' : 'close (buy back)';
     
     console.log(`💸 Manual ${action} signal for ${quantity} ${symbol} (${orderType}, ${side})`);
+    
+    // Delete all existing SELL orders for this symbol before creating new sell order
+    // Only one SELL order can be active per stock at a time
+    if (side === 'SELL') {
+      console.log(`🗑️ Deleting existing SELL orders for ${symbol} before creating new sell order...`);
+      const deleteResult = await deleteAllSellOrdersForSymbol(symbol);
+      if (deleteResult.deleted > 0) {
+        console.log(`✅ Deleted ${deleteResult.deleted} existing SELL order(s) for ${symbol}`);
+        // Small delay after deletion to ensure orders are fully cancelled
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+    }
     
     // Build request body according to Sections Bot API documentation
     // https://inbitme.gitbook.io/sections-bot/xKy06Pb8j01LsqEnmSik/rest-api/ordenes
@@ -3042,6 +3376,28 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
 app.post('/api/sell_all', requireDbReady, requireAuth, async (req, res) => {
   try {
     console.log(`💸 Sell All: Executing panic sell (cancels orders & sells all positions)`);
+    
+    // Delete all existing SELL orders for all symbols before executing sell_all
+    // Collect all unique symbols from buy list that have stop-loss orders
+    const symbolsWithSellOrders = new Set();
+    for (const buyEntry of buyList) {
+      if (buyEntry.stopLoss?.orderId) {
+        symbolsWithSellOrders.add(buyEntry.ticker);
+      }
+    }
+    
+    console.log(`🗑️ Deleting existing SELL orders for ${symbolsWithSellOrders.size} symbol(s) before sell_all...`);
+    const deletePromises = Array.from(symbolsWithSellOrders).map(symbol => deleteAllSellOrdersForSymbol(symbol));
+    const deleteResults = await Promise.all(deletePromises);
+    
+    const totalDeleted = deleteResults.reduce((sum, r) => sum + r.deleted, 0);
+    const totalFailed = deleteResults.reduce((sum, r) => sum + r.failed, 0);
+    
+    if (totalDeleted > 0) {
+      console.log(`✅ Deleted ${totalDeleted} existing SELL order(s) before sell_all${totalFailed > 0 ? `, ${totalFailed} failed` : ''}`);
+      // Small delay after deletion to ensure orders are fully cancelled
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
     
     // According to API documentation: POST /sell_all with no body
     // Returns 200 with no content on success
