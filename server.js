@@ -803,14 +803,12 @@ async function processCatchupBuys() {
           if (hasBoughtToday && hasBoughtToday(ticker)) {
             continue;
           }
-          let notifyStatus = '';
-          try {
-            const resp = await fetch(`https://sections-bot.inbitme.com/buy/${encodeURIComponent(ticker)}`, { method: 'POST' });
-            notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
-          } catch (notifyErr) {
-            notifyStatus = `ERROR: ${notifyErr.message}`;
-          }
+          
           const groupKey = floatService.getGroupInfoByConfig(configId)?.key || null;
+          
+          // Use new buy order logic with LIMIT orders and quantity based on price
+          const buyResult = await sendBuyOrder(ticker, configId, groupKey);
+          
           // Calculate momentum at exact buy moment using fresh analysis
           let momentum = null;
           try {
@@ -827,12 +825,15 @@ async function processCatchupBuys() {
           const entry = {
             ticker,
             timestamp: toUTC4(nowIso),
-            price: item.lastCandle?.close || item.price || null,
+            price: buyResult.limitPrice || item.lastCandle?.close || item.price || null,
             configId: configId,
             group: groupKey,
-            notifyStatus,
+            notifyStatus: buyResult.notifyStatus,
             indicators: item.indicators || null,
-            momentum: momentum
+            momentum: momentum,
+            quantity: buyResult.quantity,
+            orderType: 'LIMIT',
+            limitPrice: buyResult.limitPrice
           };
           buyList.unshift(entry);
           if (typeof lastBuyTsByTicker !== 'undefined') {
@@ -1192,25 +1193,25 @@ async function analyzeConfigStocksInstantly(configId) {
           if (typeof hist1m === 'number' && hist1m > 0) {
             if (!hasBoughtToday(r.symbol)) {
               const nowIso = new Date().toISOString();
-              let notifyStatus = '';
-              try {
-                const resp = await fetch(`https://sections-bot.inbitme.com/buy/${encodeURIComponent(r.symbol)}`, { method: 'POST' });
-                notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
-                console.log(`🛒 INSTANT BUY: ${r.symbol} - MACD 1m histogram: ${hist1m.toFixed(4)}`);
-              } catch (notifyErr) {
-                notifyStatus = `ERROR: ${notifyErr.message}`;
-              }
+              
+              // Use new buy order logic with LIMIT orders and quantity based on price
+              const buyResult = await sendBuyOrder(r.symbol, configId, origin);
+              
+              console.log(`🛒 INSTANT BUY: ${r.symbol} - MACD 1m histogram: ${hist1m.toFixed(4)}, Quantity: ${buyResult.quantity}, Limit Price: ${buyResult.limitPrice}`);
               
               // Use momentum calculated from analyzeSymbol (at exact buy moment)
               const entry = {
                 ticker: r.symbol,
                 timestamp: toUTC4(nowIso),
-                price: r.lastClose || null,
+                price: buyResult.limitPrice || r.lastClose || null,
                 configId: configId,
                 group: origin,
-                notifyStatus,
+                notifyStatus: buyResult.notifyStatus,
                 indicators: r.indicators || null,
-                momentum: r.momentum || null
+                momentum: r.momentum || null,
+                quantity: buyResult.quantity,
+                orderType: 'LIMIT',
+                limitPrice: buyResult.limitPrice
               };
               buyList.unshift(entry);
               lastBuyTsByTicker.set(r.symbol, nowIso);
@@ -1347,26 +1348,26 @@ async function computeRawFiveTechChecks() {
               }
               
               const nowIso = new Date().toISOString();
-              let notifyStatus = '';
-              try {
-                const resp = await fetch(`https://sections-bot.inbitme.com/buy/${encodeURIComponent(ticker)}`, { method: 'POST' });
-                notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
-                console.log(`🛒 BUY TRIGGERED: ${ticker} - MACD 1m histogram: ${hist1m.toFixed(4)}`);
-              } catch (notifyErr) {
-                notifyStatus = `ERROR: ${notifyErr.message}`;
-              }
-              
               const origin = symbolOriginMap.get(ticker) || '?';
+              
+              // Use new buy order logic with LIMIT orders and quantity based on price
+              const buyResult = await sendBuyOrder(ticker, null, origin);
+              
+              console.log(`🛒 BUY TRIGGERED: ${ticker} - MACD 1m histogram: ${hist1m.toFixed(4)}, Quantity: ${buyResult.quantity}, Limit Price: ${buyResult.limitPrice}`);
+              
               // Use momentum calculated from analyzeSymbol (at exact buy moment)
               const entry = {
                 ticker,
                 timestamp: toUTC4(nowIso),
-                price: r.lastClose || null,
+                price: buyResult.limitPrice || r.lastClose || null,
                 configId: null,
                 group: origin,
-                notifyStatus,
+                notifyStatus: buyResult.notifyStatus,
                 indicators: r.indicators || null,
-                momentum: r.momentum || null
+                momentum: r.momentum || null,
+                quantity: buyResult.quantity,
+                orderType: 'LIMIT',
+                limitPrice: buyResult.limitPrice
               };
               buyList.unshift(entry);
               lastBuyTsByTicker.set(ticker, nowIso);
@@ -2325,6 +2326,156 @@ app.post('/api/buys/enabled', (req, res) => {
   }
 });
 
+// Helper function to send buy order using new LIMIT order logic
+// Returns { success: boolean, notifyStatus: string, responseData: any, errorMessage: string | null, quantity: number, limitPrice: number | null }
+async function sendBuyOrder(symbol, configId = null, groupKey = null) {
+  try {
+    // Get current stock price using Polygon service
+    let currentPrice = null;
+    try {
+      currentPrice = await polygonService.getCurrentPrice(symbol);
+      if (!currentPrice || currentPrice <= 0) {
+        console.warn(`⚠️ Could not get valid price for ${symbol}, trying lastClose from analysis...`);
+        const analysis = await analyzeSymbol(symbol);
+        currentPrice = analysis?.lastClose || null;
+      }
+    } catch (priceErr) {
+      console.error(`Error getting price for ${symbol}:`, priceErr.message);
+      try {
+        const analysis = await analyzeSymbol(symbol);
+        currentPrice = analysis?.lastClose || null;
+      } catch (analyzeErr) {
+        console.error(`Error analyzing ${symbol} for price:`, analyzeErr.message);
+      }
+    }
+    
+    if (!currentPrice || currentPrice <= 0) {
+      return {
+        success: false,
+        notifyStatus: 'ERROR: Could not determine current price',
+        responseData: null,
+        errorMessage: `Could not determine current price for ${symbol}`,
+        quantity: 0,
+        limitPrice: null
+      };
+    }
+    
+    // Calculate quantity based on price ranges
+    // 2002 if price is between 0 and 5
+    // 1001 if price is between 5 and 10
+    // 757 if price is between 10 and 12
+    let quantity;
+    if (currentPrice > 0 && currentPrice <= 5) {
+      quantity = 2002;
+    } else if (currentPrice > 5 && currentPrice <= 10) {
+      quantity = 1001;
+    } else if (currentPrice > 10 && currentPrice <= 12) {
+      quantity = 757;
+    } else {
+      // Price outside supported range - skip buy
+      console.warn(`⚠️ Skipping buy for ${symbol}: price ${currentPrice} is outside supported range (0-12)`);
+      return {
+        success: false,
+        notifyStatus: `ERROR: Price ${currentPrice} outside supported range (0-12)`,
+        responseData: null,
+        errorMessage: `Price ${currentPrice} is outside supported range (0-12). Only prices between 0-12 are supported.`,
+        quantity: 0,
+        limitPrice: currentPrice
+      };
+    }
+    
+    // Build order body according to Sections Bot API documentation
+    const orderBody = {
+      symbol: symbol,
+      side: 'BUY',
+      order_type: 'LIMIT',
+      quantity: quantity,
+      limit_price: currentPrice
+    };
+    
+    console.log(`📤 Sending autobuy order: ${quantity} ${symbol} at LIMIT price ${currentPrice}`);
+    
+    // Send buy order to external service using POST /order
+    let notifyStatus = '';
+    let responseData = null;
+    let errorMessage = null;
+    
+    try {
+      const resp = await fetch('https://sections-bot.inbitme.com/order', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(orderBody)
+      });
+      
+      notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
+      
+      // Try to get response body
+      let responseText = '';
+      try {
+        responseText = await resp.text();
+        if (responseText) {
+          try {
+            responseData = JSON.parse(responseText);
+          } catch {
+            responseData = responseText;
+          }
+        }
+      } catch (textErr) {
+        console.error(`⚠️ Could not read response body:`, textErr.message);
+      }
+      
+      if (resp.ok) {
+        console.log(`✅ Autobuy order sent for ${symbol}: ${notifyStatus}`, responseData ? `Response: ${JSON.stringify(responseData)}` : '');
+      } else {
+        errorMessage = `HTTP ${notifyStatus}`;
+        if (responseData) {
+          if (typeof responseData === 'object') {
+            errorMessage = responseData.message || responseData.error || responseData.detail || JSON.stringify(responseData);
+          } else {
+            errorMessage = String(responseData);
+          }
+        }
+        console.error(`❌ Error in autobuy for ${symbol}:`, {
+          status: notifyStatus,
+          response: responseData,
+          body: responseText
+        });
+      }
+    } catch (err) {
+      notifyStatus = `ERROR: ${err.message}`;
+      errorMessage = err.message;
+      console.error(`❌ Network/Parse error in autobuy for ${symbol}:`, {
+        message: err.message,
+        stack: err.stack
+      });
+    }
+    
+    const isSuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
+    
+    return {
+      success: isSuccess,
+      notifyStatus,
+      responseData,
+      errorMessage: !isSuccess ? errorMessage : null,
+      quantity,
+      limitPrice: currentPrice
+    };
+  } catch (e) {
+    console.error(`❌ Error in sendBuyOrder for ${symbol}:`, e);
+    return {
+      success: false,
+      notifyStatus: `ERROR: ${e.message}`,
+      responseData: null,
+      errorMessage: e.message,
+      quantity: 0,
+      limitPrice: null
+    };
+  }
+}
+
 // Test external buy webhook endpoint (no buy list mutation)
 app.post('/api/buys/test', async (req, res) => {
   try {
@@ -2335,13 +2486,121 @@ app.post('/api/buys/test', async (req, res) => {
     
     console.log(`🛒 Manual buy signal for ${symbol}`);
     
-    // Send buy signal to external service
-    let notifyStatus = '';
+    // Get current stock price using Polygon service
+    let currentPrice = null;
     try {
-      const resp = await fetch(`https://sections-bot.inbitme.com/buy/${encodeURIComponent(symbol)}`, { method: 'POST' });
+      currentPrice = await polygonService.getCurrentPrice(symbol);
+      if (!currentPrice || currentPrice <= 0) {
+        console.warn(`⚠️ Could not get valid price for ${symbol}, trying lastClose from analysis...`);
+        // Fallback to lastClose from analysis
+        const analysis = await analyzeSymbol(symbol);
+        currentPrice = analysis?.lastClose || null;
+      }
+    } catch (priceErr) {
+      console.error(`Error getting price for ${symbol}:`, priceErr.message);
+      // Fallback to lastClose from analysis
+      try {
+        const analysis = await analyzeSymbol(symbol);
+        currentPrice = analysis?.lastClose || null;
+      } catch (analyzeErr) {
+        console.error(`Error analyzing ${symbol} for price:`, analyzeErr.message);
+      }
+    }
+    
+    if (!currentPrice || currentPrice <= 0) {
+      return res.status(400).json({ 
+        success: false, 
+        error: `Could not determine current price for ${symbol}. Please try again.` 
+      });
+    }
+    
+    // Calculate quantity based on price ranges
+    // 2002 if price is between 0 and 5
+    // 1001 if price is between 5 and 10
+    // 757 if price is between 10 and 12
+    let quantity;
+    if (currentPrice > 0 && currentPrice <= 5) {
+      quantity = 2002;
+    } else if (currentPrice > 5 && currentPrice <= 10) {
+      quantity = 1001;
+    } else if (currentPrice > 10 && currentPrice <= 12) {
+      quantity = 757;
+    } else {
+      // For prices outside the specified ranges, use a default (or return error)
+      return res.status(400).json({ 
+        success: false, 
+        error: `Price ${currentPrice} is outside supported range (0-12). Only prices between 0-12 are supported.` 
+      });
+    }
+    
+    // Build order body according to Sections Bot API documentation
+    // https://inbitme.gitbook.io/sections-bot/xKy06Pb8j01LsqEnmSik/rest-api/ordenes
+    const orderBody = {
+      symbol: symbol,
+      side: 'BUY',
+      order_type: 'LIMIT', // Default to LIMIT as requested
+      quantity: quantity,
+      limit_price: currentPrice
+    };
+    
+    console.log(`📤 Sending buy order: ${quantity} ${symbol} at LIMIT price ${currentPrice}`);
+    
+    // Send buy order to external service using POST /order
+    let notifyStatus = '';
+    let responseData = null;
+    let errorMessage = null;
+    
+    try {
+      const resp = await fetch('https://sections-bot.inbitme.com/order', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(orderBody)
+      });
+      
       notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
+      
+      // Try to get response body
+      let responseText = '';
+      try {
+        responseText = await resp.text();
+        if (responseText) {
+          try {
+            responseData = JSON.parse(responseText);
+          } catch {
+            responseData = responseText;
+          }
+        }
+      } catch (textErr) {
+        console.error(`⚠️ Could not read response body:`, textErr.message);
+      }
+      
+      if (resp.ok) {
+        console.log(`✅ Buy order sent for ${symbol}: ${notifyStatus}`, responseData ? `Response: ${JSON.stringify(responseData)}` : '');
+      } else {
+        errorMessage = `HTTP ${notifyStatus}`;
+        if (responseData) {
+          if (typeof responseData === 'object') {
+            errorMessage = responseData.message || responseData.error || responseData.detail || JSON.stringify(responseData);
+          } else {
+            errorMessage = String(responseData);
+          }
+        }
+        console.error(`❌ Error buying ${symbol}:`, {
+          status: notifyStatus,
+          response: responseData,
+          body: responseText
+        });
+      }
     } catch (err) {
       notifyStatus = `ERROR: ${err.message}`;
+      errorMessage = err.message;
+      console.error(`❌ Network/Parse error buying ${symbol}:`, {
+        message: err.message,
+        stack: err.stack
+      });
     }
     
     // Find which config/origin this symbol belongs to
@@ -2364,13 +2623,16 @@ app.post('/api/buys/test', async (req, res) => {
     // Analyze symbol to get indicators and momentum at buy moment
     let indicators = null;
     let momentum = null;
-    let price = null;
+    let price = currentPrice;
     try {
       const analysis = await analyzeSymbol(symbol);
       if (analysis) {
         indicators = analysis.indicators || null;
         momentum = analysis.momentum || null;
-        price = analysis.lastClose || null;
+        // Use currentPrice if available, otherwise use lastClose
+        if (!price && analysis.lastClose) {
+          price = analysis.lastClose;
+        }
       }
     } catch (analyzeErr) {
       console.error(`Error analyzing ${symbol} for manual buy:`, analyzeErr.message);
@@ -2387,7 +2649,10 @@ app.post('/api/buys/test', async (req, res) => {
       notifyStatus,
       indicators: indicators,
       momentum: momentum,
-      manual: true // Mark as manual buy
+      manual: true, // Mark as manual buy
+      quantity: quantity,
+      orderType: 'LIMIT',
+      limitPrice: currentPrice
     };
     
     buyList.unshift(entry);
@@ -2396,9 +2661,32 @@ app.post('/api/buys/test', async (req, res) => {
     // Broadcast to clients
     broadcastToClients({ type: 'BUY_SIGNAL', data: entry, timestamp: nowIso });
     
+    const isSuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
+    
+    // Handle network errors with 500, otherwise return 200 with success flag
+    if (notifyStatus.startsWith('ERROR:')) {
+      return res.status(500).json({
+        success: false,
+        error: errorMessage || `Failed to buy ${symbol}: Network or parsing error`,
+        data: { symbol, quantity, orderType: 'LIMIT', limitPrice: currentPrice, notifyStatus, response: responseData }
+      });
+    }
+    
     console.log(`✅ Manual buy logged for ${symbol} - Added to buy list`);
     
-    return res.json({ success: true, data: { symbol, notifyStatus, addedToBuyList: true } });
+    return res.status(200).json({ 
+      success: isSuccess, 
+      error: !isSuccess ? (errorMessage || `Failed to buy ${symbol}`) : undefined,
+      data: { 
+        symbol, 
+        quantity, 
+        orderType: 'LIMIT', 
+        limitPrice: currentPrice, 
+        notifyStatus, 
+        response: responseData,
+        addedToBuyList: true 
+      } 
+    });
   } catch (e) {
     console.error(`❌ Error in manual buy for ${req.body?.symbol}:`, e);
     res.status(500).json({ success: false, error: e.message });
@@ -2406,8 +2694,10 @@ app.post('/api/buys/test', async (req, res) => {
 });
 
 // GET fallback for testing (easier to try in browser): /api/buys/test?symbol=ELWS
+// Uses the same logic as POST endpoint
 app.get('/api/buys/test', async (req, res) => {
   try {
+    // Extract symbol from query instead of body
     const symbol = (req.query.symbol || '').toString().trim().toUpperCase();
     if (!symbol) {
       return res.status(400).json({ success: false, error: 'Missing symbol' });
@@ -2415,13 +2705,111 @@ app.get('/api/buys/test', async (req, res) => {
     
     console.log(`🛒 Manual buy signal (GET) for ${symbol}`);
     
-    // Send buy signal to external service
-    let notifyStatus = '';
+    // Get current stock price using Polygon service
+    let currentPrice = null;
     try {
-      const resp = await fetch(`https://sections-bot.inbitme.com/buy/${encodeURIComponent(symbol)}`, { method: 'POST' });
+      currentPrice = await polygonService.getCurrentPrice(symbol);
+      if (!currentPrice || currentPrice <= 0) {
+        console.warn(`⚠️ Could not get valid price for ${symbol}, trying lastClose from analysis...`);
+        const analysis = await analyzeSymbol(symbol);
+        currentPrice = analysis?.lastClose || null;
+      }
+    } catch (priceErr) {
+      console.error(`Error getting price for ${symbol}:`, priceErr.message);
+      try {
+        const analysis = await analyzeSymbol(symbol);
+        currentPrice = analysis?.lastClose || null;
+      } catch (analyzeErr) {
+        console.error(`Error analyzing ${symbol} for price:`, analyzeErr.message);
+      }
+    }
+    
+    if (!currentPrice || currentPrice <= 0) {
+      return res.status(400).json({ 
+        success: false, 
+        error: `Could not determine current price for ${symbol}. Please try again.` 
+      });
+    }
+    
+    // Calculate quantity based on price ranges
+    let quantity;
+    if (currentPrice > 0 && currentPrice <= 5) {
+      quantity = 2002;
+    } else if (currentPrice > 5 && currentPrice <= 10) {
+      quantity = 1001;
+    } else if (currentPrice > 10 && currentPrice <= 12) {
+      quantity = 757;
+    } else {
+      return res.status(400).json({ 
+        success: false, 
+        error: `Price ${currentPrice} is outside supported range (0-12). Only prices between 0-12 are supported.` 
+      });
+    }
+    
+    const orderBody = {
+      symbol: symbol,
+      side: 'BUY',
+      order_type: 'LIMIT',
+      quantity: quantity,
+      limit_price: currentPrice
+    };
+    
+    console.log(`📤 Sending buy order: ${quantity} ${symbol} at LIMIT price ${currentPrice}`);
+    
+    let notifyStatus = '';
+    let responseData = null;
+    let errorMessage = null;
+    
+    try {
+      const resp = await fetch('https://sections-bot.inbitme.com/order', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(orderBody)
+      });
+      
       notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
+      
+      let responseText = '';
+      try {
+        responseText = await resp.text();
+        if (responseText) {
+          try {
+            responseData = JSON.parse(responseText);
+          } catch {
+            responseData = responseText;
+          }
+        }
+      } catch (textErr) {
+        console.error(`⚠️ Could not read response body:`, textErr.message);
+      }
+      
+      if (resp.ok) {
+        console.log(`✅ Buy order sent for ${symbol}: ${notifyStatus}`, responseData ? `Response: ${JSON.stringify(responseData)}` : '');
+      } else {
+        errorMessage = `HTTP ${notifyStatus}`;
+        if (responseData) {
+          if (typeof responseData === 'object') {
+            errorMessage = responseData.message || responseData.error || responseData.detail || JSON.stringify(responseData);
+          } else {
+            errorMessage = String(responseData);
+          }
+        }
+        console.error(`❌ Error buying ${symbol}:`, {
+          status: notifyStatus,
+          response: responseData,
+          body: responseText
+        });
+      }
     } catch (err) {
       notifyStatus = `ERROR: ${err.message}`;
+      errorMessage = err.message;
+      console.error(`❌ Network/Parse error buying ${symbol}:`, {
+        message: err.message,
+        stack: err.stack
+      });
     }
     
     // Find which config/origin this symbol belongs to
@@ -2441,22 +2829,22 @@ app.get('/api/buys/test', async (req, res) => {
       }
     }
     
-    // Analyze symbol to get indicators and momentum at buy moment
     let indicators = null;
     let momentum = null;
-    let price = null;
+    let price = currentPrice;
     try {
       const analysis = await analyzeSymbol(symbol);
       if (analysis) {
         indicators = analysis.indicators || null;
         momentum = analysis.momentum || null;
-        price = analysis.lastClose || null;
+        if (!price && analysis.lastClose) {
+          price = analysis.lastClose;
+        }
       }
     } catch (analyzeErr) {
       console.error(`Error analyzing ${symbol} for manual buy:`, analyzeErr.message);
     }
     
-    // Create buy entry and add to buy list
     const nowIso = new Date().toISOString();
     const entry = {
       ticker: symbol,
@@ -2467,18 +2855,42 @@ app.get('/api/buys/test', async (req, res) => {
       notifyStatus,
       indicators: indicators,
       momentum: momentum,
-      manual: true // Mark as manual buy
+      manual: true,
+      quantity: quantity,
+      orderType: 'LIMIT',
+      limitPrice: currentPrice
     };
     
     buyList.unshift(entry);
     lastBuyTsByTicker.set(symbol, nowIso);
     
-    // Broadcast to clients
     broadcastToClients({ type: 'BUY_SIGNAL', data: entry, timestamp: nowIso });
+    
+    const isSuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
+    
+    if (notifyStatus.startsWith('ERROR:')) {
+      return res.status(500).json({
+        success: false,
+        error: errorMessage || `Failed to buy ${symbol}: Network or parsing error`,
+        data: { symbol, quantity, orderType: 'LIMIT', limitPrice: currentPrice, notifyStatus, response: responseData }
+      });
+    }
     
     console.log(`✅ Manual buy logged for ${symbol} - Added to buy list`);
     
-    return res.json({ success: true, data: { symbol, notifyStatus, addedToBuyList: true } });
+    return res.status(200).json({ 
+      success: isSuccess, 
+      error: !isSuccess ? (errorMessage || `Failed to buy ${symbol}`) : undefined,
+      data: { 
+        symbol, 
+        quantity, 
+        orderType: 'LIMIT', 
+        limitPrice: currentPrice, 
+        notifyStatus, 
+        response: responseData,
+        addedToBuyList: true 
+      } 
+    });
   } catch (e) {
     console.error(`❌ Error in manual buy (GET) for ${req.query?.symbol}:`, e);
     res.status(500).json({ success: false, error: e.message });
@@ -2504,12 +2916,12 @@ app.post('/api/buys/trigger-mode', (req, res) => {
 });
 
 // Individual sell endpoint - sells a single position
+// According to Sections Bot API: POST /order with symbol, side, order_type, and quantity only (no price)
 app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
   try {
     const symbol = (req.body?.symbol || '').toString().trim().toUpperCase();
     const quantity = parseInt(req.body?.quantity || '0', 10);
-    const orderType = (req.body?.order_type || 'MARKET').toString().toUpperCase();
-    const limitPrice = req.body?.limit_price ? parseFloat(req.body.limit_price) : undefined;
+    const orderType = (req.body?.order_type || 'LIMIT').toString().toUpperCase();
     const longShort = (req.body?.long_short || req.body?.longShort || '').toString().trim();
     
     if (!symbol) {
@@ -2529,18 +2941,13 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
     
     // Build request body according to Sections Bot API documentation
     // https://inbitme.gitbook.io/sections-bot/xKy06Pb8j01LsqEnmSik/rest-api/ordenes
-    // Note: API expects quantity as integer, but let's ensure it's properly formatted
+    // Only send symbol, side, order_type, and quantity - NO price parameter
     const orderBody = {
       symbol: symbol,
       side: side,
       order_type: orderType,
       quantity: quantity
     };
-    
-    // Add limit_price only if order_type is LIMIT or STOP_LIMIT
-    if ((orderType === 'LIMIT' || orderType === 'STOP_LIMIT') && limitPrice) {
-      orderBody.limit_price = limitPrice;
-    }
     
     // Send sell order to external service using POST /order
     let notifyStatus = '';

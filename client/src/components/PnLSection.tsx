@@ -288,7 +288,7 @@ const PnLSection: React.FC = () => {
         body: JSON.stringify({ 
           symbol,
           quantity,
-          order_type: 'MARKET', // Use MARKET order for immediate execution
+          order_type: 'LIMIT', // Use MARKET order for immediate execution
           long_short: position.LongShort // Include position side for proper handling
         })
       });
