@@ -267,16 +267,18 @@ const OrdersSection: React.FC = () => {
   };
 
   return (
-    <div className="h-full flex flex-col bg-[#1e1e1e]">
+    <div className="h-full flex flex-col bg-[#14130e]">
       {/* Header */}
-      <div className="p-3 border-b border-[#3e3e42] bg-[#252526]">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-semibold text-[#cccccc] tracking-wide">Orders</h2>
-          <div className="flex items-center space-x-2">
-            <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-[#4ec9b0]' : 'bg-[#f44747]'}`}></div>
-            <span className="text-xs text-[#969696]">{isConnected ? 'Connected' : 'Disconnected'}</span>
+      <div className="p-4 border-b border-[#2a2820]/50 bg-gradient-to-r from-[#14130e] to-[#0f0e0a] backdrop-blur-sm">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-bold text-[#eae9e9] tracking-wider uppercase">Orders</h2>
+          <div className="flex items-center space-x-3">
+            <div className="flex items-center space-x-2">
+              <div className={`w-2.5 h-2.5 rounded-full ${isConnected ? 'bg-[#22c55e] shadow-[0_0_6px_rgba(34,197,94,0.5)]' : 'bg-[#f87171] shadow-[0_0_6px_rgba(248,113,113,0.5)]'}`}></div>
+              <span className="text-xs text-[#eae9e9]/80 font-medium">{isConnected ? 'Connected' : 'Disconnected'}</span>
+            </div>
             {ordersArray.length > 0 && (
-              <span className="text-xs text-[#969696] ml-2">({ordersArray.length} orders)</span>
+              <span className="text-xs text-[#eae9e9]/70 ml-2">({ordersArray.length} orders)</span>
             )}
           </div>
         </div>
@@ -284,12 +286,12 @@ const OrdersSection: React.FC = () => {
 
       {/* Error - not during initial loading */}
       {error && !loading && (
-        <div className="mx-3 mt-3 bg-[#5a1d1d] border border-[#f44747] rounded-lg p-3">
+        <div className="mx-3 mt-3 bg-[#3a1e1e] border border-[#f87171] rounded-lg p-3">
           <div className="flex items-center space-x-2">
-            <svg className="w-4 h-4 text-[#f44747]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className="w-4 h-4 text-[#f87171]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
-            <p className="text-sm text-[#f44747]">{error}</p>
+            <p className="text-sm text-[#f87171]">{error}</p>
           </div>
         </div>
       )}
@@ -299,30 +301,30 @@ const OrdersSection: React.FC = () => {
         {loading ? (
           <div className="h-full flex items-center justify-center">
             <div className="text-center">
-              <div className="w-12 h-12 bg-[#2d2d30] rounded-lg flex items-center justify-center mx-auto mb-4">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#4ec9b0]"></div>
+              <div className="w-12 h-12 bg-[#2a2820] rounded-lg flex items-center justify-center mx-auto mb-4">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#4ade80]"></div>
               </div>
-              <h3 className="text-lg font-medium text-[#cccccc] mb-2">Connecting...</h3>
-              <p className="text-[#969696] text-sm">Establishing WebSocket connection...</p>
+              <h3 className="text-lg font-medium text-[#eae9e9] mb-2">Connecting...</h3>
+              <p className="opacity-60 text-sm">Establishing WebSocket connection...</p>
             </div>
           </div>
         ) : ordersArray.length === 0 ? (
           <div className="h-full flex items-center justify-center">
             <div className="text-center">
-              <div className="w-12 h-12 bg-[#2d2d30] rounded-lg flex items-center justify-center mx-auto mb-4">
-                <svg className="w-6 h-6 text-[#808080]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <div className="w-12 h-12 bg-[#2a2820] rounded-lg flex items-center justify-center mx-auto mb-4">
+                <svg className="w-6 h-6 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2" />
                 </svg>
               </div>
-              <h3 className="text-lg font-medium text-[#cccccc] mb-2">No orders yet</h3>
-              <p className="text-[#969696] text-sm">Waiting for orders from WebSocket...</p>
+              <h3 className="text-lg font-medium text-[#eae9e9] mb-2">No orders yet</h3>
+              <p className="opacity-60 text-sm">Waiting for orders from WebSocket...</p>
             </div>
           </div>
         ) : (
           <div className="h-full flex flex-col">
             {/* Header */}
-            <div className="bg-[#252526] border-b border-[#3e3e42] px-4 py-2 sticky top-0 z-10">
-              <div className="grid grid-cols-12 gap-2 text-xs font-medium text-[#969696] uppercase tracking-wide">
+            <div className="bg-[#14130e] border-b border-[#2a2820] px-4 py-2 sticky top-0 z-10">
+              <div className="grid grid-cols-12 gap-2 text-xs font-medium opacity-60 uppercase tracking-wide">
                 <div className="col-span-2">Symbol</div>
                 <div className="col-span-1 text-center">Side</div>
                 <div className="col-span-1 text-right">Qty</div>
@@ -351,43 +353,43 @@ const OrdersSection: React.FC = () => {
                   return (
                     <div
                       key={order.OrderID}
-                      className={`px-4 py-2 border-b border-[#3e3e42] hover:bg-[#252526] transition-colors ${
-                        index % 2 === 0 ? 'bg-[#1e1e1e]' : 'bg-[#252526]'
+                      className={`px-4 py-2 border-b border-[#2a2820] hover:bg-[#1e1d17] transition-colors ${
+                        index % 2 === 0 ? 'bg-[#0f0e0a]' : 'bg-[#14130e]'
                       }`}
                     >
                       <div className="grid grid-cols-12 gap-2 items-center text-sm">
                         <div className="col-span-2">
-                          <div className="font-semibold text-[#cccccc]">{leg?.Symbol || '—'}</div>
-                          <div className="text-xs text-[#808080]">{leg?.AssetType || '—'}</div>
+                          <div className="font-semibold text-[#eae9e9]">{leg?.Symbol || '—'}</div>
+                          <div className="text-xs opacity-60">{leg?.AssetType || '—'}</div>
                         </div>
                         <div className="col-span-1 text-center">
                           <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                            isBuy ? 'bg-[#0d3a2e] text-[#4ec9b0]' : 'bg-[#5a1d1d] text-[#f44747]'
+                            isBuy ? 'bg-[#1e3a2e] text-[#4ade80]' : 'bg-[#3a1e1e] text-[#f87171]'
                           }`}>
                             {leg?.BuyOrSell || '—'}
                           </span>
                         </div>
                         <div className="col-span-1 text-right">
-                          <div className="text-[#cccccc] font-mono">{formatQty(leg?.QuantityOrdered)}</div>
+                          <div className="text-[#eae9e9] font-mono">{formatQty(leg?.QuantityOrdered)}</div>
                         </div>
                         <div className="col-span-1 text-right">
-                          <div className="text-[#cccccc] font-mono">{formatQty(leg?.QuantityRemaining)}</div>
+                          <div className="text-[#eae9e9] font-mono">{formatQty(leg?.QuantityRemaining)}</div>
                         </div>
                         <div className="col-span-1 text-right">
-                          <div className="text-[#cccccc] font-mono text-xs">{order.OrderType}</div>
+                          <div className="text-[#eae9e9] font-mono text-xs">{order.OrderType}</div>
                         </div>
                         <div className="col-span-1 text-right">
-                          <div className="text-[#cccccc] font-mono text-xs">{formatPrice(order.LimitPrice)}</div>
+                          <div className="text-[#eae9e9] font-mono text-xs">{formatPrice(order.LimitPrice)}</div>
                         </div>
                         <div className="col-span-1 text-right">
-                          <div className="text-[#cccccc] font-mono text-xs">{formatPrice(order.FilledPrice)}</div>
+                          <div className="text-[#eae9e9] font-mono text-xs">{formatPrice(order.FilledPrice)}</div>
                         </div>
                         <div className="col-span-2 text-left">
-                          <div className="text-[#cccccc] text-xs font-medium">{order.StatusDescription}</div>
-                          <div className="text-[#808080] text-[11px]">{order.Status}</div>
+                          <div className="text-[#eae9e9] text-xs font-medium">{order.StatusDescription}</div>
+                          <div className="opacity-60 text-[11px]">{order.Status}</div>
                         </div>
                         <div className="col-span-1 text-right">
-                          <div className="text-[#969696] text-xs font-mono">{formatDate(order.OpenedDateTime)}</div>
+                          <div className="opacity-60 text-xs font-mono">{formatDate(order.OpenedDateTime)}</div>
                         </div>
                         <div className="col-span-1 text-center">
                           {canCancel && (
@@ -396,8 +398,8 @@ const OrdersSection: React.FC = () => {
                               disabled={isCanceling}
                               className={`px-2 py-1 text-xs font-semibold rounded transition-colors ${
                                 isCanceling
-                                  ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
-                                  : 'bg-red-600 hover:bg-red-700 text-white'
+                                  ? 'bg-[#2a2820] text-[#eae9e9] opacity-50 cursor-not-allowed'
+                                  : 'bg-[#f87171] hover:bg-[#ef4444] text-[#14130e]'
                               }`}
                               title={isCanceling ? 'Cancelling...' : 'Cancel order'}
                             >

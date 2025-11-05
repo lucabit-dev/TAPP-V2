@@ -182,7 +182,7 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
     };
   }, []);
 
-  const theme = 'bg-[#252526] text-[#cccccc] border-[#3e3e42]';
+  const theme = 'bg-[#14130e] text-[#eae9e9] border-[#2a2820]';
   
   // Visible symbols in current unified list (normalized)
   const currentSymbolSet = React.useMemo(() => {
@@ -194,26 +194,68 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
     return set;
   }, [unified]);
   
-  // Count only YELLOW (Tech only) visible stocks
-  const techCountInView = React.useMemo(() => {
-    let count = 0;
-    currentSymbolSet.forEach(sym => {
-      if (meetsTechSet.has(sym) && !meetsMomentumSet.has(sym)) count++;
-    });
-    return count;
-  }, [currentSymbolSet, meetsTechSet, meetsMomentumSet]);
+  // Helper functions for header resolution (must be defined before counters)
+  type HeaderSpec = { title: string; key: string | null };
+  const shortenHeaderTitle = (title: string): string => {
+    const map: Record<string, string> = {
+      'Symbol': 'S',
+      'Price': 'P',
+      'Distance from VWAP': 'VWAP',
+      'Change from close': 'Chg',
+      'Consecutive': 'Cons',
+      'ConsecutiveCandleFilterFM1': 'Cons',
+      'Change from open': 'Open',
+      '2 min change': '2m',
+      '5 min change': '5m',
+      '10 min change': '10m',
+      '1 min trade count': '1m#',
+      '5 min trade count': '5m#',
+      '5 min volume': '5mV',
+      '10 min volume': '10mV',
+      '30 min volume': '30mV',
+      'high of the day': 'HOD',
+      'low of the day': 'LOD'
+    };
+    return map[title] || title;
+  };
   
-  // Count momentum and BOTH within current view
-  const momCountInView = React.useMemo(() => {
-    let count = 0;
-    currentSymbolSet.forEach(sym => { if (meetsMomentumSet.has(sym)) count++; });
-    return count;
-  }, [currentSymbolSet, meetsMomentumSet]);
-  const bothCountInView = React.useMemo(() => {
-    let count = 0;
-    currentSymbolSet.forEach(sym => { if (meetsTechSet.has(sym) && meetsMomentumSet.has(sym)) count++; });
-    return count;
-  }, [currentSymbolSet, meetsTechSet, meetsMomentumSet]);
+  const resolveHeaders = (rows: ToplistRow[]): HeaderSpec[] => {
+    const availableKeysSet = new Set<string>();
+    rows.forEach(r => (r.columns || []).forEach(c => availableKeysSet.add(c.key)));
+    const availableKeys = Array.from(availableKeysSet);
+
+    const tryResolve = (candidates: string[], fallback?: (k: string) => boolean): string | null => {
+      for (const cand of candidates) {
+        if (availableKeysSet.has(cand)) return cand;
+      }
+      if (fallback) {
+        const found = availableKeys.find(fallback);
+        if (found) return found;
+      }
+      return null;
+    };
+
+    const specs: Array<{ title: string; candidates: string[]; fallback?: (k: string) => boolean }> = [
+      { title: 'Symbol', candidates: ['SymbolColumn', 'Symbol', 'Ticker'] },
+      { title: 'Price', candidates: ['PriceNOOPTION', 'Price'] },
+      { title: 'Distance from VWAP', candidates: ['DistanceFromVWAP', 'DistanceFromVwapNOOPTION', 'DistanceFromVwap'], fallback: k => /vwap/i.test(k) && /dist/i.test(k) },
+      { title: 'Change from close', candidates: ['ChangeFromClosePRZ', 'ChangeFromClose'], fallback: k => /change/i.test(k) && /close/i.test(k) },
+      { title: 'ConsecutiveCandleFilterFM1', candidates: ['ConsecutiveCandleFilterFM1'] },
+      { title: 'Change from open', candidates: ['ChangeFromOpenPRZ', 'ChangeFromOpen'], fallback: k => /change/i.test(k) && /open/i.test(k) },
+      { title: '2 min change', candidates: ['PrzChangeFilterMIN2', 'ChangeMIN2', 'Change2MIN'], fallback: k => /change/i.test(k) && /(min2|2min|fm2)/i.test(k) },
+      { title: '5 min change', candidates: ['PrzChangeFilterMIN5', 'ChangeMIN5', 'Change5MIN'], fallback: k => /change/i.test(k) && /(min5|5min|fm5)/i.test(k) },
+      { title: '10 min change', candidates: ['PrzChangeFilterMIN10', 'ChangeMIN10', 'Change10MIN'], fallback: k => /change/i.test(k) && /(min10|10min|fm10)/i.test(k) },
+      { title: '1 min trade count', candidates: ['TradeCountMIN1', 'TradesMIN1', 'TradeCountFM1'], fallback: k => /trade/i.test(k) && /(min1|1min|fm1)/i.test(k) },
+      { title: '5 min trade count', candidates: ['TradeCountMIN5', 'TradesMIN5', 'TradeCountFM5'], fallback: k => /trade/i.test(k) && /(min5|5min|fm5)/i.test(k) },
+      { title: '5 min volume', candidates: ['PrzVolumeFilterFM5', 'VolumeMIN5', 'Volume5MIN', 'PrzVolumeFM5'], fallback: k => /volume/i.test(k) && /(min5|5min|fm5)/i.test(k) },
+      { title: '10 min volume', candidates: ['PrzVolumeFilterFM10', 'VolumeMIN10', 'Volume10MIN', 'PrzVolumeFM10'], fallback: k => /volume/i.test(k) && /(min10|10min|fm10)/i.test(k) },
+      { title: '30 min volume', candidates: ['PrzVolumeFilterFM30', 'VolumeMIN30', 'Volume30MIN', 'PrzVolumeFM30'], fallback: k => /volume/i.test(k) && /(min30|30min|fm30)/i.test(k) },
+      { title: 'high of the day', candidates: ['HighOfDay', 'HOD', 'HighOfTheDay'], fallback: k => /high/i.test(k) && /day/i.test(k) },
+      { title: 'low of the day', candidates: ['LowOfDay', 'LOD', 'LowOfTheDay'], fallback: k => /low/i.test(k) && /day/i.test(k) }
+    ];
+
+    return specs.map(s => ({ title: s.title, key: tryResolve(s.candidates, s.fallback) }));
+  };
   
   // Parse column values for threshold comparison
   const parsePercent = (val: string | null | undefined): number | null => {
@@ -249,7 +291,7 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
     if (/PrzChangeFilterMIN5|ChangeMIN5|Change5MIN/i.test(columnKey) || (/change/i.test(columnKey) && /(min5|5min|fm5)/i.test(columnKey))) {
       const val = parsePercent(value);
       if (val === null) return '';
-      const result = val >= t.change5mPct ? 'bg-blue-900/40' : 'bg-red-900/40';
+      const result = val >= t.change5mPct ? 'bg-[#22c55e]' : 'bg-[#f87171]';
       return result;
     }
     
@@ -257,7 +299,7 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
     if (/TradeCountMIN1|TradesMIN1|TradeCountFM1/i.test(columnKey) || (/trade/i.test(columnKey) && /(min1|1min|fm1)/i.test(columnKey))) {
       const val = parseIntLike(value);
       if (val === null) return '';
-      const result = val >= t.trades1m ? 'bg-blue-900/40' : 'bg-red-900/40';
+      const result = val >= t.trades1m ? 'bg-[#22c55e]' : 'bg-[#f87171]';
       return result;
     }
     
@@ -265,7 +307,7 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
     if (/PrzVolumeFilterFM5|PrzVolumeFM5|VolumeMIN5|Volume5MIN/i.test(columnKey) || (/volume/i.test(columnKey) && /(min5|5min|fm5)/i.test(columnKey))) {
       const val = parseVolume(value);
       if (val === null) return '';
-      const result = val >= t.vol5m ? 'bg-blue-900/40' : 'bg-red-900/40';
+      const result = val >= t.vol5m ? 'bg-[#22c55e]' : 'bg-[#f87171]';
       return result;
     }
     
@@ -273,12 +315,154 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
     if (/ChangeFromOpenPRZ|ChangeFromOpen/i.test(columnKey) || (/change/i.test(columnKey) && /open/i.test(columnKey))) {
       const val = parsePercent(value);
       if (val === null) return '';
-      const result = val >= t.changeFromOpenPct ? 'bg-blue-900/40' : 'bg-red-900/40';
+      const result = val >= t.changeFromOpenPct ? 'bg-[#22c55e]' : 'bg-[#f87171]';
       return result;
     }
     
     return '';
   };
+  
+  // Check if all momentum columns pass thresholds for a row
+  const checkAllMomentumColumnsPass = (row: any, headers: Array<{ key: string | null }>, origin: string): boolean => {
+    // Define the 4 required momentum columns with their specific patterns
+    const requiredMomentumColumns = [
+      {
+        name: '5 Min Change',
+        checkPattern: (key: string) => {
+          return /PrzChangeFilterMIN5|ChangeMIN5|Change5MIN/i.test(key) || 
+                 (/change/i.test(key) && /(min5|5min|fm5)/i.test(key));
+        },
+        thresholdKey: 'change5mPct'
+      },
+      {
+        name: '1 Min Trade Count',
+        checkPattern: (key: string) => {
+          return /TradeCountMIN1|TradesMIN1|TradeCountFM1/i.test(key) || 
+                 (/trade/i.test(key) && /(min1|1min|fm1)/i.test(key));
+        },
+        thresholdKey: 'trades1m'
+      },
+      {
+        name: '5 Min Volume',
+        checkPattern: (key: string) => {
+          return /PrzVolumeFilterFM5|PrzVolumeFM5|VolumeMIN5|Volume5MIN/i.test(key) || 
+                 (/volume/i.test(key) && /(min5|5min|fm5)/i.test(key));
+        },
+        thresholdKey: 'vol5m'
+      },
+      {
+        name: 'Change From Open',
+        checkPattern: (key: string) => {
+          return /ChangeFromOpenPRZ|ChangeFromOpen/i.test(key) || 
+                 (/change/i.test(key) && /open/i.test(key));
+        },
+        thresholdKey: 'changeFromOpenPct'
+      }
+    ];
+    
+    const t = thresholds[origin];
+    if (!t) return false; // No thresholds for this origin
+    
+    const columnsByKey = new Map<string, { value: string | null }>();
+    if (row.columns) {
+      row.columns.forEach((col: any) => {
+        if (col.key) columnsByKey.set(col.key, { value: col.value });
+      });
+    }
+    
+    // Check each required momentum column
+    for (const requiredColumn of requiredMomentumColumns) {
+      // Find matching header
+      let matchingHeader: { key: string | null } | null = null;
+      for (const header of headers) {
+        if (!header.key) continue;
+        
+        // Check if header matches the pattern for this required column
+        if (requiredColumn.checkPattern(header.key)) {
+          matchingHeader = header;
+          break;
+        }
+      }
+      
+      // If required column not found in headers, cannot verify - return false
+      if (!matchingHeader || !matchingHeader.key) {
+        return false;
+      }
+      
+      // Get column value
+      const column = columnsByKey.get(matchingHeader.key);
+      const value = column?.value ?? null;
+      
+      // If value is missing or null, doesn't pass
+      if (!value) {
+        return false;
+      }
+      
+      // Check if this column passes its threshold
+      const cellColor = getCellColor(matchingHeader.key, value, origin);
+      
+      // If cell color is not green (bg-[#22c55e]), then this column doesn't pass
+      if (!cellColor || !cellColor.includes('bg-[#22c55e]')) {
+        return false;
+      }
+    }
+    
+    // All required momentum columns were found and all passed
+    return true;
+  };
+  
+  // Count only YELLOW (Tech only) visible stocks - using same logic as highlighting
+  const techCountInView = React.useMemo(() => {
+    if (!unified.length) return 0;
+    const headers = resolveHeaders(unified);
+    if (!headers.length) return 0;
+    let count = 0;
+    unified.forEach((row) => {
+      const symbolVal = row.symbol || (Array.isArray(row.columns) ? (row.columns.find(c => c.key === 'SymbolColumn')?.value as string) : undefined);
+      const cleanSymbol = symbolVal ? String(symbolVal).trim().toUpperCase() : null;
+      const meetsTech = cleanSymbol ? meetsTechSet.has(cleanSymbol) : false;
+      const allMomentumColumnsPass = checkAllMomentumColumnsPass(row, headers, row.origin);
+      
+      // Count only if meets tech but NOT all momentum (yellow highlight)
+      if (meetsTech && !allMomentumColumnsPass) {
+        count++;
+      }
+    });
+    return count;
+  }, [unified, meetsTechSet]);
+  
+  // Count momentum and BOTH within current view
+  const momCountInView = React.useMemo(() => {
+    if (!unified.length) return 0;
+    const headers = resolveHeaders(unified);
+    if (!headers.length) return 0;
+    let count = 0;
+    unified.forEach((row) => {
+      const allMomentumColumnsPass = checkAllMomentumColumnsPass(row, headers, row.origin);
+      if (allMomentumColumnsPass) count++;
+    });
+    return count;
+  }, [unified]);
+  
+  // Count GREEN (Tech AND all momentum columns pass) - using same logic as highlighting
+  const bothCountInView = React.useMemo(() => {
+    if (!unified.length) return 0;
+    const headers = resolveHeaders(unified);
+    if (!headers.length) return 0;
+    let count = 0;
+    unified.forEach((row) => {
+      const symbolVal = row.symbol || (Array.isArray(row.columns) ? (row.columns.find(c => c.key === 'SymbolColumn')?.value as string) : undefined);
+      const cleanSymbol = symbolVal ? String(symbolVal).trim().toUpperCase() : null;
+      const meetsTech = cleanSymbol ? meetsTechSet.has(cleanSymbol) : false;
+      const allMomentumColumnsPass = checkAllMomentumColumnsPass(row, headers, row.origin);
+      
+      // Count only if meets tech AND all momentum columns pass (green highlight)
+      if (meetsTech && allMomentumColumnsPass) {
+        count++;
+      }
+    });
+    return count;
+  }, [unified, meetsTechSet]);
   
   const handleRestart = async () => {
     if (isRestarting) return;
@@ -397,76 +581,15 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
     return map[key] || key;
   };
 
-  type HeaderSpec = { title: string; key: string | null };
-  const shortenHeaderTitle = (title: string): string => {
-    const map: Record<string, string> = {
-      'Symbol': 'S',
-      'Price': 'P',
-      'Distance from VWAP': 'VWAP',
-      'Change from close': 'Chg',
-      'Consecutive': 'Cons',
-      'ConsecutiveCandleFilterFM1': 'Cons',
-      'Change from open': 'Open',
-      '2 min change': '2m',
-      '5 min change': '5m',
-      '10 min change': '10m',
-      '1 min trade count': '1m#',
-      '5 min trade count': '5m#',
-      '5 min volume': '5mV',
-      '10 min volume': '10mV',
-      '30 min volume': '30mV',
-      'high of the day': 'HOD',
-      'low of the day': 'LOD'
-    };
-    return map[title] || title;
-  };
-  const resolveHeaders = (rows: ToplistRow[]): HeaderSpec[] => {
-    const availableKeysSet = new Set<string>();
-    rows.forEach(r => (r.columns || []).forEach(c => availableKeysSet.add(c.key)));
-    const availableKeys = Array.from(availableKeysSet);
-
-    const tryResolve = (candidates: string[], fallback?: (k: string) => boolean): string | null => {
-      for (const cand of candidates) {
-        if (availableKeysSet.has(cand)) return cand;
-      }
-      if (fallback) {
-        const found = availableKeys.find(fallback);
-        if (found) return found;
-      }
-      return null;
-    };
-
-    const specs: Array<{ title: string; candidates: string[]; fallback?: (k: string) => boolean }> = [
-      { title: 'Symbol', candidates: ['SymbolColumn', 'Symbol', 'Ticker'] },
-      { title: 'Price', candidates: ['PriceNOOPTION', 'Price'] },
-      { title: 'Distance from VWAP', candidates: ['DistanceFromVWAP', 'DistanceFromVwapNOOPTION', 'DistanceFromVwap'], fallback: k => /vwap/i.test(k) && /dist/i.test(k) },
-      { title: 'Change from close', candidates: ['ChangeFromClosePRZ', 'ChangeFromClose'], fallback: k => /change/i.test(k) && /close/i.test(k) },
-      { title: 'ConsecutiveCandleFilterFM1', candidates: ['ConsecutiveCandleFilterFM1'] },
-      { title: 'Change from open', candidates: ['ChangeFromOpenPRZ', 'ChangeFromOpen'], fallback: k => /change/i.test(k) && /open/i.test(k) },
-      { title: '2 min change', candidates: ['PrzChangeFilterMIN2', 'ChangeMIN2', 'Change2MIN'], fallback: k => /change/i.test(k) && /(min2|2min|fm2)/i.test(k) },
-      { title: '5 min change', candidates: ['PrzChangeFilterMIN5', 'ChangeMIN5', 'Change5MIN'], fallback: k => /change/i.test(k) && /(min5|5min|fm5)/i.test(k) },
-      { title: '10 min change', candidates: ['PrzChangeFilterMIN10', 'ChangeMIN10', 'Change10MIN'], fallback: k => /change/i.test(k) && /(min10|10min|fm10)/i.test(k) },
-      { title: '1 min trade count', candidates: ['TradeCountMIN1', 'TradesMIN1', 'TradeCountFM1'], fallback: k => /trade/i.test(k) && /(min1|1min|fm1)/i.test(k) },
-      { title: '5 min trade count', candidates: ['TradeCountMIN5', 'TradesMIN5', 'TradeCountFM5'], fallback: k => /trade/i.test(k) && /(min5|5min|fm5)/i.test(k) },
-      { title: '5 min volume', candidates: ['PrzVolumeFilterFM5', 'VolumeMIN5', 'Volume5MIN', 'PrzVolumeFM5'], fallback: k => /volume/i.test(k) && /(min5|5min|fm5)/i.test(k) },
-      { title: '10 min volume', candidates: ['PrzVolumeFilterFM10', 'VolumeMIN10', 'Volume10MIN', 'PrzVolumeFM10'], fallback: k => /volume/i.test(k) && /(min10|10min|fm10)/i.test(k) },
-      { title: '30 min volume', candidates: ['PrzVolumeFilterFM30', 'VolumeMIN30', 'Volume30MIN', 'PrzVolumeFM30'], fallback: k => /volume/i.test(k) && /(min30|30min|fm30)/i.test(k) },
-      { title: 'high of the day', candidates: ['HighOfDay', 'HOD', 'HighOfTheDay'], fallback: k => /high/i.test(k) && /day/i.test(k) },
-      { title: 'low of the day', candidates: ['LowOfDay', 'LOD', 'LowOfTheDay'], fallback: k => /low/i.test(k) && /day/i.test(k) }
-    ];
-
-    return specs.map(s => ({ title: s.title, key: tryResolve(s.candidates, s.fallback) }));
-  };
-
   return (
-    <div className="h-full flex flex-col bg-[#1e1e1e]">
-      <div className="p-3 border-b border-[#3e3e42] bg-[#252526] flex items-center justify-between">
+    <div className="h-full flex flex-col bg-[#14130e]">
+      <div className="p-4 border-b border-[#2a2820]/50 bg-gradient-to-r from-[#14130e] to-[#0f0e0a] flex items-center justify-between backdrop-blur-sm">
         <div>
-          <h2 className="text-sm font-semibold text-[#cccccc] tracking-wide">Listas FLOAT (RAW)</h2>
-          <p className="text-[11px] text-[#808080] mt-0.5">
+          <h2 className="text-sm font-bold text-[#eae9e9] tracking-wider uppercase mb-1.5">Listas FLOAT (RAW)</h2>
+          <p className="text-[11px] text-[#eae9e9]/70 mt-0.5">
             Datos directos de ChartsWatcher
             {techCountInView > 0 && (
-              <span className="ml-2 px-1.5 py-0.5 bg-yellow-900/30 text-yellow-400 rounded text-[10px] font-semibold">
+              <span className="ml-2 px-2 py-0.5 bg-[#fbbf24] text-[#14130e] rounded-sm text-[10px] font-bold shadow-[0_0_8px_rgba(251,191,36,0.3)]">
                 ⚡ {techCountInView} tech
               </span>
             )}
@@ -475,7 +598,7 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
               const ready = bothCountInView;
               if (ready > 0) {
                 return (
-                  <span className="ml-2 px-1.5 py-0.5 bg-[#0d3a2e] text-green-400 rounded text-[10px] font-semibold">
+                  <span className="ml-2 px-2 py-0.5 bg-[#22c55e] text-[#14130e] rounded-sm text-[10px] font-bold shadow-[0_0_8px_rgba(34,197,94,0.3)]">
                     ✓ {ready} ready
                   </span>
                 );
@@ -484,48 +607,50 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
             })()}
           </p>
         </div>
-        <div className="text-[11px] text-[#969696] flex items-center space-x-2">
-          <div className={`w-2 h-2 rounded-full ${connectionStatus === 'connected' ? 'bg-green-500' : (connectionStatus === 'checking' ? 'bg-yellow-500' : 'bg-red-500')}`}></div>
-          <span>{connectionStatus === 'connected' ? 'En vivo' : (connectionStatus === 'checking' ? 'Checking' : 'Desconectado')}</span>
+        <div className="text-[11px] text-[#eae9e9]/80 flex items-center space-x-3">
+          <div className="flex items-center space-x-2">
+            <div className={`w-2.5 h-2.5 rounded-full ${connectionStatus === 'connected' ? 'bg-[#22c55e] shadow-[0_0_6px_rgba(34,197,94,0.5)]' : (connectionStatus === 'checking' ? 'bg-[#eae9e9] opacity-60' : 'bg-[#f87171] shadow-[0_0_6px_rgba(248,113,113,0.5)]')}`}></div>
+            <span className="font-medium">{connectionStatus === 'connected' ? 'En vivo' : (connectionStatus === 'checking' ? 'Checking' : 'Desconectado')}</span>
+          </div>
           <button
-            className={`ml-2 px-2 py-0.5 rounded ${isTogglingBuys ? 'bg-[#5a5a5a] cursor-not-allowed' : (buysEnabled ? 'bg-green-600' : 'bg-red-600')} text-white`}
+            className={`ml-2 px-3 py-1 rounded-sm text-[11px] font-bold transition-all ${isTogglingBuys ? 'bg-[#2a2820] cursor-not-allowed opacity-50' : (buysEnabled ? 'bg-[#22c55e] text-[#14130e] hover:bg-[#16a34a] shadow-[0_0_8px_rgba(34,197,94,0.3)]' : 'bg-[#f87171] text-[#14130e] hover:bg-[#ef4444] shadow-[0_0_8px_rgba(248,113,113,0.3)]')}`}
             onClick={toggleBuys}
             disabled={isTogglingBuys}
             title={buysEnabled ? 'Disable automatic buys' : 'Enable automatic buys'}
           >{isTogglingBuys ? '...' : (buysEnabled ? 'Buys: ON' : 'Buys: OFF')}</button>
           <button
-            className={`ml-2 px-2 py-0.5 rounded ${isRestarting ? 'bg-[#074e75] cursor-not-allowed' : 'bg-[#0e639c]'} text-white`}
+            className={`ml-2 px-3 py-1 rounded-sm text-[11px] font-bold transition-all ${isRestarting ? 'bg-[#2a2820] cursor-not-allowed opacity-50' : 'bg-[#eae9e9]/10 text-[#eae9e9] hover:bg-[#eae9e9]/20 border border-[#eae9e9]/20'}`}
             onClick={handleRestart}
             disabled={isRestarting}
             title="Reiniciar conexión Toplist"
           >{isRestarting ? 'Restarting…' : 'Restart'}</button>
           {restartStatus === 'ok' && (
-            <span className="ml-2 text-green-400">Reiniciado</span>
+            <span className="ml-2 text-[#22c55e] font-semibold">Reiniciado</span>
           )}
           {restartStatus === 'error' && (
-            <span className="ml-2 text-red-400">Error</span>
+            <span className="ml-2 text-[#f87171] font-semibold">Error</span>
           )}
         </div>
       </div>
       <div className="flex-1 min-h-0 p-3 overflow-hidden">
         {loading ? (
           <div className="h-full flex items-center justify-center">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500" />
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#eae9e9] opacity-60" />
           </div>
               ) : (
                 <div className={`${theme} rounded-md border flex flex-col h-full`}>
-                  <div className="px-2 py-1.5 border-b border-[#3e3e42] flex items-center justify-between bg-[#252526] flex-shrink-0">
-                    <div className="font-semibold text-[12px] tracking-wide">
+                  <div className="px-2 py-1.5 border-b border-[#2a2820]/50 flex items-center justify-between bg-gradient-to-r from-[#14130e] to-[#0f0e0a] flex-shrink-0">
+                    <div className="font-bold text-[12px] tracking-wider text-[#eae9e9] uppercase">
                       Lista Unificada
-                      <span className="ml-2 text-[9px] text-[#808080] font-mono">
+                      <span className="ml-2 text-[9px] text-[#eae9e9]/60 font-mono normal-case">
                         (Tech: {techCountInView}, Mom: {momCountInView}, Both: {bothCountInView})
                       </span>
                     </div>
-                    <div className="text-[10px] text-[#969696]">{unified.length} stocks</div>
+                    <div className="text-[10px] text-[#eae9e9]/70 font-medium">{unified.length} stocks</div>
                   </div>
                   <div className="flex-1 overflow-auto">
                     {unified.length === 0 ? (
-                      <div className="h-full flex items-center justify-center text-[10px] text-[#969696]">Sin datos</div>
+                      <div className="h-full flex items-center justify-center text-[10px] opacity-60">Sin datos</div>
                     ) : (
                       <div className="p-1">
                   {(() => {
@@ -534,7 +659,7 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
                     return (
                       <>
                         <div
-                          className="grid gap-0.5 text-[9px] text-[#969696] mb-0.5 sticky top-0 bg-[#252526] py-1 z-10"
+                          className="grid gap-0.5 text-[9px] opacity-60 mb-0.5 sticky top-0 bg-[#14130e] py-1 z-10"
                           style={{ gridTemplateColumns: `50px repeat(${headers.length}, minmax(60px, 1fr)) 60px` }}
                         >
                           {/* Origin column at the start */}
@@ -556,50 +681,35 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
                             // Clean and normalize symbol (trim whitespace, uppercase)
                             const cleanSymbol = symbolVal ? String(symbolVal).trim().toUpperCase() : null;
                             const meetsTech = cleanSymbol ? meetsTechSet.has(cleanSymbol) : false;
-                            const meetsMomentum = cleanSymbol ? meetsMomentumSet.has(cleanSymbol) : false;
-                            const meetsAll = meetsTech && meetsMomentum;
                             
-                            // Extra logging for stocks that meet momentum
-                            if (cleanSymbol && meetsMomentum && idx < 20) {
-                              console.log(`🔍 ${cleanSymbol}: meetsTech=${meetsTech}, meetsMomentum=${meetsMomentum}, meetsAll=${meetsAll}, will be ${meetsAll ? 'GREEN' : 'YELLOW'}`);
-                            }
+                            // Check if all momentum columns pass thresholds for this row
+                            const allMomentumColumnsPass = checkAllMomentumColumnsPass(row, headers, row.origin);
+                            
+                            // Stock is green only if it meets tech AND all momentum columns pass
+                            const meetsAll = meetsTech && allMomentumColumnsPass;
                             
                             // Determine row background color
-                            let rowBgColor = idx % 2 === 0 ? 'bg-[#2a2a2d]' : ''; // default alternating
+                            let rowBgColor = idx % 2 === 0 ? 'bg-[#0f0e0a]' : ''; // default alternating
+                            let hoverColor = 'hover:bg-[#1e1d17]'; // default hover
                             if (meetsAll) {
-                              rowBgColor = 'bg-[#0d3a2e]'; // green: meets tech AND momentum
+                              rowBgColor = 'bg-[#22c55e]'; // solid green: meets tech AND all momentum columns pass
+                              hoverColor = 'hover:bg-[#22c55e]/80'; // hover with opacity
                             } else if (meetsTech) {
-                              rowBgColor = 'bg-yellow-900/30'; // yellow: meets tech only
+                              rowBgColor = 'bg-[#eab308]'; // solid yellow: meets tech only
+                              hoverColor = 'hover:bg-[#eab308]/80'; // hover with opacity
                             }
-                            
-                            // Debug stocks that meet momentum but showing yellow
-                            if (meetsTech && meetsMomentum && !meetsAll) {
-                              console.error(`❌ RENDERING BUG for ${cleanSymbol}: meetsTech=${meetsTech}, meetsMomentum=${meetsMomentum}, meetsAll=${meetsAll}`);
-                            }
-                            
-                            // Debug specific stocks or those that should be green
-                            if (cleanSymbol === 'RBNE' || cleanSymbol === 'RR' || cleanSymbol === 'ACAD' || meetsAll) {
-                              console.log(`🎨 Rendering ${cleanSymbol}:`, {
-                                meetsTech,
-                                meetsMomentum,
-                                meetsAll,
-                                rowBgColor,
-                                expectedColor: meetsAll ? 'GREEN' : (meetsTech ? 'YELLOW' : 'GRAY'),
-                                inTechSet: cleanSymbol ? meetsTechSet.has(cleanSymbol) : false,
-                                inMomentumSet: cleanSymbol ? meetsMomentumSet.has(cleanSymbol) : false
-                              });
-                            }
+                            // Note: momentum-only rows are not highlighted
                             
                             return (
                               <div
                                 key={`${symbolVal || 'row'}-${idx}`}
-                                className={`grid gap-0.5 text-[9px] border-b border-[#3e3e42] py-0.5 ${rowBgColor} hover:bg-[#2f2f33]`}
+                                className={`grid gap-0.5 text-[9px] border-b border-[#2a2820] py-0.5 ${rowBgColor} ${hoverColor}`}
                                 style={{ gridTemplateColumns: `50px repeat(${headers.length}, minmax(60px, 1fr)) 60px` }}
-                                title={`Ver detalles de ${symbolVal || ''} - Tech: ${meetsTech ? '✓' : '✗'}, Momentum: ${meetsMomentum ? '✓' : '✗'} ${meetsAll ? '(READY TO BUY)' : ''}`}
+                                title={`Ver detalles de ${symbolVal || ''} - Tech: ${meetsTech ? '✓' : '✗'}, All Momentum: ${allMomentumColumnsPass ? '✓' : '✗'} ${meetsAll ? '(READY TO BUY)' : ''}`}
                               >
                                 {/* Origin column at the start */}
                                 <div className="text-center leading-4 px-0.5">
-                                  <span className="truncate block font-bold text-white">{row.origin}</span>
+                                  <span className={`truncate block font-bold ${meetsAll || meetsTech ? 'text-[#14130e]' : 'text-[#eae9e9]'}`}>{row.origin}</span>
                                 </div>
                                 {/* Other columns */}
                                 {headers.map((h, i) => {
@@ -612,9 +722,14 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
                                     console.log(`Cell color for ${h.key}:`, cellColor, 'value:', value, 'origin:', row.origin);
                                   }
                                   
+                                  // Determine text color based on row highlight or cell highlight
+                                  const isRowHighlighted = meetsAll || meetsTech;
+                                  const isCellHighlighted = cellColor && cellColor.includes('bg-[');
+                                  const textColor = isRowHighlighted || isCellHighlighted ? 'text-[#14130e]' : 'text-[#eae9e9]';
+                                  
                                   return (
-                                    <div key={i} className="text-center leading-4 px-0.5" onClick={() => onSymbolClick && onSymbolClick(symbolVal)}>
-                                      <span className={`block font-mono text-white px-0.5 py-0.5 rounded ${cellColor}`} style={{ minHeight: '1rem' }}>{value}</span>
+                                    <div key={i} className={`text-center leading-4 ${cellColor ? 'px-0' : 'px-0.5'}`} onClick={() => onSymbolClick && onSymbolClick(symbolVal)}>
+                                      <span className={`block font-mono ${textColor} ${cellColor ? 'py-0 h-full w-full' : 'px-0.5 py-0.5 rounded'} ${cellColor}`} style={{ minHeight: '1rem' }}>{value}</span>
                                     </div>
                                   );
                                 })}
@@ -626,32 +741,32 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
                                     const status = symbolForBuy ? buyStatuses[symbolForBuy] : null;
                                     const isDisabled = isBuying || !symbolForBuy;
                                     
-                                    let buttonClass = 'px-2 py-0.5 text-white text-[9px] font-semibold rounded transition-colors';
+                                    let buttonClass = 'px-2 py-0.5 text-[9px] font-semibold rounded transition-colors';
                                     let buttonText = 'BUY';
                                     let buttonTitle = `Send buy signal for ${symbolVal}`;
                                     
                                     if (isBuying) {
-                                      buttonClass += ' bg-gray-600 cursor-not-allowed';
+                                      buttonClass += ' bg-[#2a2820] cursor-not-allowed opacity-50';
                                       buttonText = '...';
                                       buttonTitle = `Sending buy signal for ${symbolVal}...`;
                                     } else if (status === 'success') {
-                                      buttonClass += ' bg-green-600';
+                                      buttonClass += ' bg-[#4ade80] text-[#14130e]';
                                       buttonText = '✓';
                                       buttonTitle = `Buy signal sent successfully for ${symbolVal}`;
                                     } else if (status === 'error') {
-                                      buttonClass += ' bg-red-600';
+                                      buttonClass += ' bg-[#f87171] text-[#14130e]';
                                       buttonText = '✗';
                                       buttonTitle = `Failed to send buy signal for ${symbolVal}`;
                                     } else {
                                       // Show different colors based on stock status
                                       if (meetsAll) {
-                                        buttonClass += ' bg-green-600 hover:bg-green-700';
+                                        buttonClass += ' bg-[#4ade80] text-[#14130e] hover:bg-[#22c55e]';
                                         buttonTitle = `Send buy signal for ${symbolVal} (Tech + Momentum ready)`;
                                       } else if (meetsTech) {
-                                        buttonClass += ' bg-yellow-600 hover:bg-yellow-700';
+                                        buttonClass += ' bg-[#eae9e9] text-[#14130e] hover:bg-[#d4d3d3] opacity-60';
                                         buttonTitle = `Send buy signal for ${symbolVal} (Tech only)`;
                                       } else {
-                                        buttonClass += ' bg-blue-600 hover:bg-blue-700';
+                                        buttonClass += ' bg-[#2a2820] text-[#eae9e9] hover:bg-[#3d3a30]';
                                       }
                                     }
                                     

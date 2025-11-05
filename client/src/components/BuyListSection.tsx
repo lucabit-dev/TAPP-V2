@@ -87,12 +87,12 @@ const BuyListSection: React.FC = () => {
   }, []);
 
   return (
-    <div className="h-full flex flex-col bg-[#1e1e1e]">
-      <div className="p-3 border-b border-[#3e3e42] bg-[#252526] flex items-center justify-between">
-        <div className="flex items-center space-x-3">
-          <h2 className="text-sm font-semibold text-[#cccccc] tracking-wide">Buy List</h2>
-          <div className="flex items-center space-x-1 text-[11px] text-[#969696]">
-            <span>Trigger:</span>
+    <div className="h-full flex flex-col bg-[#14130e]">
+      <div className="p-4 border-b border-[#2a2820]/50 bg-gradient-to-r from-[#14130e] to-[#0f0e0a] flex items-center justify-between backdrop-blur-sm">
+        <div className="flex items-center space-x-4">
+          <h2 className="text-sm font-bold text-[#eae9e9] tracking-wider uppercase">Buy List</h2>
+          <div className="flex items-center space-x-2 text-[11px] text-[#eae9e9]/80">
+            <span className="font-medium">Trigger:</span>
             <select
               value={mode}
               onChange={async (e) => {
@@ -106,7 +106,7 @@ const BuyListSection: React.FC = () => {
                   });
                 } catch {}
               }}
-              className="bg-[#2d2d30] border border-[#3e3e42] rounded px-2 py-1 text-[11px] text-[#cccccc]"
+              className="bg-[#0f0e0a] border border-[#2a2820] rounded px-2 py-1 text-[11px] text-[#eae9e9]"
             >
               <option value="cross">cross (neg → pos)</option>
               <option value="positive">positive (hist &gt; 0)</option>
@@ -139,73 +139,73 @@ const BuyListSection: React.FC = () => {
               }
             }}
           >
-            <input name="symbol" placeholder="Test symbol" className="px-2 py-1 text-xs bg-[#2d2d30] border border-[#3e3e42] rounded text-[#cccccc]" />
-            <button type="submit" className="px-2 py-1 text-xs rounded bg-[#0e639c] text-white">Test Buy</button>
+            <input name="symbol" placeholder="Test symbol" className="px-2 py-1 text-xs bg-[#0f0e0a] border border-[#2a2820] rounded text-[#eae9e9]" />
+            <button type="submit" className="px-2 py-1 text-xs rounded bg-[#eae9e9] text-[#14130e] hover:bg-[#d4d3d3]">Test Buy</button>
           </form>
-          <div className="text-[11px] text-[#969696]">{buys.length} entries</div>
+          <div className="text-[11px] opacity-60">{buys.length} entries</div>
         </div>
       </div>
       <div className="flex-1 overflow-y-auto p-3">
         {buys.length === 0 ? (
-          <div className="h-24 flex items-center justify-center text-[12px] text-[#969696]">No buy signals yet</div>
+          <div className="h-24 flex items-center justify-center text-[12px] opacity-60">No buy signals yet</div>
         ) : (
-          <ul className="divide-y divide-[#3e3e42]">
+          <ul className="divide-y divide-[#2a2820]">
             {buys.map((entry, idx) => (
-              <li key={`${entry.ticker}-${entry.timestamp}-${idx}`} className={`${idx % 2 === 0 ? 'bg-[#2a2a2d]' : ''} py-2 px-2`}>
+              <li key={`${entry.ticker}-${entry.timestamp}-${idx}`} className={`${idx % 2 === 0 ? 'bg-[#0f0e0a]' : ''} py-2 px-2 border-b border-[#2a2820]`}>
                 <div className="flex items-center justify-between">
                   <div className="flex items-center space-x-2">
                     <span className="text-[12px] font-semibold">{entry.ticker}</span>
-                    {entry.group && <span className="text-[10px] text-[#808080]">({entry.group})</span>}
+                    {entry.group && <span className="text-[10px] opacity-60">({entry.group})</span>}
                   </div>
-                  <div className="text-[10px] text-[#969696]">
+                  <div className="text-[10px] opacity-60">
                     {formatTimeUTC4(entry.timestamp, { includeAMPM: true, includeET: true })}
                   </div>
                 </div>
                 <div className="mt-1 flex items-center justify-between text-[11px]">
-                  <span className="text-[#969696]">Price</span>
-                  <span className="font-mono text-[#00df82]">{entry.price ? `$${entry.price.toFixed(2)}` : 'N/A'}</span>
+                  <span className="opacity-60">Price</span>
+                  <span className="font-mono text-[#4ade80]">{entry.price ? `$${entry.price.toFixed(2)}` : 'N/A'}</span>
                 </div>
                 {entry.notifyStatus && (
                   <div className="mt-1 flex items-center justify-between text-[10px]">
-                    <span className="text-[#969696]">Webhook</span>
-                    <span className="font-mono text-[#cccccc]">{entry.notifyStatus}</span>
+                    <span className="opacity-60">Webhook</span>
+                    <span className="font-mono text-[#eae9e9]">{entry.notifyStatus}</span>
                   </div>
                 )}
                 {entry.indicators && (
-                  <div className="mt-2 space-y-1 border-t border-[#3e3e42] pt-2">
-                    <div className="text-[10px] font-semibold text-[#808080] mb-1">Indicators at Buy:</div>
+                  <div className="mt-2 space-y-1 border-t border-[#2a2820] pt-2">
+                    <div className="text-[10px] font-semibold opacity-60 mb-1">Indicators at Buy:</div>
                     <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px]">
                       {entry.indicators.ema1m18 !== null && entry.indicators.ema1m18 !== undefined && (
                         <div className="flex justify-between">
-                          <span className="text-[#969696]">EMA 1m18:</span>
-                          <span className="font-mono text-[#cccccc]">{entry.indicators.ema1m18.toFixed(4)}</span>
+                          <span className="opacity-60">EMA 1m18:</span>
+                          <span className="font-mono text-[#eae9e9]">{entry.indicators.ema1m18.toFixed(4)}</span>
                         </div>
                       )}
                       {entry.indicators.ema5m18 !== null && entry.indicators.ema5m18 !== undefined && (
                         <div className="flex justify-between">
-                          <span className="text-[#969696]">EMA 5m18:</span>
-                          <span className="font-mono text-[#cccccc]">{entry.indicators.ema5m18.toFixed(4)}</span>
+                          <span className="opacity-60">EMA 5m18:</span>
+                          <span className="font-mono text-[#eae9e9]">{entry.indicators.ema5m18.toFixed(4)}</span>
                         </div>
                       )}
                       {entry.indicators.ema5m200 !== null && entry.indicators.ema5m200 !== undefined && (
                         <div className="flex justify-between">
-                          <span className="text-[#969696]">EMA 5m200:</span>
-                          <span className="font-mono text-[#cccccc]">{entry.indicators.ema5m200.toFixed(4)}</span>
+                          <span className="opacity-60">EMA 5m200:</span>
+                          <span className="font-mono text-[#eae9e9]">{entry.indicators.ema5m200.toFixed(4)}</span>
                         </div>
                       )}
                       {entry.indicators.macd1m && (
                         <>
                           <div className="flex justify-between">
-                            <span className="text-[#969696]">MACD 1m:</span>
-                            <span className="font-mono text-[#cccccc]">{entry.indicators.macd1m.macd.toFixed(4)}</span>
+                            <span className="opacity-60">MACD 1m:</span>
+                            <span className="font-mono text-[#eae9e9]">{entry.indicators.macd1m.macd.toFixed(4)}</span>
                           </div>
                           <div className="flex justify-between">
-                            <span className="text-[#969696]">Signal 1m:</span>
-                            <span className="font-mono text-[#cccccc]">{entry.indicators.macd1m.signal.toFixed(4)}</span>
+                            <span className="opacity-60">Signal 1m:</span>
+                            <span className="font-mono text-[#eae9e9]">{entry.indicators.macd1m.signal.toFixed(4)}</span>
                           </div>
                           <div className="flex justify-between">
-                            <span className="text-[#969696]">Hist 1m:</span>
-                            <span className={`font-mono ${entry.indicators.macd1m.histogram >= 0 ? 'text-[#00df82]' : 'text-[#ff4444]'}`}>
+                            <span className="opacity-60">Hist 1m:</span>
+                            <span className={`font-mono ${entry.indicators.macd1m.histogram >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
                               {entry.indicators.macd1m.histogram.toFixed(4)}
                             </span>
                           </div>
@@ -214,12 +214,12 @@ const BuyListSection: React.FC = () => {
                       {entry.indicators.macd5m && (
                         <>
                           <div className="flex justify-between">
-                            <span className="text-[#969696]">MACD 5m:</span>
-                            <span className="font-mono text-[#cccccc]">{entry.indicators.macd5m.macd.toFixed(4)}</span>
+                            <span className="opacity-60">MACD 5m:</span>
+                            <span className="font-mono text-[#eae9e9]">{entry.indicators.macd5m.macd.toFixed(4)}</span>
                           </div>
                           <div className="flex justify-between">
-                            <span className="text-[#969696]">Hist 5m:</span>
-                            <span className={`font-mono ${entry.indicators.macd5m.histogram >= 0 ? 'text-[#00df82]' : 'text-[#ff4444]'}`}>
+                            <span className="opacity-60">Hist 5m:</span>
+                            <span className={`font-mono ${entry.indicators.macd5m.histogram >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
                               {entry.indicators.macd5m.histogram.toFixed(4)}
                             </span>
                           </div>
@@ -229,42 +229,42 @@ const BuyListSection: React.FC = () => {
                   </div>
                 )}
                 {entry.momentum && (
-                  <div className="mt-2 space-y-1 border-t border-[#3e3e42] pt-2">
-                    <div className="text-[10px] font-semibold text-[#808080] mb-1">Momentum at Buy ({entry.momentum.groupKey}):</div>
+                  <div className="mt-2 space-y-1 border-t border-[#2a2820] pt-2">
+                    <div className="text-[10px] font-semibold opacity-60 mb-1">Momentum at Buy ({entry.momentum.groupKey}):</div>
                     <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px]">
                       {entry.momentum.values.change5mPct !== null && (
                         <div className="flex justify-between">
-                          <span className="text-[#969696]">5m Change:</span>
-                          <span className={`font-mono ${entry.momentum.values.change5mPct >= entry.momentum.thresholds.change5mPct ? 'text-[#00df82]' : 'text-[#ff4444]'}`}>
+                          <span className="opacity-60">5m Change:</span>
+                          <span className={`font-mono ${entry.momentum.values.change5mPct >= entry.momentum.thresholds.change5mPct ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
                             {entry.momentum.values.change5mPct.toFixed(2)}% {entry.momentum.values.change5mPct >= entry.momentum.thresholds.change5mPct ? '✓' : '✗'}
                           </span>
                         </div>
                       )}
                       {entry.momentum.values.trades1m !== null && (
                         <div className="flex justify-between">
-                          <span className="text-[#969696]">1m Trades:</span>
-                          <span className={`font-mono ${entry.momentum.values.trades1m >= entry.momentum.thresholds.trades1m ? 'text-[#00df82]' : 'text-[#ff4444]'}`}>
+                          <span className="opacity-60">1m Trades:</span>
+                          <span className={`font-mono ${entry.momentum.values.trades1m >= entry.momentum.thresholds.trades1m ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
                             {entry.momentum.values.trades1m.toLocaleString()} {entry.momentum.values.trades1m >= entry.momentum.thresholds.trades1m ? '✓' : '✗'}
                           </span>
                         </div>
                       )}
                       {entry.momentum.values.vol5m !== null && (
                         <div className="flex justify-between">
-                          <span className="text-[#969696]">5m Volume:</span>
-                          <span className={`font-mono ${entry.momentum.values.vol5m >= entry.momentum.thresholds.vol5m ? 'text-[#00df82]' : 'text-[#ff4444]'}`}>
+                          <span className="opacity-60">5m Volume:</span>
+                          <span className={`font-mono ${entry.momentum.values.vol5m >= entry.momentum.thresholds.vol5m ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
                             {(entry.momentum.values.vol5m / 1000).toFixed(0)}K {entry.momentum.values.vol5m >= entry.momentum.thresholds.vol5m ? '✓' : '✗'}
                           </span>
                         </div>
                       )}
                       {entry.momentum.values.changeFromOpenPct !== null && (
                         <div className="flex justify-between">
-                          <span className="text-[#969696]">From Open:</span>
-                          <span className={`font-mono ${entry.momentum.values.changeFromOpenPct >= entry.momentum.thresholds.changeFromOpenPct ? 'text-[#00df82]' : 'text-[#ff4444]'}`}>
+                          <span className="opacity-60">From Open:</span>
+                          <span className={`font-mono ${entry.momentum.values.changeFromOpenPct >= entry.momentum.thresholds.changeFromOpenPct ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
                             {entry.momentum.values.changeFromOpenPct.toFixed(2)}% {entry.momentum.values.changeFromOpenPct >= entry.momentum.thresholds.changeFromOpenPct ? '✓' : '✗'}
                           </span>
                         </div>
                       )}
-                      <div className="col-span-2 text-[9px] text-[#808080] mt-1 pt-1 border-t border-[#3e3e42]">
+                      <div className="col-span-2 text-[9px] opacity-60 mt-1 pt-1 border-t border-[#2a2820]">
                         Thresholds: {entry.momentum.thresholds.change5mPct}% / {entry.momentum.thresholds.trades1m} / {(entry.momentum.thresholds.vol5m / 1000).toFixed(0)}K / {entry.momentum.thresholds.changeFromOpenPct}%
                       </div>
                     </div>

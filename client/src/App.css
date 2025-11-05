@@ -10,64 +10,157 @@
   }
   
   body {
-    font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
     margin: 0;
     padding: 0;
-    background-color: #111827;
-    color: #f9fafb;
+    background-color: #14130e;
+    color: #eae9e9;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 
-  /* Custom scrollbar for dark theme */
+  /* Custom scrollbar - futuristic minimal style */
   ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
+    width: 6px;
+    height: 6px;
   }
   
   ::-webkit-scrollbar-track {
-    background: #374151;
-    border-radius: 4px;
+    background: rgba(234, 233, 233, 0.05);
+    border-radius: 3px;
   }
   
   ::-webkit-scrollbar-thumb {
-    background: #6b7280;
-    border-radius: 4px;
+    background: rgba(234, 233, 233, 0.15);
+    border-radius: 3px;
+    transition: background 0.2s ease;
   }
   
   ::-webkit-scrollbar-thumb:hover {
-    background: #9ca3af;
+    background: rgba(234, 233, 233, 0.25);
   }
 
   /* Firefox scrollbar */
   * {
     scrollbar-width: thin;
-    scrollbar-color: #6b7280 #374151;
+    scrollbar-color: rgba(234, 233, 233, 0.15) rgba(234, 233, 233, 0.05);
+  }
+
+  /* Header animations */
+  @keyframes slideDown {
+    from {
+      transform: translateY(-100%);
+      opacity: 0;
+    }
+    to {
+      transform: translateY(0);
+      opacity: 1;
+    }
+  }
+
+  @keyframes slideUp {
+    from {
+      transform: translateY(0);
+      opacity: 1;
+    }
+    to {
+      transform: translateY(-100%);
+      opacity: 0;
+    }
+  }
+
+  @keyframes bounceArrow {
+    0%, 100% {
+      transform: translateY(0);
+    }
+    50% {
+      transform: translateY(4px);
+    }
+  }
+
+  @keyframes pulseArrow {
+    0%, 100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.6;
+    }
+  }
+
+  .header-enter {
+    animation: slideDown 0.3s ease-out forwards;
+  }
+
+  .header-exit {
+    animation: slideUp 0.3s ease-in forwards;
+  }
+
+  .arrow-bounce {
+    animation: bounceArrow 1.5s ease-in-out infinite;
+  }
+
+  .arrow-pulse {
+    animation: pulseArrow 2s ease-in-out infinite;
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  .animate-fadeIn {
+    animation: fadeIn 0.2s ease-out forwards;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 8px;
+  }
+  
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: rgba(234, 233, 233, 0.03);
+    border-radius: 4px;
+  }
+  
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(234, 233, 233, 0.12);
+    border-radius: 4px;
+    transition: background 0.2s ease;
+  }
+  
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(234, 233, 233, 0.2);
   }
 }
 
 @layer components {
-  /* Trading platform specific components */
+  /* ASTOR platform components - futuristic clean style */
   .trading-card {
-    @apply bg-gray-800 border border-gray-700 rounded-lg p-4 transition-all duration-200 hover:bg-gray-750 hover:border-gray-600;
+    @apply bg-[#14130e] border border-[#2a2820] rounded-lg p-4 transition-all duration-200 hover:border-[#3d3a30];
   }
 
   .trading-button {
-    @apply px-4 py-2 rounded-lg font-medium transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900;
+    @apply px-4 py-2 rounded-lg font-medium transition-all duration-200 focus:outline-none focus:ring-1 focus:ring-[#eae9e9] focus:ring-offset-1 focus:ring-offset-[#14130e];
   }
 
   .trading-button-primary {
-    @apply bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800;
+    @apply bg-[#eae9e9] text-[#14130e] hover:bg-[#d4d3d3] active:bg-[#c0bfbf] font-medium;
   }
 
   .trading-button-secondary {
-    @apply bg-gray-700 text-gray-300 hover:bg-gray-600 hover:text-white;
+    @apply bg-[#2a2820] text-[#eae9e9] hover:bg-[#3d3a30] border border-[#3d3a30];
   }
 
   .trading-button-success {
-    @apply bg-green-600 text-white hover:bg-green-700 active:bg-green-800;
+    @apply bg-[#4ade80] text-[#14130e] hover:bg-[#22c55e] active:bg-[#16a34a] font-medium;
   }
 
   .trading-button-danger {
-    @apply bg-red-600 text-white hover:bg-red-700 active:bg-red-800;
+    @apply bg-[#f87171] text-[#14130e] hover:bg-[#ef4444] active:bg-[#dc2626] font-medium;
   }
 
   /* Status indicators */
@@ -242,39 +335,40 @@
   }
 }
 
-  /* Trading table styles */
+  /* Trading table styles - ASTOR style */
   .trading-table {
     @apply w-full border-collapse;
   }
 
   .trading-table th {
-    @apply bg-gray-800 text-gray-400 text-xs font-bold uppercase tracking-wider px-6 py-3 text-left border-b border-gray-700;
+    @apply bg-[#14130e] text-[#eae9e9] text-xs font-semibold uppercase tracking-wider px-6 py-3 text-left border-b border-[#2a2820];
+    opacity: 0.8;
   }
 
   .trading-table td {
-    @apply px-6 py-4 text-sm border-b border-gray-800;
+    @apply px-6 py-4 text-sm border-b border-[#2a2820] text-[#eae9e9];
   }
 
   .trading-table tbody tr:hover {
-    @apply bg-gray-800/50;
+    @apply bg-[#1e1d17];
   }
 
-  /* Glass morphism effects */
+  /* Glass morphism effects - ASTOR style */
   .glass {
-    background: rgba(31, 41, 55, 0.8);
-    backdrop-filter: blur(10px);
-    border: 1px solid rgba(75, 85, 99, 0.3);
+    background: rgba(20, 19, 14, 0.85);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(234, 233, 233, 0.1);
   }
 
   .glass-light {
-    background: rgba(55, 65, 81, 0.6);
+    background: rgba(20, 19, 14, 0.6);
     backdrop-filter: blur(8px);
-    border: 1px solid rgba(107, 114, 128, 0.2);
+    border: 1px solid rgba(234, 233, 233, 0.08);
   }
 
-  /* Gradient backgrounds */
+  /* Gradient backgrounds - ASTOR style */
   .gradient-trading {
-    background: linear-gradient(135deg, #1f2937 0%, #111827 100%);
+    background: linear-gradient(135deg, #14130e 0%, #0f0e0a 100%);
   }
 
   .gradient-success {
@@ -341,9 +435,9 @@
     }
   }
 
-  /* Notification styles */
+  /* Notification styles - ASTOR style */
   .notification {
-    @apply fixed top-4 right-4 z-50 max-w-sm w-full bg-gray-800 border border-gray-700 rounded-lg shadow-lg;
+    @apply fixed top-4 right-4 z-50 max-w-sm w-full bg-[#14130e] border border-[#2a2820] rounded-lg shadow-xl;
   }
 
   .notification-success {
@@ -396,17 +490,18 @@
     align-items: center;
   }
 
-  /* Price formatting */
+  /* Price formatting - ASTOR style */
   .price-positive {
-    @apply text-green-400;
+    @apply text-[#4ade80];
   }
 
   .price-negative {
-    @apply text-red-400;
+    @apply text-[#f87171];
   }
 
   .price-neutral {
-    @apply text-gray-300;
+    @apply text-[#eae9e9];
+    opacity: 0.7;
   }
 
   /* Volume formatting */

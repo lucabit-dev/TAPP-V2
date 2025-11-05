@@ -2401,7 +2401,7 @@ async function sendBuyOrder(symbol, configId = null, groupKey = null) {
     const orderBody = {
       symbol: symbol,
       side: 'BUY',
-      order_type: 'LIMIT',
+      order_type: 'Limit',
       quantity: quantity,
       limit_price: currentPrice
     };
@@ -2468,10 +2468,23 @@ async function sendBuyOrder(symbol, configId = null, groupKey = null) {
     
     const isSuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
     
-    // If buy order was successful, create stop-loss sell order
+    // If buy order was successful, queue stop-loss order creation (wait for position to be filled)
     let stopLossResult = null;
     if (isSuccess) {
-      stopLossResult = await createStopLossOrder(symbol, currentPrice, quantity);
+      // Queue stop-loss order instead of creating immediately
+      // The stop-loss will be created once the buy order is filled and position exists
+      queueStopLossOrder(symbol, currentPrice, quantity, (result) => {
+        stopLossResult = result;
+      });
+      // Return a placeholder result indicating stop-loss is queued
+      stopLossResult = {
+        success: true,
+        notifyStatus: 'QUEUED',
+        responseData: { message: 'Stop-loss order queued, waiting for position to be filled' },
+        errorMessage: null,
+        stopLossPrice: null,
+        queued: true
+      };
     }
     
     return {
@@ -2495,6 +2508,221 @@ async function sendBuyOrder(symbol, configId = null, groupKey = null) {
       stopLoss: null
     };
   }
+}
+
+// Queue for pending stop-loss orders that need to be created after buy orders are filled
+const pendingStopLossQueue = new Map(); // Map<symbol, { stockPrice, quantity, createdAt, attempts }>
+
+// Cache of current positions by symbol (updated from WebSocket)
+const positionsCache = new Map(); // Map<symbol, { PositionID, Symbol, Quantity, ... }>
+
+// Maintain WebSocket connection to positions to keep cache updated
+let positionsWs = null;
+let positionsWsReconnectTimer = null;
+
+function connectPositionsWebSocket() {
+  const apiKey = process.env.PNL_API_KEY;
+  const wsBaseUrl = process.env.PNL_WS_BASE_URL || 'wss://sections-bot.inbitme.com';
+  
+  if (!apiKey) {
+    console.warn('⚠️ PNL_API_KEY not configured, cannot connect to positions WebSocket');
+    return;
+  }
+  
+  // Close existing connection if any
+  if (positionsWs) {
+    try {
+      positionsWs.close();
+    } catch (e) {}
+    positionsWs = null;
+  }
+  
+  const wsUrl = `${wsBaseUrl}/ws/positions?api_key=${encodeURIComponent(apiKey)}`;
+  console.log('🔌 Connecting to positions WebSocket for stop-loss monitoring...');
+  
+  try {
+    positionsWs = new WebSocket(wsUrl);
+    
+    positionsWs.on('open', () => {
+      console.log('✅ Positions WebSocket connected for stop-loss monitoring');
+      // Clear reconnect timer on successful connection
+      if (positionsWsReconnectTimer) {
+        clearTimeout(positionsWsReconnectTimer);
+        positionsWsReconnectTimer = null;
+      }
+    });
+    
+    positionsWs.on('message', (data) => {
+      try {
+        const messageStr = Buffer.isBuffer(data) ? data.toString('utf8') : data.toString();
+        const dataObj = JSON.parse(messageStr);
+        
+        // Skip heartbeat messages
+        if (dataObj.Heartbeat) {
+          return;
+        }
+        
+        // Handle position updates
+        if (dataObj.PositionID && dataObj.Symbol) {
+          const symbol = dataObj.Symbol.toUpperCase();
+          const quantity = parseFloat(dataObj.Quantity || '0');
+          
+          if (quantity > 0) {
+            // Update cache with position
+            positionsCache.set(symbol, {
+              ...dataObj,
+              Symbol: symbol,
+              lastUpdated: Date.now()
+            });
+            console.log(`📊 Position cache updated: ${symbol} (${quantity} shares)`);
+          } else {
+            // Position closed or quantity is 0, remove from cache
+            positionsCache.delete(symbol);
+            console.log(`📊 Position removed from cache: ${symbol}`);
+          }
+        }
+      } catch (err) {
+        console.error('⚠️ Error parsing positions WebSocket message:', err.message);
+      }
+    });
+    
+    positionsWs.on('error', (error) => {
+      console.error('❌ Positions WebSocket error:', error.message);
+    });
+    
+    positionsWs.on('close', (code, reason) => {
+      console.log(`🔌 Positions WebSocket closed (${code}): ${reason || 'No reason'}`);
+      positionsWs = null;
+      
+      // Reconnect after delay (exponential backoff, max 30 seconds)
+      const delay = Math.min(30000, 1000 * Math.pow(2, Math.min(5, 0)));
+      positionsWsReconnectTimer = setTimeout(() => {
+        console.log('🔄 Reconnecting positions WebSocket...');
+        connectPositionsWebSocket();
+      }, delay);
+    });
+    
+  } catch (err) {
+    console.error('❌ Failed to create positions WebSocket:', err.message);
+    positionsWs = null;
+    // Retry after delay
+    positionsWsReconnectTimer = setTimeout(() => {
+      connectPositionsWebSocket();
+    }, 5000);
+  }
+}
+
+// Initialize positions WebSocket connection
+if (process.env.PNL_API_KEY) {
+  connectPositionsWebSocket();
+} else {
+  console.warn('⚠️ PNL_API_KEY not set, positions monitoring disabled');
+}
+
+// Check if a position exists for a symbol using the cache
+function checkPositionExists(symbol) {
+  const normalizedSymbol = symbol.toUpperCase();
+  const position = positionsCache.get(normalizedSymbol);
+  
+  if (position) {
+    // Check if position has quantity (position exists)
+    const quantity = parseFloat(position.Quantity || '0');
+    return quantity > 0;
+  }
+  
+  return false;
+}
+
+// Process pending stop-loss orders - check if positions exist and create stop-loss orders
+async function processPendingStopLossOrders() {
+  if (pendingStopLossQueue.size === 0) return;
+  
+  const now = Date.now();
+  const MAX_WAIT_TIME = 5 * 60 * 1000; // 5 minutes max wait
+  const MAX_ATTEMPTS = 60; // Max 60 attempts (5 minutes / 5 seconds)
+  const POLL_INTERVAL_MS = 5000; // Poll every 5 seconds (cache updates in real-time via WebSocket)
+  
+  const symbolsToProcess = Array.from(pendingStopLossQueue.keys());
+  
+  for (const symbol of symbolsToProcess) {
+    const pending = pendingStopLossQueue.get(symbol);
+    if (!pending) continue;
+    
+    const elapsed = now - pending.createdAt;
+    const attempts = pending.attempts || 0;
+    
+    // Skip if too many attempts or too much time has passed
+    if (attempts >= MAX_ATTEMPTS || elapsed > MAX_WAIT_TIME) {
+      console.warn(`⏱️ Stop-loss queue timeout for ${symbol} after ${attempts} attempts (${Math.round(elapsed/1000)}s)`);
+      pendingStopLossQueue.delete(symbol);
+      continue;
+    }
+    
+    // Only check every POLL_INTERVAL_MS
+    if (now - pending.lastCheck < POLL_INTERVAL_MS) {
+      continue;
+    }
+    
+    pending.lastCheck = now;
+    pending.attempts = attempts + 1;
+    
+    // Check if position exists (synchronous check using cache)
+    const positionExists = checkPositionExists(symbol);
+    
+    if (positionExists) {
+      console.log(`✅ Position detected for ${symbol}, creating stop-loss order...`);
+      
+      // Create stop-loss order
+      const stopLossResult = await createStopLossOrder(symbol, pending.stockPrice, pending.quantity);
+      
+      // Update buy entry in buy list with stop-loss result
+      const buyEntry = buyList.find(entry => entry.ticker === symbol);
+      if (buyEntry && buyEntry.stopLoss && buyEntry.stopLoss.queued) {
+        buyEntry.stopLoss = stopLossResult;
+        // Broadcast update to clients
+        broadcastToClients({ 
+          type: 'BUY_LIST_UPDATE', 
+          data: { list: buyList },
+          timestamp: new Date().toISOString()
+        });
+        console.log(`📝 Updated buy entry for ${symbol} with stop-loss result`);
+      }
+      
+      // Remove from queue
+      pendingStopLossQueue.delete(symbol);
+      
+      // Broadcast update if there's a callback
+      if (pending.onComplete) {
+        pending.onComplete(stopLossResult);
+      }
+      
+      console.log(`✅ Stop-loss order ${stopLossResult.success ? 'created' : 'failed'} for ${symbol}`);
+    } else {
+      // Position not found yet, will check again next cycle
+      if (attempts % 6 === 0) { // Log every 6th attempt (every ~30 seconds) to avoid spam
+        console.log(`⏳ Waiting for buy order to fill for ${symbol} (attempt ${attempts}/${MAX_ATTEMPTS}, cache has ${positionsCache.size} positions)...`);
+      }
+    }
+  }
+}
+
+// Start polling interval for pending stop-loss orders
+const STOP_LOSS_POLL_INTERVAL_MS = 5000; // Check every 5 seconds (cache updates in real-time)
+setInterval(processPendingStopLossOrders, STOP_LOSS_POLL_INTERVAL_MS);
+
+// Helper function to queue stop-loss order creation (waits for position to exist)
+function queueStopLossOrder(symbol, stockPrice, quantity, onComplete = null) {
+  const normalizedSymbol = symbol.toUpperCase();
+  pendingStopLossQueue.set(normalizedSymbol, {
+    symbol: normalizedSymbol,
+    stockPrice,
+    quantity,
+    createdAt: Date.now(),
+    lastCheck: 0,
+    attempts: 0,
+    onComplete
+  });
+  console.log(`📋 Queued stop-loss order for ${symbol} (waiting for position to be filled)...`);
 }
 
 // Helper function to create stop-loss sell order
@@ -2541,13 +2769,13 @@ async function createStopLossOrder(symbol, stockPrice, quantity) {
       };
     }
     
-    // Build stop-loss order body - using STOP_LIMIT for proper stop-loss functionality
-    // STOP_LIMIT orders need both stop_price (trigger) and limit_price (execution)
+    // Build stop-loss order body - using StopLimit for proper stop-loss functionality
+    // StopLimit orders need both stop_price (trigger) and limit_price (execution)
     // For stop-loss, both are set to the stop-loss price
     const stopLossOrderBody = {
       symbol: symbol,
       side: 'SELL',
-      order_type: 'STOP_LIMIT',
+      order_type: 'StopLimit',
       quantity: quantity,
       limit_price: stopLossPrice,
       stop_price: stopLossPrice // Trigger when price drops to this level
@@ -2712,7 +2940,7 @@ app.post('/api/buys/test', async (req, res) => {
     const orderBody = {
       symbol: symbol,
       side: 'BUY',
-      order_type: 'LIMIT', // Default to LIMIT as requested
+      order_type: 'Limit', // Default to Limit as requested
       quantity: quantity,
       limit_price: currentPrice
     };
@@ -2814,10 +3042,25 @@ app.post('/api/buys/test', async (req, res) => {
     
     const isBuySuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
     
-    // If buy order was successful, create stop-loss sell order
+    // If buy order was successful, queue stop-loss sell order (wait for position to be filled)
     let stopLossResult = null;
     if (isBuySuccess) {
-      stopLossResult = await createStopLossOrder(symbol, currentPrice, quantity);
+      // Queue stop-loss order instead of creating immediately
+      // The stop-loss will be created once the buy order is filled and position exists
+      queueStopLossOrder(symbol, currentPrice, quantity, (result) => {
+        stopLossResult = result;
+        // Update buy entry with stop-loss result if needed
+        // Note: This is async, so we'll update the entry when stop-loss is created
+      });
+      // Return a placeholder result indicating stop-loss is queued
+      stopLossResult = {
+        success: true,
+        notifyStatus: 'QUEUED',
+        responseData: { message: 'Stop-loss order queued, waiting for position to be filled' },
+        errorMessage: null,
+        stopLossPrice: null,
+        queued: true
+      };
     }
     
     // Create buy entry and add to buy list
@@ -2932,7 +3175,7 @@ app.get('/api/buys/test', async (req, res) => {
     const orderBody = {
       symbol: symbol,
       side: 'BUY',
-      order_type: 'LIMIT',
+      order_type: 'Limit',
       quantity: quantity,
       limit_price: currentPrice
     };
@@ -3247,7 +3490,18 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
   try {
     const symbol = (req.body?.symbol || '').toString().trim().toUpperCase();
     const quantity = parseInt(req.body?.quantity || '0', 10);
-    const orderType = (req.body?.order_type || 'LIMIT').toString().toUpperCase();
+    // Validate and normalize order_type: permitted values are Limit, Market, StopLimit
+    const rawOrderType = (req.body?.order_type || 'Limit').toString().trim();
+    // Normalize common variations to valid values
+    const normalizedInput = rawOrderType.toLowerCase();
+    let orderType = 'Limit'; // default
+    if (normalizedInput === 'limit') {
+      orderType = 'Limit';
+    } else if (normalizedInput === 'market') {
+      orderType = 'Market';
+    } else if (normalizedInput === 'stoplimit' || normalizedInput === 'stop_limit' || normalizedInput === 'stop-limit') {
+      orderType = 'StopLimit';
+    }
     const longShort = (req.body?.long_short || req.body?.longShort || '').toString().trim();
     
     if (!symbol) {

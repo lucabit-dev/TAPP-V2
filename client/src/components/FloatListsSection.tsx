@@ -106,7 +106,7 @@ const FloatListsSection: React.FC<Props> = ({ onSymbolClick }) => {
     };
   }, []);
 
-  const theme = 'bg-[#252526] text-[#cccccc] border-[#3e3e42]';
+  const theme = 'bg-[#14130e] text-[#eae9e9] border-[#2a2820]';
   const toggleBuys = async () => {
     if (isTogglingBuys) return;
     setIsTogglingBuys(true);
@@ -202,17 +202,19 @@ const FloatListsSection: React.FC<Props> = ({ onSymbolClick }) => {
   };
 
   return (
-    <div className="h-full flex flex-col bg-[#1e1e1e]">
-      <div className="p-3 border-b border-[#3e3e42] bg-[#252526] flex items-center justify-between">
+    <div className="h-full flex flex-col bg-[#14130e]">
+      <div className="p-4 border-b border-[#2a2820]/50 bg-gradient-to-r from-[#14130e] to-[#0f0e0a] flex items-center justify-between backdrop-blur-sm">
         <div>
-          <h2 className="text-sm font-semibold text-[#cccccc] tracking-wide">Listas por FLOAT</h2>
-          <p className="text-[11px] text-[#808080] mt-0.5">Stocks que pasan filtros técnicos y momentum</p>
+          <h2 className="text-sm font-bold text-[#eae9e9] tracking-wider uppercase mb-1.5">Listas por FLOAT</h2>
+          <p className="text-[11px] text-[#eae9e9]/70 mt-0.5">Stocks que pasan filtros técnicos y momentum</p>
         </div>
-        <div className="text-[11px] text-[#969696] flex items-center space-x-2">
-          <div className={`w-2 h-2 rounded-full ${connectionStatus === 'connected' ? 'bg-green-500' : (connectionStatus === 'checking' ? 'bg-yellow-500' : 'bg-red-500')}`}></div>
-          <span>{connectionStatus === 'connected' ? 'En vivo' : (connectionStatus === 'checking' ? 'Checking' : 'Desconectado')}</span>
+        <div className="text-[11px] text-[#eae9e9]/80 flex items-center space-x-3">
+          <div className="flex items-center space-x-2">
+            <div className={`w-2.5 h-2.5 rounded-full ${connectionStatus === 'connected' ? 'bg-[#22c55e] shadow-[0_0_6px_rgba(34,197,94,0.5)]' : (connectionStatus === 'checking' ? 'bg-[#eae9e9] opacity-60' : 'bg-[#f87171] shadow-[0_0_6px_rgba(248,113,113,0.5)]')}`}></div>
+            <span className="font-medium">{connectionStatus === 'connected' ? 'En vivo' : (connectionStatus === 'checking' ? 'Checking' : 'Desconectado')}</span>
+          </div>
           <button
-            className={`ml-2 px-2 py-0.5 rounded ${isTogglingBuys ? 'bg-[#5a5a5a] cursor-not-allowed' : (buysEnabled ? 'bg-green-600' : 'bg-red-600')} text-white`}
+            className={`ml-2 px-3 py-1 rounded-sm text-[11px] font-bold transition-all ${isTogglingBuys ? 'bg-[#2a2820] cursor-not-allowed opacity-50' : (buysEnabled ? 'bg-[#22c55e] text-[#14130e] hover:bg-[#16a34a] shadow-[0_0_8px_rgba(34,197,94,0.3)]' : 'bg-[#f87171] text-[#14130e] hover:bg-[#ef4444] shadow-[0_0_8px_rgba(248,113,113,0.3)]')}`}
             onClick={toggleBuys}
             disabled={isTogglingBuys}
             title={buysEnabled ? 'Disable buys' : 'Enable buys'}
@@ -222,7 +224,7 @@ const FloatListsSection: React.FC<Props> = ({ onSymbolClick }) => {
       <div className="flex-1 min-h-0 p-3 overflow-hidden">
         {loading ? (
           <div className="h-full flex items-center justify-center">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500" />
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#eae9e9] opacity-60" />
           </div>
         ) : (
           <div className="h-full min-h-0 grid grid-rows-5 gap-2">
@@ -230,13 +232,13 @@ const FloatListsSection: React.FC<Props> = ({ onSymbolClick }) => {
               const items = validated[list.id] || [];
               return (
                 <div key={list.id} className={`${theme} rounded-md border overflow-hidden flex flex-col min-h-0`}>
-                  <div className="px-2 py-1.5 border-b border-[#3e3e42] flex items-center justify-between sticky top-0 bg-[#252526] z-10">
-                    <div className="font-semibold text-[12px] tracking-wide">{list.label}</div>
-                    <div className="text-[10px] text-[#969696]">{items.length}</div>
+                  <div className="px-2 py-1.5 border-b border-[#2a2820]/50 flex items-center justify-between sticky top-0 bg-gradient-to-r from-[#14130e] to-[#0f0e0a] z-10">
+                    <div className="font-bold text-[12px] tracking-wider text-[#eae9e9] uppercase">{list.label}</div>
+                    <div className="text-[10px] text-[#eae9e9]/70 font-medium">{items.length}</div>
                   </div>
                   <div className="flex-1 overflow-y-auto overscroll-contain">
                     {items.length === 0 ? (
-                      <div className="h-16 flex items-center justify-center text-[10px] text-[#969696]">Sin coincidencias</div>
+                      <div className="h-16 flex items-center justify-center text-[10px] opacity-60">Sin coincidencias</div>
                     ) : (
                       <div className="p-2 overflow-x-auto">
                         {(() => {
@@ -245,7 +247,7 @@ const FloatListsSection: React.FC<Props> = ({ onSymbolClick }) => {
                           const colCount = headers.length || 1;
                           if (headers.length === 0) {
                             return (
-                              <div className="text-[10px] text-[#969696]">Esperando columnas de ChartsWatcher…</div>
+                              <div className="text-[10px] opacity-60">Esperando columnas de ChartsWatcher…</div>
                             );
                           }
                           const rowsBySymbol = new Map<string, ToplistRow>();
@@ -256,7 +258,7 @@ const FloatListsSection: React.FC<Props> = ({ onSymbolClick }) => {
                           return (
                             <>
                               <div
-                                className="grid gap-1 text-[10px] text-[#969696] mb-1 min-w-max"
+                                className="grid gap-1 text-[10px] opacity-60 mb-1 min-w-max"
                                 style={{ gridTemplateColumns: `repeat(${colCount}, minmax(80px, 1fr))` }}
                               >
                                 {headers.map((h, i) => (
@@ -273,7 +275,7 @@ const FloatListsSection: React.FC<Props> = ({ onSymbolClick }) => {
                                   return (
                                     <div
                                       key={`${symbolVal || 'row'}-${idx}`}
-                                      className={`grid gap-1 text-[10px] border-b border-[#3e3e42] py-0.5 ${idx % 2 === 0 ? 'bg-[#2a2a2d]' : ''} hover:bg-[#2f2f33] cursor-pointer`}
+                                      className={`grid gap-1 text-[10px] border-b border-[#2a2820] py-0.5 ${idx % 2 === 0 ? 'bg-[#0f0e0a]' : ''} hover:bg-[#1e1d17] cursor-pointer`}
                                       style={{ gridTemplateColumns: `repeat(${colCount}, minmax(80px, 1fr))` }}
                                       onClick={() => onSymbolClick && onSymbolClick(symbolVal)}
                                       title={`Ver detalles de ${symbolVal || ''}`}

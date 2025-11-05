@@ -288,7 +288,7 @@ const PnLSection: React.FC = () => {
         body: JSON.stringify({ 
           symbol,
           quantity,
-          order_type: 'LIMIT', // Use MARKET order for immediate execution
+          order_type: 'Limit', // Use Limit order type
           long_short: position.LongShort // Include position side for proper handling
         })
       });
@@ -378,18 +378,20 @@ const PnLSection: React.FC = () => {
   };
 
   return (
-    <div className="h-full flex flex-col bg-[#1e1e1e]">
+    <div className="h-full flex flex-col bg-[#14130e]">
       {/* Header */}
-      <div className="p-3 border-b border-[#3e3e42] bg-[#252526]">
+      <div className="p-4 border-b border-[#2a2820]/50 bg-gradient-to-r from-[#14130e] to-[#0f0e0a] backdrop-blur-sm">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-semibold text-[#cccccc] tracking-wide">P&L - Active Positions</h2>
-          <div className="flex items-center space-x-2">
-            <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-[#4ec9b0]' : 'bg-[#f44747]'}`}></div>
-            <span className="text-xs text-[#969696]">
-              {isConnected ? 'Connected' : 'Disconnected'}
-            </span>
+          <h2 className="text-sm font-bold text-[#eae9e9] tracking-wider uppercase">P&L - Active Positions</h2>
+          <div className="flex items-center space-x-3">
+            <div className="flex items-center space-x-2">
+              <div className={`w-2.5 h-2.5 rounded-full ${isConnected ? 'bg-[#22c55e] shadow-[0_0_6px_rgba(34,197,94,0.5)]' : 'bg-[#f87171] shadow-[0_0_6px_rgba(248,113,113,0.5)]'}`}></div>
+              <span className="text-xs text-[#eae9e9]/80 font-medium">
+                {isConnected ? 'Connected' : 'Disconnected'}
+              </span>
+            </div>
             {positionsArray.length > 0 && (
-              <span className="text-xs text-[#969696] ml-2">
+              <span className="text-xs text-[#eae9e9]/70 ml-2">
                 ({positionsArray.length} positions)
               </span>
             )}
@@ -397,10 +399,10 @@ const PnLSection: React.FC = () => {
               <button
                 onClick={handleSellAll}
                 disabled={sellingAll}
-                className={`ml-3 px-3 py-1.5 rounded text-xs font-medium transition-colors ${
+                className={`ml-3 px-3 py-1.5 rounded-sm text-xs font-bold transition-all ${
                   sellingAll
-                    ? 'bg-[#3e3e42] text-[#808080] cursor-not-allowed'
-                    : 'bg-[#f44747] hover:bg-[#d93a3a] text-white'
+                    ? 'bg-[#2a2820] text-[#eae9e9] opacity-50 cursor-not-allowed'
+                    : 'bg-[#f87171] hover:bg-[#ef4444] text-[#14130e] shadow-[0_0_8px_rgba(248,113,113,0.3)]'
                 }`}
               >
                 {sellingAll ? (
@@ -423,8 +425,8 @@ const PnLSection: React.FC = () => {
         {sellAllStatus && (
           <div className={`mb-3 p-2 rounded text-xs ${
             sellAllStatus.success 
-              ? 'bg-[#0d3a2e] border border-[#4ec9b0] text-[#4ec9b0]' 
-              : 'bg-[#5a1d1d] border border-[#f44747] text-[#f44747]'
+              ? 'bg-[#1e3a2e] border border-[#4ade80] text-[#4ade80]' 
+              : 'bg-[#3a1e1e] border border-[#f87171] text-[#f87171]'
           }`}>
             {sellAllStatus.message}
           </div>
@@ -432,22 +434,22 @@ const PnLSection: React.FC = () => {
 
         {/* Summary Stats */}
         {positionsArray.length > 0 && (
-          <div className="mt-3 pt-3 border-t border-[#3e3e42] grid grid-cols-3 gap-4">
+          <div className="mt-3 pt-3 border-t border-[#2a2820] grid grid-cols-3 gap-4">
             <div>
-              <div className="text-xs text-[#969696] mb-1">Total Unrealized P&L</div>
-              <div className={`text-sm font-semibold ${totalUnrealizedPL >= 0 ? 'text-[#4ec9b0]' : 'text-[#f44747]'}`}>
+              <div className="text-xs opacity-60 mb-1">Total Unrealized P&L</div>
+              <div className={`text-sm font-semibold ${totalUnrealizedPL >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
                 {formatPrice(totalUnrealizedPL.toString())}
               </div>
             </div>
             <div>
-              <div className="text-xs text-[#969696] mb-1">Today's P&L</div>
-              <div className={`text-sm font-semibold ${totalTodaysPL >= 0 ? 'text-[#4ec9b0]' : 'text-[#f44747]'}`}>
+              <div className="text-xs opacity-60 mb-1">Today's P&L</div>
+              <div className={`text-sm font-semibold ${totalTodaysPL >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
                 {formatPrice(totalTodaysPL.toString())}
               </div>
             </div>
             <div>
-              <div className="text-xs text-[#969696] mb-1">Market Value</div>
-              <div className="text-sm font-semibold text-[#cccccc]">
+              <div className="text-xs opacity-60 mb-1">Market Value</div>
+              <div className="text-sm font-semibold text-[#eae9e9]">
                 {formatPrice(positionsArray.reduce((sum, pos) => {
                   const mv = parseFloat(pos.MarketValue);
                   return sum + (isNaN(mv) ? 0 : mv);
@@ -460,12 +462,12 @@ const PnLSection: React.FC = () => {
 
       {/* Error Message - Only show if not loading */}
       {error && !loading && (
-        <div className="mx-3 mt-3 bg-[#5a1d1d] border border-[#f44747] rounded-lg p-3">
+        <div className="mx-3 mt-3 bg-[#3a1e1e] border border-[#f87171] rounded-lg p-3">
           <div className="flex items-center space-x-2">
-            <svg className="w-4 h-4 text-[#f44747]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className="w-4 h-4 text-[#f87171]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
-            <p className="text-sm text-[#f44747]">{error}</p>
+            <p className="text-sm text-[#f87171]">{error}</p>
           </div>
         </div>
       )}
@@ -475,11 +477,11 @@ const PnLSection: React.FC = () => {
         {loading ? (
           <div className="h-full flex items-center justify-center">
             <div className="text-center">
-              <div className="w-12 h-12 bg-[#2d2d30] rounded-lg flex items-center justify-center mx-auto mb-4">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#4ec9b0]"></div>
+              <div className="w-12 h-12 bg-[#2a2820] rounded-lg flex items-center justify-center mx-auto mb-4">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#4ade80]"></div>
               </div>
-              <h3 className="text-lg font-medium text-[#cccccc] mb-2">Connecting...</h3>
-              <p className="text-[#969696] text-sm">
+              <h3 className="text-lg font-medium text-[#eae9e9] mb-2">Connecting...</h3>
+              <p className="opacity-60 text-sm">
                 Establishing WebSocket connection...
               </p>
             </div>
@@ -487,13 +489,13 @@ const PnLSection: React.FC = () => {
         ) : positionsArray.length === 0 ? (
           <div className="h-full flex items-center justify-center">
             <div className="text-center">
-              <div className="w-12 h-12 bg-[#2d2d30] rounded-lg flex items-center justify-center mx-auto mb-4">
-                <svg className="w-6 h-6 text-[#808080]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <div className="w-12 h-12 bg-[#2a2820] rounded-lg flex items-center justify-center mx-auto mb-4">
+                <svg className="w-6 h-6 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
                 </svg>
               </div>
-              <h3 className="text-lg font-medium text-[#cccccc] mb-2">No positions yet</h3>
-              <p className="text-[#969696] text-sm">
+              <h3 className="text-lg font-medium text-[#eae9e9] mb-2">No positions yet</h3>
+              <p className="opacity-60 text-sm">
                 {isConnected 
                   ? 'Waiting for position data from WebSocket...'
                   : 'Connection established. Waiting for position updates...'
@@ -504,8 +506,8 @@ const PnLSection: React.FC = () => {
         ) : (
           <div className="h-full flex flex-col">
             {/* Table Header */}
-            <div className="bg-[#252526] border-b border-[#3e3e42] px-4 py-2 sticky top-0 z-10">
-              <div className="grid grid-cols-12 gap-2 text-xs font-medium text-[#969696] uppercase tracking-wide">
+            <div className="bg-[#14130e] border-b border-[#2a2820] px-4 py-2 sticky top-0 z-10">
+              <div className="grid grid-cols-12 gap-2 text-xs font-medium opacity-60 uppercase tracking-wide">
                 <div className="col-span-2">Symbol</div>
                 <div className="col-span-1 text-center">Side</div>
                 <div className="col-span-1 text-right">Qty</div>
@@ -535,21 +537,21 @@ const PnLSection: React.FC = () => {
                   return (
                     <div
                       key={position.PositionID}
-                      className={`px-4 py-2 border-b border-[#3e3e42] hover:bg-[#252526] transition-colors ${
-                        index % 2 === 0 ? 'bg-[#1e1e1e]' : 'bg-[#252526]'
+                      className={`px-4 py-2 border-b border-[#2a2820] hover:bg-[#1e1d17] transition-colors ${
+                        index % 2 === 0 ? 'bg-[#0f0e0a]' : 'bg-[#14130e]'
                       }`}
                     >
                       <div className="grid grid-cols-12 gap-2 items-center text-sm">
                         {/* Symbol */}
                         <div className="col-span-2">
-                          <div className="font-semibold text-[#cccccc]">{position.Symbol}</div>
-                          <div className="text-xs text-[#808080]">{position.AssetType}</div>
+                          <div className="font-semibold text-[#eae9e9]">{position.Symbol}</div>
+                          <div className="text-xs opacity-60">{position.AssetType}</div>
                         </div>
 
                         {/* Side */}
                         <div className="col-span-1 text-center">
                           <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                            isLong ? 'bg-[#0d3a2e] text-[#4ec9b0]' : 'bg-[#5a1d1d] text-[#f44747]'
+                            isLong ? 'bg-[#1e3a2e] text-[#4ade80]' : 'bg-[#3a1e1e] text-[#f87171]'
                           }`}>
                             {position.LongShort}
                           </span>
@@ -557,48 +559,48 @@ const PnLSection: React.FC = () => {
 
                         {/* Quantity */}
                         <div className="col-span-1 text-right">
-                          <div className="text-[#cccccc] font-mono">{formatQuantity(position.Quantity)}</div>
+                          <div className="text-[#eae9e9] font-mono">{formatQuantity(position.Quantity)}</div>
                         </div>
 
                         {/* Average Price */}
                         <div className="col-span-1 text-right">
-                          <div className="text-[#cccccc] font-mono text-xs">{formatPrice(position.AveragePrice)}</div>
+                          <div className="text-[#eae9e9] font-mono text-xs">{formatPrice(position.AveragePrice)}</div>
                         </div>
 
                         {/* Last */}
                         <div className="col-span-1 text-right">
-                          <div className="text-[#cccccc] font-mono text-xs">{formatPrice(position.Last)}</div>
+                          <div className="text-[#eae9e9] font-mono text-xs">{formatPrice(position.Last)}</div>
                         </div>
 
                         {/* Market Value */}
                         <div className="col-span-1 text-right">
-                          <div className="text-[#cccccc] font-mono text-xs">{formatPrice(position.MarketValue)}</div>
+                          <div className="text-[#eae9e9] font-mono text-xs">{formatPrice(position.MarketValue)}</div>
                         </div>
 
                         {/* Unrealized P&L */}
                         <div className="col-span-1 text-right">
-                          <div className={`font-semibold font-mono text-xs ${unrealizedPL >= 0 ? 'text-[#4ec9b0]' : 'text-[#f44747]'}`}>
+                          <div className={`font-semibold font-mono text-xs ${unrealizedPL >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
                             {formatPrice(position.UnrealizedProfitLoss)}
                           </div>
                         </div>
 
                         {/* P&L % */}
                         <div className="col-span-1 text-right">
-                          <div className={`font-semibold font-mono ${unrealizedPLPercent >= 0 ? 'text-[#4ec9b0]' : 'text-[#f44747]'}`}>
+                          <div className={`font-semibold font-mono ${unrealizedPLPercent >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
                             {formatPercent(position.UnrealizedProfitLossPercent)}
                           </div>
                         </div>
 
                         {/* Today's P&L */}
                         <div className="col-span-1 text-right">
-                          <div className={`font-semibold font-mono text-xs ${todaysPL >= 0 ? 'text-[#4ec9b0]' : 'text-[#f44747]'}`}>
+                          <div className={`font-semibold font-mono text-xs ${todaysPL >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
                             {formatPrice(position.TodaysProfitLoss)}
                           </div>
                         </div>
 
                         {/* Time */}
                         <div className="col-span-1 text-right">
-                          <div className="text-xs text-[#969696] font-mono">{formatTimestamp(position.Timestamp)}</div>
+                          <div className="text-xs opacity-60 font-mono">{formatTimestamp(position.Timestamp)}</div>
                         </div>
 
                         {/* Sell Button */}
@@ -608,8 +610,8 @@ const PnLSection: React.FC = () => {
                             disabled={sellingPositions.has(position.PositionID)}
                             className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
                               sellingPositions.has(position.PositionID)
-                                ? 'bg-[#3e3e42] text-[#808080] cursor-not-allowed'
-                                : 'bg-[#f44747] hover:bg-[#d93a3a] text-white'
+                                ? 'bg-[#2a2820] text-[#eae9e9] opacity-50 cursor-not-allowed'
+                                : 'bg-[#f87171] hover:bg-[#ef4444] text-[#14130e]'
                             }`}
                           >
                             {sellingPositions.has(position.PositionID) ? (

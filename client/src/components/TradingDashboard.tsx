@@ -59,7 +59,7 @@ const TradingDashboard: React.FC<TradingDashboardProps> = ({
   const validAlerts = alerts.filter(alert => alert.evaluation.allConditionsMet);
 
   return (
-    <div className="trading-dashboard h-full flex bg-[#1e1e1e] overflow-hidden">
+    <div className="trading-dashboard h-full flex bg-[#14130e] overflow-hidden">
       {/* Left Panel - TradingView Charts */}
       <div className="flex-1 flex flex-col p-4 min-w-0">
         {selectedAlert ? (
@@ -67,7 +67,7 @@ const TradingDashboard: React.FC<TradingDashboardProps> = ({
             {/* Top Row - Symbol Info and Company Profile - Larger for readability */}
             <div className="h-48 grid grid-cols-2 gap-4 mb-4">
                     {/* Symbol Info Widget */}
-                    <div className="bg-[#252526] rounded-lg border border-[#3e3e42] overflow-hidden">
+                    <div className="bg-[#14130e] rounded-lg border border-[#2a2820] overflow-hidden">
                       <SymbolInfoWidget
                         symbol={selectedAlert.ticker}
                         height="100%"
@@ -76,7 +76,7 @@ const TradingDashboard: React.FC<TradingDashboardProps> = ({
                     </div>
 
                     {/* Company Profile Widget */}
-                    <div className="bg-[#252526] rounded-lg border border-[#3e3e42] overflow-hidden">
+                    <div className="bg-[#14130e] rounded-lg border border-[#2a2820] overflow-hidden">
                       <CompanyProfileWidget
                         symbol={selectedAlert.ticker}
                         height="100%"

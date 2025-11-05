@@ -101,13 +101,15 @@ function App() {
   const [newValidAlertsCount, setNewValidAlertsCount] = useState(0);
   const [conditionStats, setConditionStats] = useState<any>(null);
   const [showStats, setShowStats] = useState(false);
-  const [selectedTab, setSelectedTab] = useState<'all' | 'valid' | 'filtered' | 'dashboard' | 'config-float' | 'listas-float-raw' | 'buy-list' | 'pnl' | 'orders'>('dashboard');
+  const [selectedTab, setSelectedTab] = useState<'all' | 'valid' | 'filtered' | 'dashboard' | 'config-float' | 'listas-float-raw' | 'buy-list' | 'pnl' | 'orders'>('listas-float-raw');
   const [alertsCollapsed, setAlertsCollapsed] = useState(true); // Start collapsed
   const [manualSymbol, setManualSymbol] = useState('');
   const [manualAnalysis, setManualAnalysis] = useState<any>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [showAnalysisModal, setShowAnalysisModal] = useState(false);
   const [isHeaderHidden, setIsHeaderHidden] = useState(false);
+  const [isHeaderAnimating, setIsHeaderAnimating] = useState(false);
+  const [isHidingHeader, setIsHidingHeader] = useState(false);
   const [showStockInfoModal, setShowStockInfoModal] = useState(false);
   const [selectedStockInfo, setSelectedStockInfo] = useState<any>(null);
   const [additionalFilters, setAdditionalFilters] = useState({
@@ -435,6 +437,33 @@ function App() {
     }
   }, []);
 
+  const handleHideHeader = () => {
+    setIsHidingHeader(true);
+    setIsHeaderAnimating(true);
+    setTimeout(() => {
+      setIsHeaderHidden(true);
+      setIsHeaderAnimating(false);
+      setIsHidingHeader(false);
+    }, 300);
+  };
+
+  const handleShowHeader = () => {
+    setIsHidingHeader(false);
+    setIsHeaderAnimating(true);
+    setIsHeaderHidden(false);
+    setTimeout(() => {
+      setIsHeaderAnimating(false);
+    }, 300);
+  };
+
+  const handleToggleHeader = () => {
+    if (isHeaderHidden) {
+      handleShowHeader();
+    } else {
+      handleHideHeader();
+    }
+  };
+
   const formatTimestamp = (timestamp: string) => {
     // Use the relative formatter which shows UTC-4 for times older than 1 hour
     const relative = formatTimestampRelative(timestamp);
@@ -512,127 +541,97 @@ function App() {
   if (!isAuthenticated) {
     const Login = lazy(() => import('./components/Login'));
     return (
-      <Suspense fallback={<div className="h-screen w-screen flex items-center justify-center text-[#cccccc]">Loading...</div>}>
+      <Suspense fallback={<div className="h-screen w-screen flex items-center justify-center text-[#eae9e9] bg-[#14130e]">Loading...</div>}>
         <Login />
       </Suspense>
     );
   }
 
   return (
-    <div className="h-screen bg-[#1e1e1e] text-[#cccccc] flex flex-col overflow-hidden">
+    <div className="h-screen bg-[#14130e] text-[#eae9e9] flex flex-col overflow-hidden">
       {/* Clean Minimalist Header */}
-      {!isHeaderHidden && (
-        <header className="bg-[#252526] border-b border-[#3e3e42]">
-          <div className="px-6 py-3">
+      {(!isHeaderHidden || isHeaderAnimating) && (
+        <header className={`bg-gradient-to-r from-[#14130e] to-[#0f0e0a] border-b border-[#2a2820]/50 backdrop-blur-sm ${isHidingHeader ? 'header-exit' : 'header-enter'}`}>
+          <div className="px-6 py-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-3">
-                <div className="w-8 h-8 bg-[#007acc] rounded-md flex items-center justify-center">
-                  <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-                  </svg>
-                </div>
-                <div>
-                  <h1 className="text-lg font-semibold text-[#cccccc]">Trading Dashboard</h1>
-                  <p className="text-xs text-[#969696]">Real-time alerts & analysis</p>
-                </div>
+                <img src="/images/logo.png" alt="ASTOR" className="h-8 w-auto" />
               </div>
               
-              <div className="flex items-center space-x-2">
-                {/* Connection Status */}
-                {chartsWatcherStatus && (
-                  <div className="flex items-center space-x-2 px-2 py-1 bg-[#2d2d30] rounded-md">
-                    <div className={`w-1.5 h-1.5 rounded-full ${chartsWatcherStatus.isConnected ? 'bg-[#4ec9b0]' : 'bg-[#f44747]'}`}></div>
-                    <span className="text-xs text-[#cccccc]">
-                      {chartsWatcherStatus.isConnected ? 'Live' : 'Offline'}
-                    </span>
-                  </div>
-                )}
-
-                {/* Live Mode Toggle */}
-                <button
-                  onClick={toggleLiveMode}
-                  className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                    isLiveMode
-                      ? 'bg-[#0e639c] text-[#ffffff]'
-                      : 'bg-[#2d2d30] text-[#cccccc] hover:bg-[#3e3e42]'
-                  }`}
-                >
-                  {isLiveMode ? 'Live' : 'Paused'}
-                </button>
-
-                {/* Refresh Button */}
-                <button
-                  onClick={handleRefresh}
-                  disabled={loading}
-                  className="p-1.5 text-[#cccccc] hover:text-[#ffffff] hover:bg-[#2d2d30] rounded-md transition-all disabled:opacity-50"
-                >
-                  {loading ? (
-                    <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              {/* Navigation Sections - Right */}
+              <div className="flex items-center space-x-6">
+                {/* Alerts group - Collapsible */}
+                <div className="flex items-center space-x-1">
+                  <button
+                    onClick={() => setAlertsCollapsed(!alertsCollapsed)}
+                    className="flex items-center space-x-1 px-2 py-1 text-xs opacity-60 hover:opacity-100 transition-colors"
+                    title={alertsCollapsed ? 'Expand Alerts' : 'Collapse Alerts'}
+                  >
+                    <span>Alerts</span>
+                    <svg 
+                      className={`w-3 h-3 transition-transform ${alertsCollapsed ? 'rotate-0' : 'rotate-180'}`} 
+                      fill="none" 
+                      stroke="currentColor" 
+                      viewBox="0 0 24 24"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                     </svg>
-                  ) : (
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
-                  )}
-                </button>
+                  </button>
+                  {!alertsCollapsed && [
+                    { key: 'dashboard', label: 'Dashboard', count: validAlerts.length },
+                    { key: 'all', label: 'All', count: allAlerts.length },
+                    { key: 'valid', label: 'Valid', count: validAlerts.length },
+                    { key: 'filtered', label: 'Filtered', count: filteredAlerts.length }
+                  ].map(tab => (
+                    <button
+                      key={tab.key}
+                      onClick={() => setSelectedTab(tab.key as any)}
+                      className={`relative px-4 py-2 text-sm font-medium transition-all duration-200 ${
+                        selectedTab === tab.key
+                          ? 'text-[#eae9e9]'
+                          : 'text-[#969696] hover:text-[#cccccc]'
+                      }`}
+                    >
+                      {selectedTab === tab.key && (
+                        <span className="absolute inset-0 bg-gradient-to-r from-[#22c55e]/20 to-[#14b8a6]/20 border-b-2 border-[#22c55e]"></span>
+                      )}
+                      <span className="relative z-10 flex items-center">
+                        {tab.label} {tab.count > 0 && <span className="ml-1.5 text-xs opacity-60">({tab.count})</span>}
+                      </span>
+                    </button>
+                  ))}
+                </div>
 
-                {/* Hide Header Button */}
-                <button
-                  onClick={() => setIsHeaderHidden(true)}
-                  className="p-1.5 text-[#cccccc] hover:text-[#ffffff] hover:bg-[#2d2d30] rounded-md transition-all"
-                  title="Hide header for more space"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
-                  </svg>
-                </button>
+                {/* Lists group */}
+                <div className="flex items-center space-x-1">
+                  <span className="text-xs text-[#808080] mr-2">Lists</span>
+                  {[ 
+                    { key: 'listas-float-raw', label: 'Listas FLOAT (RAW)', count: 0 },
+                    { key: 'config-float', label: 'Config FLOAT', count: 0 },
+                    { key: 'buy-list', label: 'Buy List', count: 0 },
+                    { key: 'pnl', label: 'P&L', count: 0 },
+                    { key: 'orders', label: 'Orders', count: 0 }
+                  ].map(tab => (
+                    <button
+                      key={tab.key}
+                      onClick={() => setSelectedTab(tab.key as any)}
+                      className={`relative px-4 py-2 text-sm font-medium transition-all duration-200 ${
+                        selectedTab === tab.key
+                          ? 'text-[#eae9e9]'
+                          : 'text-[#969696] hover:text-[#cccccc]'
+                      }`}
+                    >
+                      {selectedTab === tab.key && (
+                        <span className="absolute inset-0 bg-gradient-to-r from-[#22c55e]/20 to-[#14b8a6]/20 border-b-2 border-[#22c55e]"></span>
+                      )}
+                      <span className="relative z-10">{tab.label}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
           </div>
         </header>
-      )}
-
-      {/* Clean Stats Bar */}
-      {!isHeaderHidden && (
-        <div className="bg-[#252526] border-b border-[#3e3e42] px-6 py-2">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-6">
-              <div className="flex items-center space-x-2">
-                <div className="w-2 h-2 bg-[#4ec9b0] rounded-full"></div>
-                <div>
-                  <span className="text-sm font-medium text-[#cccccc]">{validAlerts.length}</span>
-                  <span className="text-xs text-[#969696] ml-1">valid</span>
-                </div>
-              </div>
-              
-              <div className="flex items-center space-x-2">
-                <div className="w-2 h-2 bg-[#808080] rounded-full"></div>
-                <div>
-                  <span className="text-sm font-medium text-[#cccccc]">{filteredAlerts.length}</span>
-                  <span className="text-xs text-[#969696] ml-1">filtered</span>
-                </div>
-              </div>
-
-              {conditionStats && (
-                <div className="flex items-center space-x-2">
-                  <div className="w-2 h-2 bg-[#007acc] rounded-full"></div>
-                  <div>
-                    <span className="text-sm font-medium text-[#cccccc]">{conditionStats.overall?.passRate || 0}%</span>
-                    <span className="text-xs text-[#969696] ml-1">success</span>
-                  </div>
-                </div>
-              )}
-            </div>
-            
-            {lastUpdated && (
-              <div className="text-xs text-[#969696]">
-                {lastUpdated.toLocaleTimeString()}
-              </div>
-            )}
-          </div>
-        </div>
       )}
 
       {/* Analytics Modal */}
@@ -759,108 +758,6 @@ function App() {
           </div>
         </div>
       )}
-
-      {/* Navigation with grouped tabs and Alerts toggle */}
-      <div className="bg-[#252526] border-b border-[#3e3e42]">
-        <div className="flex px-6 items-center">
-          {/* Alerts group - Collapsible */}
-          <div className="flex items-center space-x-1">
-            <button
-              onClick={() => setAlertsCollapsed(!alertsCollapsed)}
-              className="flex items-center space-x-1 px-2 py-1 text-xs text-[#808080] hover:text-[#cccccc] transition-colors"
-              title={alertsCollapsed ? 'Expand Alerts' : 'Collapse Alerts'}
-            >
-              <span>Alerts</span>
-              <svg 
-                className={`w-3 h-3 transition-transform ${alertsCollapsed ? 'rotate-0' : 'rotate-180'}`} 
-                fill="none" 
-                stroke="currentColor" 
-                viewBox="0 0 24 24"
-              >
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-              </svg>
-            </button>
-            {!alertsCollapsed && [
-              { key: 'dashboard', label: 'Dashboard', count: validAlerts.length },
-              { key: 'all', label: 'All', count: allAlerts.length },
-              { key: 'valid', label: 'Valid', count: validAlerts.length },
-              { key: 'filtered', label: 'Filtered', count: filteredAlerts.length }
-            ].map(tab => (
-              <button
-                key={tab.key}
-                onClick={() => setSelectedTab(tab.key as any)}
-                className={`px-3 py-2 text-sm font-medium transition-all rounded-md ${
-                  selectedTab === tab.key
-                    ? 'text-[#ffffff] bg-[#2d2d30]'
-                    : 'text-[#969696] hover:text-[#cccccc]'
-                }`}
-              >
-                {tab.label} {tab.count > 0 && <span className="ml-1 text-xs text-[#808080]">({tab.count})</span>}
-              </button>
-            ))}
-          </div>
-
-          {/* Lists group */}
-          <div className="flex items-center space-x-1 ml-6">
-            <span className="text-xs text-[#808080] mr-2">Lists</span>
-            {[ 
-              { key: 'listas-float-raw', label: 'Listas FLOAT (RAW)', count: 0 },
-              { key: 'config-float', label: 'Config FLOAT', count: 0 },
-              { key: 'buy-list', label: 'Buy List', count: 0 },
-              { key: 'pnl', label: 'P&L', count: 0 },
-              { key: 'orders', label: 'Orders', count: 0 }
-            ].map(tab => (
-              <button
-                key={tab.key}
-                onClick={() => setSelectedTab(tab.key as any)}
-                className={`px-3 py-2 text-sm font-medium transition-all rounded-md ${
-                  selectedTab === tab.key
-                    ? 'text-[#ffffff] bg-[#2d2d30]'
-                    : 'text-[#969696] hover:text-[#cccccc]'
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
-
-
-          {/* Alerts toggle */}
-          <div className="ml-auto flex items-center space-x-2">
-            <button
-              onClick={async () => {
-                try {
-                  await fetch(`${API_BASE_URL.replace(/\/$/, '')}/alerts/enable`, { method: 'POST' });
-                } catch {}
-              }}
-              className="px-3 py-1.5 text-xs rounded bg-[#0e639c] text-white hover:bg-[#1177bb]"
-              title="Enable Alerts WebSocket"
-            >
-              Enable Alerts
-            </button>
-            <button
-              onClick={async () => {
-                try {
-                  await fetch(`${API_BASE_URL.replace(/\/$/, '')}/alerts/disable`, { method: 'POST' });
-                } catch {}
-              }}
-              className="px-3 py-1.5 text-xs rounded bg-[#3e3e42] text-[#cccccc] hover:bg-[#4a4a4f]"
-              title="Disable Alerts WebSocket"
-            >
-              Disable Alerts
-            </button>
-            {isHeaderHidden && (
-              <button
-                onClick={() => setIsHeaderHidden(false)}
-                className="px-3 py-1.5 text-xs rounded bg-[#3e3e42] text-[#cccccc] hover:bg-[#4a4a4f]"
-                title="Show header"
-              >
-                Show Header
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
 
       {/* Error Message */}
       {error && (
@@ -1416,36 +1313,48 @@ function App() {
         {/* Stock Info Modal */}
         {showStockInfoModal && selectedStockInfo && (
           <div 
-            className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+            className="fixed inset-0 bg-black/80 backdrop-blur-md z-50 flex items-center justify-center p-4 animate-fadeIn"
             onClick={closeStockInfoModal}
           >
             <div 
-              className="bg-[#1e1e1e] rounded-lg shadow-2xl border border-[#3e3e42] w-full max-w-5xl max-h-[90vh] overflow-hidden"
+              className="bg-gradient-to-br from-[#14130e] via-[#0f0e0a] to-[#14130e] border border-[#2a2820] shadow-[0_0_30px_rgba(0,0,0,0.8)] w-full max-w-7xl max-h-[90vh] overflow-hidden relative"
               onClick={(e) => e.stopPropagation()}
             >
-              {/* Modal Header - TradingView Style */}
-              <div className="bg-[#252526] border-b border-[#3e3e42] px-6 py-4">
+              {/* Sci-fi corner accents */}
+              <div className="absolute top-0 left-0 w-20 h-20 border-t-2 border-l-2 border-[#22c55e]/30 pointer-events-none"></div>
+              <div className="absolute top-0 right-0 w-20 h-20 border-t-2 border-r-2 border-[#22c55e]/30 pointer-events-none"></div>
+              <div className="absolute bottom-0 left-0 w-20 h-20 border-b-2 border-l-2 border-[#22c55e]/30 pointer-events-none"></div>
+              <div className="absolute bottom-0 right-0 w-20 h-20 border-b-2 border-r-2 border-[#22c55e]/30 pointer-events-none"></div>
+
+              {/* Modal Header - Futuristic Style */}
+              <div className="bg-gradient-to-r from-[#14130e] via-[#0f0e0a] to-[#14130e] border-b border-[#2a2820]/60 px-8 py-5 backdrop-blur-sm relative">
                 <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-4">
-                    <div className="flex items-center space-x-3">
-                      <div className={`w-3 h-3 rounded-full ${selectedStockInfo.evaluation?.allConditionsMet ? 'bg-[#4ec9b0]' : 'bg-[#808080]'}`}></div>
+                  <div className="flex items-center space-x-5">
+                    <div className="flex items-center space-x-4">
+                      <div className="relative">
+                        <div className={`w-4 h-4 rounded-full ${selectedStockInfo.evaluation?.allConditionsMet ? 'bg-[#22c55e] shadow-[0_0_12px_rgba(34,197,94,0.6)] animate-pulse' : 'bg-[#808080]'}`}></div>
+                        {selectedStockInfo.evaluation?.allConditionsMet && (
+                          <div className="absolute inset-0 w-4 h-4 rounded-full bg-[#22c55e] opacity-50 animate-ping"></div>
+                        )}
+                      </div>
                       <div>
-                        <h2 className="text-xl font-bold text-[#cccccc]">{selectedStockInfo.ticker}</h2>
-                        <p className="text-sm text-[#969696]">
+                        <h2 className="text-2xl font-bold text-[#eae9e9] tracking-wider font-mono">{selectedStockInfo.ticker}</h2>
+                        <p className="text-sm text-[#eae9e9]/60 mt-1 font-light">
                           {selectedStockInfo.companyInfo?.name || 'Loading company info...'}
                         </p>
                       </div>
                     </div>
                     {selectedStockInfo.isLoading && (
-                      <div className="flex items-center space-x-2 text-[#969696]">
-                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-[#4ec9b0]"></div>
-                        <span className="text-xs">Loading...</span>
+                      <div className="flex items-center space-x-2 text-[#eae9e9]/70">
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-[#22c55e]"></div>
+                        <span className="text-xs font-mono">LOADING...</span>
                       </div>
                     )}
                   </div>
                   <button
                     onClick={closeStockInfoModal}
-                    className="p-2 text-[#969696] hover:text-[#cccccc] hover:bg-[#3e3e42] rounded transition-all duration-200"
+                    className="p-2.5 text-[#eae9e9]/60 hover:text-[#eae9e9] hover:bg-[#0f0e0a] transition-all duration-200 border border-transparent hover:border-[#2a2820]/70 hover:shadow-[0_0_8px_rgba(34,197,94,0.2)]"
+                    title="Close"
                   >
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -1455,42 +1364,43 @@ function App() {
               </div>
 
               {/* Modal Content */}
-              <div className="p-6 overflow-y-auto max-h-[calc(90vh-80px)]">
+              <div className="p-8 overflow-y-auto max-h-[calc(90vh-140px)] custom-scrollbar">
                 {selectedStockInfo.error ? (
-                  <div className="text-center py-8">
-                    <div className="text-[#f44747] mb-2">⚠️ Error loading data</div>
-                    <div className="text-[#969696] text-sm">{selectedStockInfo.error}</div>
+                  <div className="text-center py-12">
+                    <div className="text-[#f87171] mb-2 text-lg font-semibold">⚠️ Error loading data</div>
+                    <div className="text-[#eae9e9]/70 text-sm">{selectedStockInfo.error}</div>
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                     {/* Left Column - Basic Info */}
-                    <div className="space-y-4">
+                    <div className="space-y-5">
                       {/* Price Information */}
-                      <div className="bg-[#252526] rounded-lg border border-[#3e3e42] p-4">
-                        <h3 className="text-sm font-semibold text-[#cccccc] mb-3 uppercase tracking-wide">Precio</h3>
-                        <div className="space-y-2">
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">Alerta</span>
-                            <span className="text-[#cccccc] font-mono text-sm font-bold">
+                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                        <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                        <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono">PRECIO</h3>
+                        <div className="space-y-3">
+                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">Alerta</span>
+                            <span className="text-[#eae9e9] font-mono text-base font-semibold">
                               {selectedStockInfo.price ? `$${selectedStockInfo.price.toFixed(2)}` : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">Último</span>
-                            <span className="text-[#cccccc] font-mono text-sm">
+                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">Último</span>
+                            <span className="text-[#eae9e9] font-mono text-base">
                               {selectedStockInfo.lastCandle?.close ? `$${selectedStockInfo.lastCandle.close.toFixed(2)}` : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">VWAP</span>
-                            <span className="text-[#cccccc] font-mono text-sm">
+                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">VWAP</span>
+                            <span className="text-[#eae9e9] font-mono text-base">
                               {selectedStockInfo.indicators?.vwap1m ? `$${selectedStockInfo.indicators.vwap1m.toFixed(2)}` : 'N/A'}
                             </span>
                           </div>
                           {selectedStockInfo.changePercent !== undefined && (
-                            <div className="flex justify-between items-center">
-                              <span className="text-[#969696] text-sm">Cambio</span>
-                              <span className={`font-mono text-sm ${selectedStockInfo.changePercent >= 0 ? 'text-[#4ec9b0]' : 'text-[#f44747]'}`}>
+                            <div className="flex justify-between items-center py-2">
+                              <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">Cambio</span>
+                              <span className={`font-mono text-base font-bold ${selectedStockInfo.changePercent >= 0 ? 'text-[#22c55e]' : 'text-[#f87171]'}`}>
                                 {selectedStockInfo.changePercent >= 0 ? '+' : ''}{selectedStockInfo.changePercent.toFixed(2)}%
                               </span>
                             </div>
@@ -1499,18 +1409,19 @@ function App() {
                       </div>
 
                       {/* Extreme Prices */}
-                      <div className="bg-[#252526] rounded-lg border border-[#3e3e42] p-4">
-                        <h3 className="text-sm font-semibold text-[#cccccc] mb-3 uppercase tracking-wide">Rango del Día</h3>
-                        <div className="space-y-2">
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">LOD</span>
-                            <span className="text-[#f44747] font-mono text-sm">
+                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                        <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                        <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono">RANGO DEL DÍA</h3>
+                        <div className="space-y-3">
+                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">LOD</span>
+                            <span className="text-[#f87171] font-mono text-base font-bold">
                               {selectedStockInfo.indicators?.lod ? `$${selectedStockInfo.indicators.lod.toFixed(2)}` : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">HOD</span>
-                            <span className="text-[#4ec9b0] font-mono text-sm">
+                          <div className="flex justify-between items-center py-2">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">HOD</span>
+                            <span className="text-[#22c55e] font-mono text-base font-bold">
                               {selectedStockInfo.indicators?.hod ? `$${selectedStockInfo.indicators.hod.toFixed(2)}` : 'N/A'}
                             </span>
                           </div>
@@ -1518,9 +1429,10 @@ function App() {
                       </div>
 
                       {/* Technical Conditions */}
-                      <div className="bg-[#252526] rounded-lg border border-[#3e3e42] p-4">
-                        <h3 className="text-sm font-semibold text-[#cccccc] mb-3 uppercase tracking-wide">Technical Conditions</h3>
-                        <div className="space-y-2">
+                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                        <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                        <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono">CONDICIONES TÉCNICAS</h3>
+                        <div className="space-y-3">
                           {(() => {
                             // Use the same evaluation logic as the server
                             const evaluation = selectedStockInfo.evaluation;
@@ -1540,40 +1452,40 @@ function App() {
                             
                             return (
                               <>
-                                <div className="flex justify-between items-center">
-                                  <span className="text-[#969696] text-xs">MACD 5m Histogram {'>'} 0</span>
-                                  <span className={`text-xs px-2 py-0.5 rounded ${!failedConditionsMap.has('macd5mHistogramPositive') ? 'bg-[#4ec9b0]/20 text-[#4ec9b0]' : 'bg-[#f44747]/20 text-[#f44747]'}`}>
+                                <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                                  <span className="text-[#eae9e9]/60 text-xs font-light">MACD 5m Histogram {'>'} 0</span>
+                                  <span className={`text-xs px-2.5 py-1 font-mono font-semibold ${!failedConditionsMap.has('macd5mHistogramPositive') ? 'text-[#22c55e] bg-[#22c55e]/15 border border-[#22c55e]/30' : 'text-[#f87171] bg-[#f87171]/15 border border-[#f87171]/30'}`}>
                                     {!failedConditionsMap.has('macd5mHistogramPositive') ? '✓' : '✗'} {macd5m?.histogram?.toFixed(4) || 'N/A'}
                                   </span>
                                 </div>
-                                <div className="flex justify-between items-center">
-                                  <span className="text-[#969696] text-xs">MACD 5m {'>'} 0</span>
-                                  <span className={`text-xs px-2 py-0.5 rounded ${!failedConditionsMap.has('macd5mPositive') ? 'bg-[#4ec9b0]/20 text-[#4ec9b0]' : 'bg-[#f44747]/20 text-[#f44747]'}`}>
+                                <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                                  <span className="text-[#eae9e9]/60 text-xs font-light">MACD 5m {'>'} 0</span>
+                                  <span className={`text-xs px-2.5 py-1 font-mono font-semibold ${!failedConditionsMap.has('macd5mPositive') ? 'text-[#22c55e] bg-[#22c55e]/15 border border-[#22c55e]/30' : 'text-[#f87171] bg-[#f87171]/15 border border-[#f87171]/30'}`}>
                                     {!failedConditionsMap.has('macd5mPositive') ? '✓' : '✗'} {macd5m?.macd?.toFixed(4) || 'N/A'}
                                   </span>
                                 </div>
-                                <div className="flex justify-between items-center">
-                                  <span className="text-[#969696] text-xs">MACD 1m {'>'} 0</span>
-                                  <span className={`text-xs px-2 py-0.5 rounded ${!failedConditionsMap.has('macd1mPositive') ? 'bg-[#4ec9b0]/20 text-[#4ec9b0]' : 'bg-[#f44747]/20 text-[#f44747]'}`}>
+                                <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                                  <span className="text-[#eae9e9]/60 text-xs font-light">MACD 1m {'>'} 0</span>
+                                  <span className={`text-xs px-2.5 py-1 font-mono font-semibold ${!failedConditionsMap.has('macd1mPositive') ? 'text-[#22c55e] bg-[#22c55e]/15 border border-[#22c55e]/30' : 'text-[#f87171] bg-[#f87171]/15 border border-[#f87171]/30'}`}>
                                     {!failedConditionsMap.has('macd1mPositive') ? '✓' : '✗'} {macd1m?.macd?.toFixed(4) || 'N/A'}
                                   </span>
                                 </div>
-                                <div className="flex justify-between items-center">
-                                  <span className="text-[#969696] text-xs">Close {'>'} EMA 18 1m</span>
-                                  <span className={`text-xs px-2 py-0.5 rounded ${!failedConditionsMap.has('closeAboveEma18_1m') ? 'bg-[#4ec9b0]/20 text-[#4ec9b0]' : 'bg-[#f44747]/20 text-[#f44747]'}`}>
+                                <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                                  <span className="text-[#eae9e9]/60 text-xs font-light">Close {'>'} EMA 18 1m</span>
+                                  <span className={`text-xs px-2.5 py-1 font-mono font-semibold ${!failedConditionsMap.has('closeAboveEma18_1m') ? 'text-[#22c55e] bg-[#22c55e]/15 border border-[#22c55e]/30' : 'text-[#f87171] bg-[#f87171]/15 border border-[#f87171]/30'}`}>
                                     {!failedConditionsMap.has('closeAboveEma18_1m') ? '✓' : '✗'}
                                   </span>
                                 </div>
-                                <div className="flex justify-between items-center">
-                                  <span className="text-[#969696] text-xs">EMA 18 5m {'>'} EMA 200 5m</span>
-                                  <span className={`text-xs px-2 py-0.5 rounded ${!failedConditionsMap.has('ema18Above200_5m') ? 'bg-[#4ec9b0]/20 text-[#4ec9b0]' : 'bg-[#f44747]/20 text-[#f44747]'}`}>
+                                <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                                  <span className="text-[#eae9e9]/60 text-xs font-light">EMA 18 5m {'>'} EMA 200 5m</span>
+                                  <span className={`text-xs px-2.5 py-1 font-mono font-semibold ${!failedConditionsMap.has('ema18Above200_5m') ? 'text-[#22c55e] bg-[#22c55e]/15 border border-[#22c55e]/30' : 'text-[#f87171] bg-[#f87171]/15 border border-[#f87171]/30'}`}>
                                     {!failedConditionsMap.has('ema18Above200_5m') ? '✓' : '✗'}
                                   </span>
                                 </div>
-                                <div className="mt-3 pt-3 border-t border-[#3e3e42]">
+                                <div className="mt-4 pt-4 border-t border-[#2a2820]/60">
                                   <div className="flex justify-between items-center">
-                                    <span className="text-[#969696] text-sm font-semibold">All Tech Met</span>
-                                    <span className={`text-sm px-3 py-1 rounded font-semibold ${allConditionsMet ? 'bg-[#4ec9b0]/20 text-[#4ec9b0]' : 'bg-[#f44747]/20 text-[#f44747]'}`}>
+                                    <span className="text-[#eae9e9]/70 text-xs font-bold uppercase tracking-[0.15em] font-mono">ALL TECH MET</span>
+                                    <span className={`text-xs px-3 py-1.5 font-bold font-mono ${allConditionsMet ? 'text-[#22c55e] bg-[#22c55e]/20 border border-[#22c55e]/50 shadow-[0_0_8px_rgba(34,197,94,0.3)]' : 'text-[#f87171] bg-[#f87171]/20 border border-[#f87171]/50'}`}>
                                       {allConditionsMet ? '✓ YES' : '✗ NO'}
                                     </span>
                                   </div>
@@ -1586,25 +1498,26 @@ function App() {
                     </div>
 
                     {/* Middle Column - MACD 1m */}
-                    <div className="space-y-4">
-                      <div className="bg-[#252526] rounded-lg border border-[#3e3e42] p-4">
-                        <h3 className="text-sm font-semibold text-[#cccccc] mb-3 uppercase tracking-wide">MACD 1m</h3>
-                        <div className="space-y-2">
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">Histogram</span>
-                            <span className={`font-mono text-xs ${selectedStockInfo.indicators?.macd1m?.histogram >= 0 ? 'text-[#4ec9b0]' : 'text-[#f44747]'}`}>
+                    <div className="space-y-5">
+                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                        <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                        <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono">MACD 1M</h3>
+                        <div className="space-y-3">
+                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">Histogram</span>
+                            <span className={`font-mono text-sm font-semibold ${selectedStockInfo.indicators?.macd1m?.histogram >= 0 ? 'text-[#22c55e]' : 'text-[#f87171]'}`}>
                               {selectedStockInfo.indicators?.macd1m?.histogram ? selectedStockInfo.indicators.macd1m.histogram.toFixed(6) : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">MACD</span>
-                            <span className="text-[#cccccc] font-mono text-xs">
+                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">MACD</span>
+                            <span className="text-[#eae9e9] font-mono text-sm">
                               {selectedStockInfo.indicators?.macd1m?.macd ? selectedStockInfo.indicators.macd1m.macd.toFixed(6) : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">Signal</span>
-                            <span className="text-[#cccccc] font-mono text-xs">
+                          <div className="flex justify-between items-center py-2">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">Signal</span>
+                            <span className="text-[#eae9e9] font-mono text-sm">
                               {selectedStockInfo.indicators?.macd1m?.signal ? selectedStockInfo.indicators.macd1m.signal.toFixed(6) : 'N/A'}
                             </span>
                           </div>
@@ -1612,30 +1525,31 @@ function App() {
                       </div>
 
                       {/* EMA 1m */}
-                      <div className="bg-[#252526] rounded-lg border border-[#3e3e42] p-4">
-                        <h3 className="text-sm font-semibold text-[#cccccc] mb-3 uppercase tracking-wide">EMA 1m</h3>
-                        <div className="space-y-2">
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">EMA 12</span>
-                            <span className="text-[#cccccc] font-mono text-xs">
+                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                        <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                        <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono">EMA 1M</h3>
+                        <div className="space-y-3">
+                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">EMA 12</span>
+                            <span className="text-[#eae9e9] font-mono text-sm">
                               {selectedStockInfo.indicators?.ema1m12 ? `$${selectedStockInfo.indicators.ema1m12.toFixed(6)}` : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">EMA 20</span>
-                            <span className="text-[#cccccc] font-mono text-xs">
+                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">EMA 20</span>
+                            <span className="text-[#eae9e9] font-mono text-sm">
                               {selectedStockInfo.indicators?.ema1m20 ? `$${selectedStockInfo.indicators.ema1m20.toFixed(6)}` : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">EMA 26</span>
-                            <span className="text-[#cccccc] font-mono text-xs">
+                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">EMA 26</span>
+                            <span className="text-[#eae9e9] font-mono text-sm">
                               {selectedStockInfo.indicators?.ema1m26 ? `$${selectedStockInfo.indicators.ema1m26.toFixed(6)}` : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">EMA 200</span>
-                            <span className="text-[#cccccc] font-mono text-xs">
+                          <div className="flex justify-between items-center py-2">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">EMA 200</span>
+                            <span className="text-[#eae9e9] font-mono text-sm">
                               {selectedStockInfo.indicators?.ema1m200 ? `$${selectedStockInfo.indicators.ema1m200.toFixed(6)}` : 'N/A'}
                             </span>
                           </div>
@@ -1644,25 +1558,26 @@ function App() {
                     </div>
 
                     {/* Right Column - MACD 5m & EMA 5m */}
-                    <div className="space-y-4">
-                      <div className="bg-[#252526] rounded-lg border border-[#3e3e42] p-4">
-                        <h3 className="text-sm font-semibold text-[#cccccc] mb-3 uppercase tracking-wide">MACD 5m</h3>
-                        <div className="space-y-2">
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">Histogram</span>
-                            <span className={`font-mono text-xs ${selectedStockInfo.indicators?.macd5m?.histogram >= 0 ? 'text-[#4ec9b0]' : 'text-[#f44747]'}`}>
+                    <div className="space-y-5">
+                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                        <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                        <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono">MACD 5M</h3>
+                        <div className="space-y-3">
+                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">Histogram</span>
+                            <span className={`font-mono text-sm font-semibold ${selectedStockInfo.indicators?.macd5m?.histogram >= 0 ? 'text-[#22c55e]' : 'text-[#f87171]'}`}>
                               {selectedStockInfo.indicators?.macd5m?.histogram ? selectedStockInfo.indicators.macd5m.histogram.toFixed(6) : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">MACD</span>
-                            <span className="text-[#cccccc] font-mono text-xs">
+                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">MACD</span>
+                            <span className="text-[#eae9e9] font-mono text-sm">
                               {selectedStockInfo.indicators?.macd5m?.macd ? selectedStockInfo.indicators.macd5m.macd.toFixed(6) : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">Signal</span>
-                            <span className="text-[#cccccc] font-mono text-xs">
+                          <div className="flex justify-between items-center py-2">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">Signal</span>
+                            <span className="text-[#eae9e9] font-mono text-sm">
                               {selectedStockInfo.indicators?.macd5m?.signal ? selectedStockInfo.indicators.macd5m.signal.toFixed(6) : 'N/A'}
                             </span>
                           </div>
@@ -1670,30 +1585,31 @@ function App() {
                       </div>
 
                       {/* EMA 5m */}
-                      <div className="bg-[#252526] rounded-lg border border-[#3e3e42] p-4">
-                        <h3 className="text-sm font-semibold text-[#cccccc] mb-3 uppercase tracking-wide">EMA 5m</h3>
-                        <div className="space-y-2">
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">EMA 12</span>
-                            <span className="text-[#cccccc] font-mono text-xs">
+                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                        <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                        <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono">EMA 5M</h3>
+                        <div className="space-y-3">
+                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">EMA 12</span>
+                            <span className="text-[#eae9e9] font-mono text-sm">
                               {selectedStockInfo.indicators?.ema5m12 ? `$${selectedStockInfo.indicators.ema5m12.toFixed(6)}` : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">EMA 20</span>
-                            <span className="text-[#cccccc] font-mono text-xs">
+                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">EMA 20</span>
+                            <span className="text-[#eae9e9] font-mono text-sm">
                               {selectedStockInfo.indicators?.ema5m20 ? `$${selectedStockInfo.indicators.ema5m20.toFixed(6)}` : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">EMA 26</span>
-                            <span className="text-[#cccccc] font-mono text-xs">
+                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">EMA 26</span>
+                            <span className="text-[#eae9e9] font-mono text-sm">
                               {selectedStockInfo.indicators?.ema5m26 ? `$${selectedStockInfo.indicators.ema5m26.toFixed(6)}` : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">EMA 200</span>
-                            <span className="text-[#cccccc] font-mono text-xs">
+                          <div className="flex justify-between items-center py-2">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">EMA 200</span>
+                            <span className="text-[#eae9e9] font-mono text-sm">
                               {selectedStockInfo.indicators?.ema5m200 ? `$${selectedStockInfo.indicators.ema5m200.toFixed(6)}` : 'N/A'}
                             </span>
                           </div>
@@ -1701,18 +1617,19 @@ function App() {
                       </div>
 
                       {/* Volume Info */}
-                      <div className="bg-[#252526] rounded-lg border border-[#3e3e42] p-4">
-                        <h3 className="text-sm font-semibold text-[#cccccc] mb-3 uppercase tracking-wide">Volumen</h3>
-                        <div className="space-y-2">
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">Último</span>
-                            <span className="text-[#cccccc] font-mono text-sm">
+                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                        <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                        <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono">VOLUMEN</h3>
+                        <div className="space-y-3">
+                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">Último</span>
+                            <span className="text-[#eae9e9] font-mono text-sm">
                               {selectedStockInfo.lastCandle?.volume ? selectedStockInfo.lastCandle.volume.toLocaleString() : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-[#969696] text-sm">Timestamp</span>
-                            <span className="text-[#cccccc] font-mono text-xs">
+                          <div className="flex justify-between items-center py-2">
+                            <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">Timestamp</span>
+                            <span className="text-[#eae9e9]/60 font-mono text-xs">
                               {selectedStockInfo.timestamp ? new Date(selectedStockInfo.timestamp).toLocaleTimeString() : 'N/A'}
                             </span>
                           </div>
@@ -1722,7 +1639,7 @@ function App() {
 
                     {/* ChartsWatcher Alert Data Section - Always show if data exists */}
                     {selectedStockInfo.chartswatcherData && (selectedStockInfo.chartswatcherData.rawColumns || selectedStockInfo.chartswatcherData.alertType === 'websocket_alert') && (
-                      <div className="col-span-1 lg:col-span-3 space-y-4">
+                      <div className="col-span-1 lg:col-span-3 space-y-5">
                         {/* Parsed Data - Only show if we have parsed values */}
                         {(selectedStockInfo.chartswatcherData.open !== null || 
                           selectedStockInfo.chartswatcherData.high !== null || 
@@ -1731,75 +1648,76 @@ function App() {
                           selectedStockInfo.chartswatcherData.volume !== null ||
                           selectedStockInfo.chartswatcherData.change !== null ||
                           selectedStockInfo.chartswatcherData.changePercent !== null) && (
-                        <div className="bg-[#252526] rounded-lg border border-[#3e3e42] p-4">
-                          <h3 className="text-sm font-semibold text-[#cccccc] mb-3 uppercase tracking-wide flex items-center">
-                            <svg className="w-4 h-4 mr-2 text-[#4ec9b0]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                          <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                          <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono flex items-center">
+                            <svg className="w-4 h-4 mr-2 text-[#22c55e]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                             </svg>
-                            ChartsWatcher Alert Data (Parsed)
+                            CHARTSWATCHER ALERT DATA (PARSED)
                           </h3>
                           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                             {selectedStockInfo.chartswatcherData.open !== null && (
                               <div className="flex flex-col">
-                                <span className="text-[#969696] text-xs mb-1">Open</span>
-                                <span className="text-[#cccccc] font-mono text-sm">
+                                <span className="text-[#eae9e9]/60 text-xs mb-1.5 font-light uppercase tracking-wider">Open</span>
+                                <span className="text-[#eae9e9] font-mono text-base font-semibold">
                                   ${selectedStockInfo.chartswatcherData.open.toFixed(2)}
                                 </span>
                               </div>
                             )}
                             {selectedStockInfo.chartswatcherData.high !== null && (
                               <div className="flex flex-col">
-                                <span className="text-[#969696] text-xs mb-1">High</span>
-                                <span className="text-[#4ec9b0] font-mono text-sm">
+                                <span className="text-[#eae9e9]/60 text-xs mb-1.5 font-light uppercase tracking-wider">High</span>
+                                <span className="text-[#22c55e] font-mono text-base font-bold">
                                   ${selectedStockInfo.chartswatcherData.high.toFixed(2)}
                                 </span>
                               </div>
                             )}
                             {selectedStockInfo.chartswatcherData.low !== null && (
                               <div className="flex flex-col">
-                                <span className="text-[#969696] text-xs mb-1">Low</span>
-                                <span className="text-[#f44747] font-mono text-sm">
+                                <span className="text-[#eae9e9]/60 text-xs mb-1.5 font-light uppercase tracking-wider">Low</span>
+                                <span className="text-[#f87171] font-mono text-base font-bold">
                                   ${selectedStockInfo.chartswatcherData.low.toFixed(2)}
                                 </span>
                               </div>
                             )}
                             {selectedStockInfo.chartswatcherData.close !== null && (
                               <div className="flex flex-col">
-                                <span className="text-[#969696] text-xs mb-1">Close</span>
-                                <span className="text-[#cccccc] font-mono text-sm">
+                                <span className="text-[#eae9e9]/60 text-xs mb-1.5 font-light uppercase tracking-wider">Close</span>
+                                <span className="text-[#eae9e9] font-mono text-base font-semibold">
                                   ${selectedStockInfo.chartswatcherData.close.toFixed(2)}
                                 </span>
                               </div>
                             )}
                             {selectedStockInfo.chartswatcherData.volume !== null && (
                               <div className="flex flex-col">
-                                <span className="text-[#969696] text-xs mb-1">Volume</span>
-                                <span className="text-[#cccccc] font-mono text-sm">
+                                <span className="text-[#eae9e9]/60 text-xs mb-1.5 font-light uppercase tracking-wider">Volume</span>
+                                <span className="text-[#eae9e9] font-mono text-base font-semibold">
                                   {selectedStockInfo.chartswatcherData.volume.toLocaleString()}
                                 </span>
                               </div>
                             )}
                             {selectedStockInfo.chartswatcherData.change !== null && (
                               <div className="flex flex-col">
-                                <span className="text-[#969696] text-xs mb-1">Change</span>
-                                <span className={`font-mono text-sm ${selectedStockInfo.chartswatcherData.change >= 0 ? 'text-[#4ec9b0]' : 'text-[#f44747]'}`}>
+                                <span className="text-[#eae9e9]/60 text-xs mb-1.5 font-light uppercase tracking-wider">Change</span>
+                                <span className={`font-mono text-base font-bold ${selectedStockInfo.chartswatcherData.change >= 0 ? 'text-[#22c55e]' : 'text-[#f87171]'}`}>
                                   {selectedStockInfo.chartswatcherData.change >= 0 ? '+' : ''}${selectedStockInfo.chartswatcherData.change.toFixed(2)}
                                 </span>
                               </div>
                             )}
                             {selectedStockInfo.chartswatcherData.changePercent !== null && (
                               <div className="flex flex-col">
-                                <span className="text-[#969696] text-xs mb-1">Change %</span>
-                                <span className={`font-mono text-sm ${selectedStockInfo.chartswatcherData.changePercent >= 0 ? 'text-[#4ec9b0]' : 'text-[#f44747]'}`}>
+                                <span className="text-[#eae9e9]/60 text-xs mb-1.5 font-light uppercase tracking-wider">Change %</span>
+                                <span className={`font-mono text-base font-bold ${selectedStockInfo.chartswatcherData.changePercent >= 0 ? 'text-[#22c55e]' : 'text-[#f87171]'}`}>
                                   {selectedStockInfo.chartswatcherData.changePercent >= 0 ? '+' : ''}{selectedStockInfo.chartswatcherData.changePercent.toFixed(2)}%
                                 </span>
                               </div>
                             )}
                             {selectedStockInfo.chartswatcherData.alertType === 'websocket_alert' && (
                               <div className="flex flex-col">
-                                <span className="text-[#969696] text-xs mb-1">Alert Type</span>
-                                <span className="text-[#4ec9b0] font-mono text-xs">
-                                  Live Alert
+                                <span className="text-[#eae9e9]/60 text-xs mb-1.5 font-light uppercase tracking-wider">Alert Type</span>
+                                <span className="text-[#22c55e] font-mono text-sm font-semibold">
+                                  LIVE ALERT
                                 </span>
                               </div>
                             )}
@@ -1809,18 +1727,19 @@ function App() {
 
                         {/* Raw Columns Received */}
                         {selectedStockInfo.chartswatcherData.rawColumns && selectedStockInfo.chartswatcherData.rawColumns.length > 0 && (
-                          <div className="bg-[#252526] rounded-lg border border-[#3e3e42] p-4">
-                            <h3 className="text-sm font-semibold text-[#cccccc] mb-3 uppercase tracking-wide flex items-center">
-                              <svg className="w-4 h-4 mr-2 text-[#808080]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                            <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                            <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono flex items-center">
+                              <svg className="w-4 h-4 mr-2 text-[#eae9e9]/60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
                               </svg>
-                              Alert Columns Received
+                              ALERT COLUMNS RECEIVED
                             </h3>
                             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                               {selectedStockInfo.chartswatcherData.rawColumns.map((column: any, idx: number) => (
-                                <div key={idx} className="bg-[#1e1e1e] rounded p-3 border border-[#3e3e42]">
-                                  <div className="text-[#969696] text-xs mb-1">{column.key}</div>
-                                  <div className="text-[#cccccc] font-mono text-sm break-all">
+                                <div key={idx} className="bg-[#14130e] border border-[#2a2820]/60 p-3 hover:border-[#2a2820]/80 transition-all duration-200">
+                                  <div className="text-[#eae9e9]/60 text-xs mb-1.5 font-mono font-light uppercase tracking-wider">{column.key}</div>
+                                  <div className="text-[#eae9e9] font-mono text-sm break-all font-semibold">
                                     {column.value !== null && column.value !== undefined ? String(column.value) : 'null'}
                                   </div>
                                 </div>
