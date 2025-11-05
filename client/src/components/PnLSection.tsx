@@ -1,6 +1,9 @@
 import React from 'react';
 import { Virtuoso } from 'react-virtuoso';
 import { useAuth } from '../auth/AuthContext';
+import NotificationContainer from './NotificationContainer';
+import ConfirmationModal from './ConfirmationModal';
+import type { NotificationProps } from './Notification';
 
 interface Position {
   PositionID: string;
@@ -41,6 +44,16 @@ const PnLSection: React.FC = () => {
   const [sellingAll, setSellingAll] = React.useState(false);
   const [sellAllStatus, setSellAllStatus] = React.useState<{ success: boolean; message: string } | null>(null);
   const [sellingPositions, setSellingPositions] = React.useState<Set<string>>(new Set());
+  const [notifications, setNotifications] = React.useState<NotificationProps[]>([]);
+  const [confirmModal, setConfirmModal] = React.useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    confirmText?: string;
+    cancelText?: string;
+    type?: 'danger' | 'warning' | 'info';
+    onConfirm: () => void;
+  } | null>(null);
   const wsRef = React.useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = React.useRef(0);
   const reconnectTimerRef = React.useRef<number | null>(null);
@@ -218,9 +231,20 @@ const PnLSection: React.FC = () => {
   }, [connectWebSocket, disconnectWebSocket]);
 
   const positionsArray = Array.from(positions.values()).sort((a, b) => {
-    // Sort by Symbol alphabetically
-    return a.Symbol.localeCompare(b.Symbol);
+    // Sort by Symbol alphabetically, handle undefined/null values
+    const symbolA = a.Symbol || '';
+    const symbolB = b.Symbol || '';
+    return symbolA.localeCompare(symbolB);
   });
+
+  const addNotification = (message: string, type: 'success' | 'error' | 'warning' | 'info' = 'info', duration?: number) => {
+    const id = Date.now().toString() + Math.random().toString(36).substr(2, 9);
+    setNotifications(prev => [...prev, { id, message, type, duration, onClose: () => {} }]);
+  };
+
+  const removeNotification = (id: string) => {
+    setNotifications(prev => prev.filter(n => n.id !== id));
+  };
 
   const formatPrice = (price: string): string => {
     const num = parseFloat(price);
@@ -267,118 +291,159 @@ const PnLSection: React.FC = () => {
     if (!symbol || sellingPositions.has(positionId)) return;
     
     if (!quantity || quantity <= 0) {
-      alert(`Invalid quantity for ${symbol}`);
+      addNotification(`Invalid quantity for ${symbol}`, 'error');
       return;
     }
     
-    // Confirm action
+    // Confirm action using modal
     const action = position.LongShort === 'Long' ? 'sell' : 'close';
-    if (!confirm(`Are you sure you want to ${action} ${quantity} ${symbol}?`)) {
-      return;
-    }
+    const actionCapitalized = action.charAt(0).toUpperCase() + action.slice(1);
     
-    setSellingPositions(prev => new Set(prev).add(positionId));
-    
-    try {
-      // Send sell order using POST /order endpoint format
-      // https://inbitme.gitbook.io/sections-bot/xKy06Pb8j01LsqEnmSik/rest-api/ordenes
-      const response = await fetchWithAuth(`${API_BASE_URL}/sell`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          symbol,
-          quantity,
-          order_type: 'Limit', // Use Limit order type
-          long_short: position.LongShort // Include position side for proper handling
-        })
-      });
-      
-      if (!response.ok) {
-        // HTTP error (500, etc) - try to get error message
-        const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}: ${response.statusText}` }));
-        alert(`Failed to ${action} ${symbol}: ${errorData.error || `HTTP ${response.status}`}`);
-        return;
+    setConfirmModal({
+      isOpen: true,
+      title: `${actionCapitalized} Position`,
+      message: `Are you sure you want to ${action} ${quantity} ${symbol}?`,
+      confirmText: actionCapitalized,
+      cancelText: 'Cancel',
+      type: 'danger',
+      onConfirm: async () => {
+        setConfirmModal(null);
+        setSellingPositions(prev => new Set(prev).add(positionId));
+        
+        try {
+          // Send sell order using POST /order endpoint format
+          // https://inbitme.gitbook.io/sections-bot/xKy06Pb8j01LsqEnmSik/rest-api/ordenes
+          const response = await fetchWithAuth(`${API_BASE_URL}/sell`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+              symbol,
+              quantity,
+              order_type: 'Limit', // Use Limit order type
+              long_short: position.LongShort // Include position side for proper handling
+            })
+          });
+          
+          if (!response.ok) {
+            // HTTP error (500, etc) - try to get error message
+            const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}: ${response.statusText}` }));
+            addNotification(`Failed to ${action} ${symbol}: ${errorData.error || `HTTP ${response.status}`}`, 'error');
+            return;
+          }
+          
+          const data = await response.json();
+          
+          if (data.success) {
+            console.log(`✅ Sell order sent for ${quantity} ${symbol}:`, data.data?.notifyStatus);
+            addNotification(`Sell order sent successfully for ${quantity} ${symbol}`, 'success');
+            // Position will be removed from the list via WebSocket update
+          } else {
+            // API returned error response
+            addNotification(`Failed to ${action} ${symbol}: ${data.error || data.data?.notifyStatus || 'Unknown error'}`, 'error');
+          }
+        } catch (err: any) {
+          addNotification(`Error ${action === 'sell' ? 'selling' : 'closing'} ${symbol}: ${err.message || 'Unknown error'}`, 'error');
+        } finally {
+          setSellingPositions(prev => {
+            const newSet = new Set(prev);
+            newSet.delete(positionId);
+            return newSet;
+          });
+        }
       }
-      
-      const data = await response.json();
-      
-      if (data.success) {
-        console.log(`✅ Sell order sent for ${quantity} ${symbol}:`, data.data?.notifyStatus);
-        // Position will be removed from the list via WebSocket update
-      } else {
-        // API returned error response
-        alert(`Failed to ${action} ${symbol}: ${data.error || data.data?.notifyStatus || 'Unknown error'}`);
-      }
-    } catch (err: any) {
-      alert(`Error ${action === 'sell' ? 'selling' : 'closing'} ${symbol}: ${err.message || 'Unknown error'}`);
-    } finally {
-      setSellingPositions(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(positionId);
-        return newSet;
-      });
-    }
+    });
   };
 
   const handleSellAll = async () => {
     if (positionsArray.length === 0 || sellingAll) return;
     
     // Confirm action - warn user this is a panic sell
-    if (!confirm(`⚠️ PANIC SELL: This will cancel all pending orders and sell ALL positions.\n\nAre you sure you want to proceed?`)) {
-      return;
-    }
-    
-    setSellingAll(true);
-    setSellAllStatus(null);
-    
-    try {
-      // According to API documentation: POST /sell_all with no body
-      // Returns 200 with no content on success
-      // https://inbitme.gitbook.io/sections-bot/xKy06Pb8j01LsqEnmSik/rest-api/ordenes
-      const response = await fetchWithAuth(`${API_BASE_URL}/sell_all`, {
-        method: 'POST',
-        headers: { 'Accept': '*/*' }
-      });
-      
-      if (!response.ok) {
-        // HTTP error - try to get error message
-        const errorData = await response.json().catch(() => ({ 
-          error: `HTTP ${response.status}: ${response.statusText}` 
-        }));
-        setSellAllStatus({
-          success: false,
-          message: errorData.error || `HTTP ${response.status}`
-        });
-        return;
+    setConfirmModal({
+      isOpen: true,
+      title: 'PANIC SELL',
+      message: '⚠️ This will cancel all pending orders and sell ALL positions.\n\nAre you sure you want to proceed?',
+      confirmText: 'Sell All',
+      cancelText: 'Cancel',
+      type: 'danger',
+      onConfirm: async () => {
+        setConfirmModal(null);
+        setSellingAll(true);
+        setSellAllStatus(null);
+        
+        try {
+          // According to API documentation: POST /sell_all with no body
+          // Returns 200 with no content on success
+          // https://inbitme.gitbook.io/sections-bot/xKy06Pb8j01LsqEnmSik/rest-api/ordenes
+          const response = await fetchWithAuth(`${API_BASE_URL}/sell_all`, {
+            method: 'POST',
+            headers: { 'Accept': '*/*' }
+          });
+          
+          if (!response.ok) {
+            // HTTP error - try to get error message
+            const errorData = await response.json().catch(() => ({ 
+              error: `HTTP ${response.status}: ${response.statusText}` 
+            }));
+            const errorMsg = errorData.error || `HTTP ${response.status}`;
+            setSellAllStatus({
+              success: false,
+              message: errorMsg
+            });
+            addNotification(`Sell All failed: ${errorMsg}`, 'error');
+            return;
+          }
+          
+          const data = await response.json();
+          
+          if (data.success) {
+            const successMsg = data.data?.message || 'Sell All executed successfully - all orders cancelled and positions sold';
+            setSellAllStatus({
+              success: true,
+              message: successMsg
+            });
+            addNotification(successMsg, 'success', 8000);
+          } else {
+            const errorMsg = data.error || data.data?.message || 'Failed to execute Sell All';
+            setSellAllStatus({
+              success: false,
+              message: errorMsg
+            });
+            addNotification(`Sell All failed: ${errorMsg}`, 'error');
+          }
+        } catch (err: any) {
+          const errorMsg = err.message || 'Error executing Sell All';
+          setSellAllStatus({
+            success: false,
+            message: errorMsg
+          });
+          addNotification(`Sell All error: ${errorMsg}`, 'error');
+        } finally {
+          setSellingAll(false);
+          // Clear status message after 8 seconds (longer for important message)
+          setTimeout(() => setSellAllStatus(null), 8000);
+        }
       }
-      
-      const data = await response.json();
-      
-      if (data.success) {
-        setSellAllStatus({
-          success: true,
-          message: data.data?.message || 'Sell All executed successfully - all orders cancelled and positions sold'
-        });
-      } else {
-        setSellAllStatus({
-          success: false,
-          message: data.error || data.data?.message || 'Failed to execute Sell All'
-        });
-      }
-    } catch (err: any) {
-      setSellAllStatus({
-        success: false,
-        message: err.message || 'Error executing Sell All'
-      });
-    } finally {
-      setSellingAll(false);
-      // Clear status message after 8 seconds (longer for important message)
-      setTimeout(() => setSellAllStatus(null), 8000);
-    }
+    });
   };
 
   return (
     <div className="h-full flex flex-col bg-[#14130e]">
+      {/* Notification Container */}
+      <NotificationContainer notifications={notifications} onRemove={removeNotification} />
+      
+      {/* Confirmation Modal */}
+      {confirmModal && (
+        <ConfirmationModal
+          isOpen={confirmModal.isOpen}
+          title={confirmModal.title}
+          message={confirmModal.message}
+          confirmText={confirmModal.confirmText}
+          cancelText={confirmModal.cancelText}
+          type={confirmModal.type}
+          onConfirm={confirmModal.onConfirm}
+          onCancel={() => setConfirmModal(null)}
+        />
+      )}
       {/* Header */}
       <div className="p-4 border-b border-[#2a2820]/50 bg-gradient-to-r from-[#14130e] to-[#0f0e0a] backdrop-blur-sm">
         <div className="flex items-center justify-between mb-3">
