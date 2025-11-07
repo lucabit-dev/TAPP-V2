@@ -1327,19 +1327,19 @@ function App() {
               <div className="absolute bottom-0 right-0 w-20 h-20 border-b-2 border-r-2 border-[#22c55e]/30 pointer-events-none"></div>
 
               {/* Modal Header - Futuristic Style */}
-              <div className="bg-gradient-to-r from-[#14130e] via-[#0f0e0a] to-[#14130e] border-b border-[#2a2820]/60 px-8 py-5 backdrop-blur-sm relative">
+              <div className="bg-gradient-to-r from-[#14130e] via-[#0f0e0a] to-[#14130e] border-b border-[#2a2820]/60 px-6 py-3 backdrop-blur-sm relative">
                 <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-5">
-                    <div className="flex items-center space-x-4">
+                  <div className="flex items-center space-x-4">
+                    <div className="flex items-center space-x-3">
                       <div className="relative">
-                        <div className={`w-4 h-4 rounded-full ${selectedStockInfo.evaluation?.allConditionsMet ? 'bg-[#22c55e] shadow-[0_0_12px_rgba(34,197,94,0.6)] animate-pulse' : 'bg-[#808080]'}`}></div>
+                        <div className={`w-3 h-3 rounded-full ${selectedStockInfo.evaluation?.allConditionsMet ? 'bg-[#22c55e] shadow-[0_0_12px_rgba(34,197,94,0.6)] animate-pulse' : 'bg-[#808080]'}`}></div>
                         {selectedStockInfo.evaluation?.allConditionsMet && (
-                          <div className="absolute inset-0 w-4 h-4 rounded-full bg-[#22c55e] opacity-50 animate-ping"></div>
+                          <div className="absolute inset-0 w-3 h-3 rounded-full bg-[#22c55e] opacity-50 animate-ping"></div>
                         )}
                       </div>
                       <div>
-                        <h2 className="text-2xl font-bold text-[#eae9e9] tracking-wider font-mono">{selectedStockInfo.ticker}</h2>
-                        <p className="text-sm text-[#eae9e9]/60 mt-1 font-light">
+                        <h2 className="text-xl font-bold text-[#eae9e9] tracking-wider font-mono">{selectedStockInfo.ticker}</h2>
+                        <p className="text-xs text-[#eae9e9]/60 mt-0.5 font-light">
                           {selectedStockInfo.companyInfo?.name || 'Loading company info...'}
                         </p>
                       </div>
@@ -1364,43 +1364,43 @@ function App() {
               </div>
 
               {/* Modal Content */}
-              <div className="p-8 overflow-y-auto max-h-[calc(90vh-140px)] custom-scrollbar">
+              <div className="p-4 overflow-y-auto max-h-[calc(90vh-120px)] custom-scrollbar">
                 {selectedStockInfo.error ? (
-                  <div className="text-center py-12">
-                    <div className="text-[#f87171] mb-2 text-lg font-semibold">⚠️ Error loading data</div>
-                    <div className="text-[#eae9e9]/70 text-sm">{selectedStockInfo.error}</div>
+                  <div className="text-center py-8">
+                    <div className="text-[#f87171] mb-2 text-base font-semibold">⚠️ Error loading data</div>
+                    <div className="text-[#eae9e9]/70 text-xs">{selectedStockInfo.error}</div>
                   </div>
                 ) : (
-                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
                     {/* Left Column - Basic Info */}
-                    <div className="space-y-5">
+                    <div className="space-y-3">
                       {/* Price Information */}
-                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-3 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
                         <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-                        <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono">PRECIO</h3>
-                        <div className="space-y-3">
-                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                        <h3 className="text-xs font-bold text-[#eae9e9] mb-2 uppercase tracking-[0.15em] font-mono">PRECIO</h3>
+                        <div className="space-y-1.5">
+                          <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">Alerta</span>
-                            <span className="text-[#eae9e9] font-mono text-base font-semibold">
+                            <span className="text-[#eae9e9] font-mono text-sm font-semibold">
                               {selectedStockInfo.price ? `$${selectedStockInfo.price.toFixed(2)}` : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                          <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">Último</span>
-                            <span className="text-[#eae9e9] font-mono text-base">
+                            <span className="text-[#eae9e9] font-mono text-sm">
                               {selectedStockInfo.lastCandle?.close ? `$${selectedStockInfo.lastCandle.close.toFixed(2)}` : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                          <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">VWAP</span>
-                            <span className="text-[#eae9e9] font-mono text-base">
+                            <span className="text-[#eae9e9] font-mono text-sm">
                               {selectedStockInfo.indicators?.vwap1m ? `$${selectedStockInfo.indicators.vwap1m.toFixed(2)}` : 'N/A'}
                             </span>
                           </div>
                           {selectedStockInfo.changePercent !== undefined && (
-                            <div className="flex justify-between items-center py-2">
+                            <div className="flex justify-between items-center py-1">
                               <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">Cambio</span>
-                              <span className={`font-mono text-base font-bold ${selectedStockInfo.changePercent >= 0 ? 'text-[#22c55e]' : 'text-[#f87171]'}`}>
+                              <span className={`font-mono text-sm font-bold ${selectedStockInfo.changePercent >= 0 ? 'text-[#22c55e]' : 'text-[#f87171]'}`}>
                                 {selectedStockInfo.changePercent >= 0 ? '+' : ''}{selectedStockInfo.changePercent.toFixed(2)}%
                               </span>
                             </div>
@@ -1409,19 +1409,19 @@ function App() {
                       </div>
 
                       {/* Extreme Prices */}
-                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-3 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
                         <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-                        <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono">RANGO DEL DÍA</h3>
-                        <div className="space-y-3">
-                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                        <h3 className="text-xs font-bold text-[#eae9e9] mb-2 uppercase tracking-[0.15em] font-mono">RANGO DEL DÍA</h3>
+                        <div className="space-y-1.5">
+                          <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">LOD</span>
-                            <span className="text-[#f87171] font-mono text-base font-bold">
+                            <span className="text-[#f87171] font-mono text-sm font-bold">
                               {selectedStockInfo.indicators?.lod ? `$${selectedStockInfo.indicators.lod.toFixed(2)}` : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center py-2">
+                          <div className="flex justify-between items-center py-1">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">HOD</span>
-                            <span className="text-[#22c55e] font-mono text-base font-bold">
+                            <span className="text-[#22c55e] font-mono text-sm font-bold">
                               {selectedStockInfo.indicators?.hod ? `$${selectedStockInfo.indicators.hod.toFixed(2)}` : 'N/A'}
                             </span>
                           </div>
@@ -1429,10 +1429,10 @@ function App() {
                       </div>
 
                       {/* Technical Conditions */}
-                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-3 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
                         <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-                        <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono">CONDICIONES TÉCNICAS</h3>
-                        <div className="space-y-3">
+                        <h3 className="text-xs font-bold text-[#eae9e9] mb-2 uppercase tracking-[0.15em] font-mono">CONDICIONES TÉCNICAS</h3>
+                        <div className="space-y-1.5">
                           {(() => {
                             // Use the same evaluation logic as the server
                             const evaluation = selectedStockInfo.evaluation;
@@ -1452,40 +1452,40 @@ function App() {
                             
                             return (
                               <>
-                                <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                                <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                                   <span className="text-[#eae9e9]/60 text-xs font-light">MACD 5m Histogram {'>'} 0</span>
-                                  <span className={`text-xs px-2.5 py-1 font-mono font-semibold ${!failedConditionsMap.has('macd5mHistogramPositive') ? 'text-[#22c55e] bg-[#22c55e]/15 border border-[#22c55e]/30' : 'text-[#f87171] bg-[#f87171]/15 border border-[#f87171]/30'}`}>
+                                  <span className={`text-xs px-2 py-0.5 font-mono font-semibold ${!failedConditionsMap.has('macd5mHistogramPositive') ? 'text-[#22c55e] bg-[#22c55e]/15 border border-[#22c55e]/30' : 'text-[#f87171] bg-[#f87171]/15 border border-[#f87171]/30'}`}>
                                     {!failedConditionsMap.has('macd5mHistogramPositive') ? '✓' : '✗'} {macd5m?.histogram?.toFixed(4) || 'N/A'}
                                   </span>
                                 </div>
-                                <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                                <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                                   <span className="text-[#eae9e9]/60 text-xs font-light">MACD 5m {'>'} 0</span>
-                                  <span className={`text-xs px-2.5 py-1 font-mono font-semibold ${!failedConditionsMap.has('macd5mPositive') ? 'text-[#22c55e] bg-[#22c55e]/15 border border-[#22c55e]/30' : 'text-[#f87171] bg-[#f87171]/15 border border-[#f87171]/30'}`}>
+                                  <span className={`text-xs px-2 py-0.5 font-mono font-semibold ${!failedConditionsMap.has('macd5mPositive') ? 'text-[#22c55e] bg-[#22c55e]/15 border border-[#22c55e]/30' : 'text-[#f87171] bg-[#f87171]/15 border border-[#f87171]/30'}`}>
                                     {!failedConditionsMap.has('macd5mPositive') ? '✓' : '✗'} {macd5m?.macd?.toFixed(4) || 'N/A'}
                                   </span>
                                 </div>
-                                <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                                <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                                   <span className="text-[#eae9e9]/60 text-xs font-light">MACD 1m {'>'} 0</span>
-                                  <span className={`text-xs px-2.5 py-1 font-mono font-semibold ${!failedConditionsMap.has('macd1mPositive') ? 'text-[#22c55e] bg-[#22c55e]/15 border border-[#22c55e]/30' : 'text-[#f87171] bg-[#f87171]/15 border border-[#f87171]/30'}`}>
+                                  <span className={`text-xs px-2 py-0.5 font-mono font-semibold ${!failedConditionsMap.has('macd1mPositive') ? 'text-[#22c55e] bg-[#22c55e]/15 border border-[#22c55e]/30' : 'text-[#f87171] bg-[#f87171]/15 border border-[#f87171]/30'}`}>
                                     {!failedConditionsMap.has('macd1mPositive') ? '✓' : '✗'} {macd1m?.macd?.toFixed(4) || 'N/A'}
                                   </span>
                                 </div>
-                                <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                                <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                                   <span className="text-[#eae9e9]/60 text-xs font-light">Close {'>'} EMA 18 1m</span>
-                                  <span className={`text-xs px-2.5 py-1 font-mono font-semibold ${!failedConditionsMap.has('closeAboveEma18_1m') ? 'text-[#22c55e] bg-[#22c55e]/15 border border-[#22c55e]/30' : 'text-[#f87171] bg-[#f87171]/15 border border-[#f87171]/30'}`}>
+                                  <span className={`text-xs px-2 py-0.5 font-mono font-semibold ${!failedConditionsMap.has('closeAboveEma18_1m') ? 'text-[#22c55e] bg-[#22c55e]/15 border border-[#22c55e]/30' : 'text-[#f87171] bg-[#f87171]/15 border border-[#f87171]/30'}`}>
                                     {!failedConditionsMap.has('closeAboveEma18_1m') ? '✓' : '✗'}
                                   </span>
                                 </div>
-                                <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                                <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                                   <span className="text-[#eae9e9]/60 text-xs font-light">EMA 18 5m {'>'} EMA 200 5m</span>
-                                  <span className={`text-xs px-2.5 py-1 font-mono font-semibold ${!failedConditionsMap.has('ema18Above200_5m') ? 'text-[#22c55e] bg-[#22c55e]/15 border border-[#22c55e]/30' : 'text-[#f87171] bg-[#f87171]/15 border border-[#f87171]/30'}`}>
+                                  <span className={`text-xs px-2 py-0.5 font-mono font-semibold ${!failedConditionsMap.has('ema18Above200_5m') ? 'text-[#22c55e] bg-[#22c55e]/15 border border-[#22c55e]/30' : 'text-[#f87171] bg-[#f87171]/15 border border-[#f87171]/30'}`}>
                                     {!failedConditionsMap.has('ema18Above200_5m') ? '✓' : '✗'}
                                   </span>
                                 </div>
-                                <div className="mt-4 pt-4 border-t border-[#2a2820]/60">
+                                <div className="mt-2 pt-2 border-t border-[#2a2820]/60">
                                   <div className="flex justify-between items-center">
                                     <span className="text-[#eae9e9]/70 text-xs font-bold uppercase tracking-[0.15em] font-mono">ALL TECH MET</span>
-                                    <span className={`text-xs px-3 py-1.5 font-bold font-mono ${allConditionsMet ? 'text-[#22c55e] bg-[#22c55e]/20 border border-[#22c55e]/50 shadow-[0_0_8px_rgba(34,197,94,0.3)]' : 'text-[#f87171] bg-[#f87171]/20 border border-[#f87171]/50'}`}>
+                                    <span className={`text-xs px-2 py-1 font-bold font-mono ${allConditionsMet ? 'text-[#22c55e] bg-[#22c55e]/20 border border-[#22c55e]/50 shadow-[0_0_8px_rgba(34,197,94,0.3)]' : 'text-[#f87171] bg-[#f87171]/20 border border-[#f87171]/50'}`}>
                                       {allConditionsMet ? '✓ YES' : '✗ NO'}
                                     </span>
                                   </div>
@@ -1498,26 +1498,26 @@ function App() {
                     </div>
 
                     {/* Middle Column - MACD 1m */}
-                    <div className="space-y-5">
-                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                    <div className="space-y-3">
+                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-3 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
                         <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-                        <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono">MACD 1M</h3>
-                        <div className="space-y-3">
-                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                        <h3 className="text-xs font-bold text-[#eae9e9] mb-2 uppercase tracking-[0.15em] font-mono">MACD 1M</h3>
+                        <div className="space-y-1.5">
+                          <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">Histogram</span>
-                            <span className={`font-mono text-sm font-semibold ${selectedStockInfo.indicators?.macd1m?.histogram >= 0 ? 'text-[#22c55e]' : 'text-[#f87171]'}`}>
+                            <span className={`font-mono text-xs font-semibold ${selectedStockInfo.indicators?.macd1m?.histogram >= 0 ? 'text-[#22c55e]' : 'text-[#f87171]'}`}>
                               {selectedStockInfo.indicators?.macd1m?.histogram ? selectedStockInfo.indicators.macd1m.histogram.toFixed(6) : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                          <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">MACD</span>
-                            <span className="text-[#eae9e9] font-mono text-sm">
+                            <span className="text-[#eae9e9] font-mono text-xs">
                               {selectedStockInfo.indicators?.macd1m?.macd ? selectedStockInfo.indicators.macd1m.macd.toFixed(6) : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center py-2">
+                          <div className="flex justify-between items-center py-1">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">Signal</span>
-                            <span className="text-[#eae9e9] font-mono text-sm">
+                            <span className="text-[#eae9e9] font-mono text-xs">
                               {selectedStockInfo.indicators?.macd1m?.signal ? selectedStockInfo.indicators.macd1m.signal.toFixed(6) : 'N/A'}
                             </span>
                           </div>
@@ -1525,31 +1525,31 @@ function App() {
                       </div>
 
                       {/* EMA 1m */}
-                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-3 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
                         <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-                        <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono">EMA 1M</h3>
-                        <div className="space-y-3">
-                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                        <h3 className="text-xs font-bold text-[#eae9e9] mb-2 uppercase tracking-[0.15em] font-mono">EMA 1M</h3>
+                        <div className="space-y-1.5">
+                          <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">EMA 12</span>
-                            <span className="text-[#eae9e9] font-mono text-sm">
+                            <span className="text-[#eae9e9] font-mono text-xs">
                               {selectedStockInfo.indicators?.ema1m12 ? `$${selectedStockInfo.indicators.ema1m12.toFixed(6)}` : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                          <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">EMA 20</span>
-                            <span className="text-[#eae9e9] font-mono text-sm">
+                            <span className="text-[#eae9e9] font-mono text-xs">
                               {selectedStockInfo.indicators?.ema1m20 ? `$${selectedStockInfo.indicators.ema1m20.toFixed(6)}` : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                          <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">EMA 26</span>
-                            <span className="text-[#eae9e9] font-mono text-sm">
+                            <span className="text-[#eae9e9] font-mono text-xs">
                               {selectedStockInfo.indicators?.ema1m26 ? `$${selectedStockInfo.indicators.ema1m26.toFixed(6)}` : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center py-2">
+                          <div className="flex justify-between items-center py-1">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">EMA 200</span>
-                            <span className="text-[#eae9e9] font-mono text-sm">
+                            <span className="text-[#eae9e9] font-mono text-xs">
                               {selectedStockInfo.indicators?.ema1m200 ? `$${selectedStockInfo.indicators.ema1m200.toFixed(6)}` : 'N/A'}
                             </span>
                           </div>
@@ -1558,26 +1558,26 @@ function App() {
                     </div>
 
                     {/* Right Column - MACD 5m & EMA 5m */}
-                    <div className="space-y-5">
-                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                    <div className="space-y-3">
+                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-3 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
                         <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-                        <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono">MACD 5M</h3>
-                        <div className="space-y-3">
-                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                        <h3 className="text-xs font-bold text-[#eae9e9] mb-2 uppercase tracking-[0.15em] font-mono">MACD 5M</h3>
+                        <div className="space-y-1.5">
+                          <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">Histogram</span>
-                            <span className={`font-mono text-sm font-semibold ${selectedStockInfo.indicators?.macd5m?.histogram >= 0 ? 'text-[#22c55e]' : 'text-[#f87171]'}`}>
+                            <span className={`font-mono text-xs font-semibold ${selectedStockInfo.indicators?.macd5m?.histogram >= 0 ? 'text-[#22c55e]' : 'text-[#f87171]'}`}>
                               {selectedStockInfo.indicators?.macd5m?.histogram ? selectedStockInfo.indicators.macd5m.histogram.toFixed(6) : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                          <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">MACD</span>
-                            <span className="text-[#eae9e9] font-mono text-sm">
+                            <span className="text-[#eae9e9] font-mono text-xs">
                               {selectedStockInfo.indicators?.macd5m?.macd ? selectedStockInfo.indicators.macd5m.macd.toFixed(6) : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center py-2">
+                          <div className="flex justify-between items-center py-1">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">Signal</span>
-                            <span className="text-[#eae9e9] font-mono text-sm">
+                            <span className="text-[#eae9e9] font-mono text-xs">
                               {selectedStockInfo.indicators?.macd5m?.signal ? selectedStockInfo.indicators.macd5m.signal.toFixed(6) : 'N/A'}
                             </span>
                           </div>
@@ -1585,31 +1585,31 @@ function App() {
                       </div>
 
                       {/* EMA 5m */}
-                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-3 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
                         <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-                        <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono">EMA 5M</h3>
-                        <div className="space-y-3">
-                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                        <h3 className="text-xs font-bold text-[#eae9e9] mb-2 uppercase tracking-[0.15em] font-mono">EMA 5M</h3>
+                        <div className="space-y-1.5">
+                          <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">EMA 12</span>
-                            <span className="text-[#eae9e9] font-mono text-sm">
+                            <span className="text-[#eae9e9] font-mono text-xs">
                               {selectedStockInfo.indicators?.ema5m12 ? `$${selectedStockInfo.indicators.ema5m12.toFixed(6)}` : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                          <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">EMA 20</span>
-                            <span className="text-[#eae9e9] font-mono text-sm">
+                            <span className="text-[#eae9e9] font-mono text-xs">
                               {selectedStockInfo.indicators?.ema5m20 ? `$${selectedStockInfo.indicators.ema5m20.toFixed(6)}` : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                          <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">EMA 26</span>
-                            <span className="text-[#eae9e9] font-mono text-sm">
+                            <span className="text-[#eae9e9] font-mono text-xs">
                               {selectedStockInfo.indicators?.ema5m26 ? `$${selectedStockInfo.indicators.ema5m26.toFixed(6)}` : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center py-2">
+                          <div className="flex justify-between items-center py-1">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">EMA 200</span>
-                            <span className="text-[#eae9e9] font-mono text-sm">
+                            <span className="text-[#eae9e9] font-mono text-xs">
                               {selectedStockInfo.indicators?.ema5m200 ? `$${selectedStockInfo.indicators.ema5m200.toFixed(6)}` : 'N/A'}
                             </span>
                           </div>
@@ -1617,17 +1617,17 @@ function App() {
                       </div>
 
                       {/* Volume Info */}
-                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                      <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-3 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
                         <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-                        <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono">VOLUMEN</h3>
-                        <div className="space-y-3">
-                          <div className="flex justify-between items-center py-2 border-b border-[#2a2820]/40">
+                        <h3 className="text-xs font-bold text-[#eae9e9] mb-2 uppercase tracking-[0.15em] font-mono">VOLUMEN</h3>
+                        <div className="space-y-1.5">
+                          <div className="flex justify-between items-center py-1 border-b border-[#2a2820]/40">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">Último</span>
-                            <span className="text-[#eae9e9] font-mono text-sm">
+                            <span className="text-[#eae9e9] font-mono text-xs">
                               {selectedStockInfo.lastCandle?.volume ? selectedStockInfo.lastCandle.volume.toLocaleString() : 'N/A'}
                             </span>
                           </div>
-                          <div className="flex justify-between items-center py-2">
+                          <div className="flex justify-between items-center py-1">
                             <span className="text-[#eae9e9]/60 text-xs font-light uppercase tracking-wider">Timestamp</span>
                             <span className="text-[#eae9e9]/60 font-mono text-xs">
                               {selectedStockInfo.timestamp ? new Date(selectedStockInfo.timestamp).toLocaleTimeString() : 'N/A'}
@@ -1639,7 +1639,7 @@ function App() {
 
                     {/* ChartsWatcher Alert Data Section - Always show if data exists */}
                     {selectedStockInfo.chartswatcherData && (selectedStockInfo.chartswatcherData.rawColumns || selectedStockInfo.chartswatcherData.alertType === 'websocket_alert') && (
-                      <div className="col-span-1 lg:col-span-3 space-y-5">
+                      <div className="col-span-1 lg:col-span-3 space-y-3">
                         {/* Parsed Data - Only show if we have parsed values */}
                         {(selectedStockInfo.chartswatcherData.open !== null || 
                           selectedStockInfo.chartswatcherData.high !== null || 
@@ -1648,75 +1648,75 @@ function App() {
                           selectedStockInfo.chartswatcherData.volume !== null ||
                           selectedStockInfo.chartswatcherData.change !== null ||
                           selectedStockInfo.chartswatcherData.changePercent !== null) && (
-                        <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                        <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-3 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
                           <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-                          <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono flex items-center">
-                            <svg className="w-4 h-4 mr-2 text-[#22c55e]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <h3 className="text-xs font-bold text-[#eae9e9] mb-2 uppercase tracking-[0.15em] font-mono flex items-center">
+                            <svg className="w-3 h-3 mr-1.5 text-[#22c55e]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                             </svg>
                             CHARTSWATCHER ALERT DATA (PARSED)
                           </h3>
-                          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                             {selectedStockInfo.chartswatcherData.open !== null && (
                               <div className="flex flex-col">
-                                <span className="text-[#eae9e9]/60 text-xs mb-1.5 font-light uppercase tracking-wider">Open</span>
-                                <span className="text-[#eae9e9] font-mono text-base font-semibold">
+                                <span className="text-[#eae9e9]/60 text-xs mb-1 font-light uppercase tracking-wider">Open</span>
+                                <span className="text-[#eae9e9] font-mono text-sm font-semibold">
                                   ${selectedStockInfo.chartswatcherData.open.toFixed(2)}
                                 </span>
                               </div>
                             )}
                             {selectedStockInfo.chartswatcherData.high !== null && (
                               <div className="flex flex-col">
-                                <span className="text-[#eae9e9]/60 text-xs mb-1.5 font-light uppercase tracking-wider">High</span>
-                                <span className="text-[#22c55e] font-mono text-base font-bold">
+                                <span className="text-[#eae9e9]/60 text-xs mb-1 font-light uppercase tracking-wider">High</span>
+                                <span className="text-[#22c55e] font-mono text-sm font-bold">
                                   ${selectedStockInfo.chartswatcherData.high.toFixed(2)}
                                 </span>
                               </div>
                             )}
                             {selectedStockInfo.chartswatcherData.low !== null && (
                               <div className="flex flex-col">
-                                <span className="text-[#eae9e9]/60 text-xs mb-1.5 font-light uppercase tracking-wider">Low</span>
-                                <span className="text-[#f87171] font-mono text-base font-bold">
+                                <span className="text-[#eae9e9]/60 text-xs mb-1 font-light uppercase tracking-wider">Low</span>
+                                <span className="text-[#f87171] font-mono text-sm font-bold">
                                   ${selectedStockInfo.chartswatcherData.low.toFixed(2)}
                                 </span>
                               </div>
                             )}
                             {selectedStockInfo.chartswatcherData.close !== null && (
                               <div className="flex flex-col">
-                                <span className="text-[#eae9e9]/60 text-xs mb-1.5 font-light uppercase tracking-wider">Close</span>
-                                <span className="text-[#eae9e9] font-mono text-base font-semibold">
+                                <span className="text-[#eae9e9]/60 text-xs mb-1 font-light uppercase tracking-wider">Close</span>
+                                <span className="text-[#eae9e9] font-mono text-sm font-semibold">
                                   ${selectedStockInfo.chartswatcherData.close.toFixed(2)}
                                 </span>
                               </div>
                             )}
                             {selectedStockInfo.chartswatcherData.volume !== null && (
                               <div className="flex flex-col">
-                                <span className="text-[#eae9e9]/60 text-xs mb-1.5 font-light uppercase tracking-wider">Volume</span>
-                                <span className="text-[#eae9e9] font-mono text-base font-semibold">
+                                <span className="text-[#eae9e9]/60 text-xs mb-1 font-light uppercase tracking-wider">Volume</span>
+                                <span className="text-[#eae9e9] font-mono text-sm font-semibold">
                                   {selectedStockInfo.chartswatcherData.volume.toLocaleString()}
                                 </span>
                               </div>
                             )}
                             {selectedStockInfo.chartswatcherData.change !== null && (
                               <div className="flex flex-col">
-                                <span className="text-[#eae9e9]/60 text-xs mb-1.5 font-light uppercase tracking-wider">Change</span>
-                                <span className={`font-mono text-base font-bold ${selectedStockInfo.chartswatcherData.change >= 0 ? 'text-[#22c55e]' : 'text-[#f87171]'}`}>
+                                <span className="text-[#eae9e9]/60 text-xs mb-1 font-light uppercase tracking-wider">Change</span>
+                                <span className={`font-mono text-sm font-bold ${selectedStockInfo.chartswatcherData.change >= 0 ? 'text-[#22c55e]' : 'text-[#f87171]'}`}>
                                   {selectedStockInfo.chartswatcherData.change >= 0 ? '+' : ''}${selectedStockInfo.chartswatcherData.change.toFixed(2)}
                                 </span>
                               </div>
                             )}
                             {selectedStockInfo.chartswatcherData.changePercent !== null && (
                               <div className="flex flex-col">
-                                <span className="text-[#eae9e9]/60 text-xs mb-1.5 font-light uppercase tracking-wider">Change %</span>
-                                <span className={`font-mono text-base font-bold ${selectedStockInfo.chartswatcherData.changePercent >= 0 ? 'text-[#22c55e]' : 'text-[#f87171]'}`}>
+                                <span className="text-[#eae9e9]/60 text-xs mb-1 font-light uppercase tracking-wider">Change %</span>
+                                <span className={`font-mono text-sm font-bold ${selectedStockInfo.chartswatcherData.changePercent >= 0 ? 'text-[#22c55e]' : 'text-[#f87171]'}`}>
                                   {selectedStockInfo.chartswatcherData.changePercent >= 0 ? '+' : ''}{selectedStockInfo.chartswatcherData.changePercent.toFixed(2)}%
                                 </span>
                               </div>
                             )}
                             {selectedStockInfo.chartswatcherData.alertType === 'websocket_alert' && (
                               <div className="flex flex-col">
-                                <span className="text-[#eae9e9]/60 text-xs mb-1.5 font-light uppercase tracking-wider">Alert Type</span>
-                                <span className="text-[#22c55e] font-mono text-sm font-semibold">
+                                <span className="text-[#eae9e9]/60 text-xs mb-1 font-light uppercase tracking-wider">Alert Type</span>
+                                <span className="text-[#22c55e] font-mono text-xs font-semibold">
                                   LIVE ALERT
                                 </span>
                               </div>
@@ -1727,19 +1727,19 @@ function App() {
 
                         {/* Raw Columns Received */}
                         {selectedStockInfo.chartswatcherData.rawColumns && selectedStockInfo.chartswatcherData.rawColumns.length > 0 && (
-                          <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-5 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
+                          <div className="bg-[#0f0e0a] border border-[#2a2820]/60 p-3 hover:border-[#2a2820]/80 transition-all duration-300 relative group">
                             <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-[#22c55e]/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-                            <h3 className="text-xs font-bold text-[#eae9e9] mb-4 uppercase tracking-[0.15em] font-mono flex items-center">
-                              <svg className="w-4 h-4 mr-2 text-[#eae9e9]/60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <h3 className="text-xs font-bold text-[#eae9e9] mb-2 uppercase tracking-[0.15em] font-mono flex items-center">
+                              <svg className="w-3 h-3 mr-1.5 text-[#eae9e9]/60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
                               </svg>
                               ALERT COLUMNS RECEIVED
                             </h3>
-                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
                               {selectedStockInfo.chartswatcherData.rawColumns.map((column: any, idx: number) => (
-                                <div key={idx} className="bg-[#14130e] border border-[#2a2820]/60 p-3 hover:border-[#2a2820]/80 transition-all duration-200">
-                                  <div className="text-[#eae9e9]/60 text-xs mb-1.5 font-mono font-light uppercase tracking-wider">{column.key}</div>
-                                  <div className="text-[#eae9e9] font-mono text-sm break-all font-semibold">
+                                <div key={idx} className="bg-[#14130e] border border-[#2a2820]/60 p-2 hover:border-[#2a2820]/80 transition-all duration-200">
+                                  <div className="text-[#eae9e9]/60 text-xs mb-1 font-mono font-light uppercase tracking-wider">{column.key}</div>
+                                  <div className="text-[#eae9e9] font-mono text-xs break-all font-semibold">
                                     {column.value !== null && column.value !== undefined ? String(column.value) : 'null'}
                                   </div>
                                 </div>

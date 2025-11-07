@@ -1,5 +1,7 @@
 import React from 'react';
 import { useAuth } from '../auth/AuthContext';
+import NotificationContainer from './NotificationContainer';
+import type { NotificationProps } from './Notification';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
@@ -42,6 +44,7 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
   const [isTogglingBuys, setIsTogglingBuys] = React.useState(false);
   const [buyingSymbols, setBuyingSymbols] = React.useState<Set<string>>(new Set());
   const [buyStatuses, setBuyStatuses] = React.useState<Record<string, 'success' | 'error' | null>>({});
+  const [notifications, setNotifications] = React.useState<NotificationProps[]>([]);
 
   // Build unified list whenever raw changes
   React.useEffect(() => {
@@ -508,6 +511,15 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
     }
   };
 
+  const addNotification = (message: string, type: 'success' | 'error' | 'warning' | 'info' = 'info', duration?: number) => {
+    const id = Date.now().toString() + Math.random().toString(36).substr(2, 9);
+    setNotifications(prev => [...prev, { id, message, type, duration, onClose: () => {} }]);
+  };
+
+  const removeNotification = (id: string) => {
+    setNotifications(prev => prev.filter(n => n.id !== id));
+  };
+
   const handleBuyClick = async (symbol: string | null | undefined) => {
     if (!symbol) return;
     
@@ -524,10 +536,29 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
         body: JSON.stringify({ symbol: cleanSymbol })
       });
       
+      if (!resp.ok) {
+        // HTTP error (500, etc) - try to get error message
+        const errorData = await resp.json().catch(() => ({ error: `HTTP ${resp.status}: ${resp.statusText}` }));
+        const errorMsg = errorData.error || `HTTP ${resp.status}`;
+        addNotification(`Failed to buy ${cleanSymbol}: ${errorMsg}`, 'error');
+        setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'error' }));
+        setTimeout(() => {
+          setBuyStatuses(prev => {
+            const next = { ...prev };
+            delete next[cleanSymbol];
+            return next;
+          });
+        }, 3000);
+        return;
+      }
+      
       const data = await resp.json().catch(() => ({}));
       
-      if (resp.ok && data?.success) {
+      if (data?.success) {
+        const quantity = data.data?.quantity || 'N/A';
+        const limitPrice = data.data?.limitPrice ? `$${parseFloat(data.data.limitPrice).toFixed(2)}` : 'N/A';
         console.log(`✅ Buy signal sent for ${cleanSymbol}:`, data.data?.notifyStatus);
+        addNotification(`Buy order sent successfully for ${quantity} ${cleanSymbol} at ${limitPrice}`, 'success');
         setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'success' }));
         // Clear status after 3 seconds
         setTimeout(() => {
@@ -538,7 +569,9 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
           });
         }, 3000);
       } else {
-        console.error(`❌ Failed to send buy signal for ${cleanSymbol}:`, data.error || 'Unknown error');
+        const errorMsg = data.error || data.data?.notifyStatus || 'Unknown error';
+        console.error(`❌ Failed to send buy signal for ${cleanSymbol}:`, errorMsg);
+        addNotification(`Failed to buy ${cleanSymbol}: ${errorMsg}`, 'error');
         setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'error' }));
         setTimeout(() => {
           setBuyStatuses(prev => {
@@ -548,8 +581,10 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
           });
         }, 3000);
       }
-    } catch (error) {
+    } catch (error: any) {
+      const errorMsg = error.message || 'Unknown error';
       console.error(`❌ Error sending buy signal for ${cleanSymbol}:`, error);
+      addNotification(`Error buying ${cleanSymbol}: ${errorMsg}`, 'error');
       setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'error' }));
       setTimeout(() => {
         setBuyStatuses(prev => {
@@ -583,6 +618,9 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
 
   return (
     <div className="h-full flex flex-col bg-[#14130e]">
+      {/* Notification Container */}
+      <NotificationContainer notifications={notifications} onRemove={removeNotification} />
+      
       <div className="p-4 border-b border-[#2a2820]/50 bg-gradient-to-r from-[#14130e] to-[#0f0e0a] flex items-center justify-between backdrop-blur-sm">
         <div>
           <h2 className="text-sm font-bold text-[#eae9e9] tracking-wider uppercase mb-1.5">Listas FLOAT (RAW)</h2>
