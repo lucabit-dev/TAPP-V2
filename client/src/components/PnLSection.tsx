@@ -3,6 +3,7 @@ import { Virtuoso } from 'react-virtuoso';
 import { useAuth } from '../auth/AuthContext';
 import NotificationContainer from './NotificationContainer';
 import ConfirmationModal from './ConfirmationModal';
+import ProgressModal from './ProgressModal';
 import type { NotificationProps } from './Notification';
 
 interface Position {
@@ -53,6 +54,13 @@ const PnLSection: React.FC = () => {
     cancelText?: string;
     type?: 'danger' | 'warning' | 'info';
     onConfirm: () => void;
+  } | null>(null);
+  const [progressModal, setProgressModal] = React.useState<{
+    isOpen: boolean;
+    title: string;
+    steps: Array<{ id: string; label: string; status: 'pending' | 'active' | 'completed' | 'error' }>;
+    message?: string;
+    type?: 'danger' | 'warning' | 'info' | 'success';
   } | null>(null);
   const wsRef = React.useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = React.useRef(0);
@@ -370,7 +378,67 @@ const PnLSection: React.FC = () => {
         setSellingAll(true);
         setSellAllStatus(null);
         
+        // Initialize progress steps
+        type Step = { id: string; label: string; status: 'pending' | 'active' | 'completed' | 'error' };
+        const initialSteps: Step[] = [
+          { id: 'analyze', label: 'Analyzing orders websocket', status: 'pending' },
+          { id: 'delete', label: 'Deleting active sell orders', status: 'pending' },
+          { id: 'execute', label: 'Executing sell all', status: 'pending' },
+          { id: 'complete', label: 'Sell all completed', status: 'pending' }
+        ];
+        
+        // Helper function to update progress modal
+        const updateProgress = (updater: (steps: Step[]) => Step[], message?: string, type?: 'danger' | 'success') => {
+          setProgressModal(prev => {
+            if (!prev) return null;
+            const updatedSteps = updater([...prev.steps]);
+            return {
+              ...prev,
+              steps: updatedSteps,
+              message: message !== undefined ? message : prev.message,
+              type: type !== undefined ? type : prev.type
+            };
+          });
+        };
+        
+        setProgressModal({
+          isOpen: true,
+          title: 'SELL ALL IN PROGRESS',
+          steps: initialSteps,
+          type: 'danger'
+        });
+        
         try {
+          // Update step: Analyzing orders
+          await new Promise(resolve => setTimeout(resolve, 100));
+          updateProgress((steps) => {
+            const updated = [...steps];
+            updated[0] = { ...updated[0], status: 'active' };
+            return updated;
+          }, 'Analyzing orders websocket for active sell orders...');
+          
+          // Small delay to show analyzing step
+          await new Promise(resolve => setTimeout(resolve, 500));
+          
+          // Update step: Analyzing completed, Deleting started
+          updateProgress((steps) => {
+            const updated = [...steps];
+            updated[0] = { ...updated[0], status: 'completed' };
+            updated[1] = { ...updated[1], status: 'active' };
+            return updated;
+          }, 'Finding and deleting active sell orders...');
+          
+          // Small delay to show deleting step
+          await new Promise(resolve => setTimeout(resolve, 800));
+          
+          // Update step: Deleting completed, Executing started
+          updateProgress((steps) => {
+            const updated = [...steps];
+            updated[1] = { ...updated[1], status: 'completed' };
+            updated[2] = { ...updated[2], status: 'active' };
+            return updated;
+          }, 'Sending sell all command...');
+          
           // According to API documentation: POST /sell_all with no body
           // Returns 200 with no content on success
           // https://inbitme.gitbook.io/sections-bot/xKy06Pb8j01LsqEnmSik/rest-api/ordenes
@@ -385,42 +453,97 @@ const PnLSection: React.FC = () => {
               error: `HTTP ${response.status}: ${response.statusText}` 
             }));
             const errorMsg = errorData.error || `HTTP ${response.status}`;
+            
+            // Update steps with error
+            updateProgress((steps) => {
+              const updated = [...steps];
+              updated[2] = { ...updated[2], status: 'error' };
+              updated[3] = { ...updated[3], status: 'error' };
+              return updated;
+            }, `Error: ${errorMsg}`, 'danger');
+            
             setSellAllStatus({
               success: false,
               message: errorMsg
             });
             addNotification(`Sell All failed: ${errorMsg}`, 'error');
+            
+            // Close progress modal after 5 seconds on error
+            setTimeout(() => {
+              setProgressModal(null);
+              setSellingAll(false);
+            }, 5000);
             return;
           }
           
           const data = await response.json();
           
           if (data.success) {
+            // Update steps: All completed
             const successMsg = data.data?.message || 'Sell All executed successfully - all orders cancelled and positions sold';
+            updateProgress((steps) => {
+              const updated = [...steps];
+              updated[2] = { ...updated[2], status: 'completed' };
+              updated[3] = { ...updated[3], status: 'completed' };
+              return updated;
+            }, successMsg, 'success');
+            
             setSellAllStatus({
               success: true,
               message: successMsg
             });
             addNotification(successMsg, 'success', 8000);
+            
+            // Close progress modal after 3 seconds on success
+            setTimeout(() => {
+              setProgressModal(null);
+              setSellingAll(false);
+            }, 3000);
           } else {
             const errorMsg = data.error || data.data?.message || 'Failed to execute Sell All';
+            
+            // Update steps with error
+            updateProgress((steps) => {
+              const updated = [...steps];
+              updated[2] = { ...updated[2], status: 'error' };
+              updated[3] = { ...updated[3], status: 'error' };
+              return updated;
+            }, `Error: ${errorMsg}`, 'danger');
+            
             setSellAllStatus({
               success: false,
               message: errorMsg
             });
             addNotification(`Sell All failed: ${errorMsg}`, 'error');
+            
+            // Close progress modal after 5 seconds on error
+            setTimeout(() => {
+              setProgressModal(null);
+              setSellingAll(false);
+            }, 5000);
           }
         } catch (err: any) {
           const errorMsg = err.message || 'Error executing Sell All';
+          
+          // Update steps with error
+          updateProgress((steps) => {
+            const updated = [...steps];
+            updated[2] = { ...updated[2], status: 'error' };
+            updated[3] = { ...updated[3], status: 'error' };
+            return updated;
+          }, `Error: ${errorMsg}`, 'danger');
+          
           setSellAllStatus({
             success: false,
             message: errorMsg
           });
           addNotification(`Sell All error: ${errorMsg}`, 'error');
-        } finally {
-          setSellingAll(false);
-          // Clear status message after 8 seconds (longer for important message)
-          setTimeout(() => setSellAllStatus(null), 8000);
+          
+          // Close progress modal after 5 seconds on error
+          setTimeout(() => {
+            setProgressModal(null);
+            setSellingAll(false);
+          }, 5000);
         }
       }
     });
@@ -442,6 +565,21 @@ const PnLSection: React.FC = () => {
           type={confirmModal.type}
           onConfirm={confirmModal.onConfirm}
           onCancel={() => setConfirmModal(null)}
+        />
+      )}
+      
+      {/* Progress Modal */}
+      {progressModal && (
+        <ProgressModal
+          isOpen={progressModal.isOpen}
+          title={progressModal.title}
+          steps={progressModal.steps}
+          message={progressModal.message}
+          type={progressModal.type}
+          onClose={() => {
+            setProgressModal(null);
+            setSellingAll(false);
+          }}
         />
       )}
       {/* Header */}

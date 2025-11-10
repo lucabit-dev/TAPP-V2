@@ -3,6 +3,8 @@ import { useAuth } from './auth/AuthContext';
 import { Virtuoso } from 'react-virtuoso';
 import { formatTimestampRelative } from './utils/timeFormat';
 import './App.css';
+
+// Lazy load all heavy components with code splitting
 const TradingDashboard = lazy(() => import('./components/TradingDashboard'));
 const FloatListsSection = lazy(() => import('./components/FloatListsSection'));
 const FloatConfigPanel = lazy(() => import('./components/FloatConfigPanel'));
@@ -10,6 +12,18 @@ const BuyListSection = lazy(() => import('./components/BuyListSection'));
 const FloatRawListsSection = lazy(() => import('./components/FloatRawListsSection'));
 const PnLSection = lazy(() => import('./components/PnLSection'));
 const OrdersSection = lazy(() => import('./components/OrdersSection'));
+const Login = lazy(() => import('./components/Login'));
+
+// Loading fallback component - Minimalistic design
+const LoadingFallback = () => (
+  <div className="h-screen w-screen flex items-center justify-center text-[#eae9e9] bg-[#14130e]">
+    <div className="flex flex-col items-center space-y-4">
+      {/* Minimal spinner */}
+      <div className="w-8 h-8 border-2 border-[#2a2820] border-t-[#808080] rounded-full animate-spin"></div>
+      <p className="text-xs text-[#808080] uppercase tracking-wider">Loading</p>
+    </div>
+  </div>
+);
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
@@ -91,7 +105,7 @@ interface ChartsWatcherStatus {
 }
 
 function App() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, logout } = useAuth();
   const [allAlerts, setAllAlerts] = useState<Alert[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -539,9 +553,8 @@ function App() {
   }, [selectedTab, allAlerts, validAlerts, filteredAlerts]);
 
   if (!isAuthenticated) {
-    const Login = lazy(() => import('./components/Login'));
     return (
-      <Suspense fallback={<div className="h-screen w-screen flex items-center justify-center text-[#eae9e9] bg-[#14130e]">Loading...</div>}>
+      <Suspense fallback={<LoadingFallback />}>
         <Login />
       </Suspense>
     );
@@ -560,6 +573,19 @@ function App() {
               
               {/* Navigation Sections - Right */}
               <div className="flex items-center space-x-6">
+                {/* Logout button */}
+                <button
+                  onClick={logout}
+                  className="flex items-center space-x-2 px-3 py-1.5 text-xs font-medium text-[#969696] 
+                           hover:text-[#f87171] transition-colors duration-200 border border-[#2a2820] 
+                           rounded-lg hover:border-[#f87171]/30 hover:bg-[#f87171]/5"
+                  title="Logout"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                  </svg>
+                  <span>Logout</span>
+                </button>
                 {/* Alerts group - Collapsible */}
                 <div className="flex items-center space-x-1">
                   <button
@@ -995,40 +1021,22 @@ function App() {
 
       {/* Main Content */}
       <div className="flex-1 overflow-hidden">
-        {selectedTab === 'dashboard' ? (
-          <Suspense 
-            fallback={
-              <div className="flex items-center justify-center h-full text-[#969696]">
-                <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-[#4ec9b0] mr-2"></div>
-                Loading dashboard...
-              </div>
-            }
-          >
+        <Suspense fallback={
+          <div className="flex items-center justify-center h-full text-[#808080] bg-[#14130e]">
+            <div className="flex flex-col items-center space-y-3">
+              <div className="w-6 h-6 border-2 border-[#2a2820] border-t-[#808080] rounded-full animate-spin"></div>
+              <p className="text-xs uppercase tracking-wider">Loading</p>
+            </div>
+          </div>
+        }>
+          {selectedTab === 'dashboard' && (
             <TradingDashboard 
               alerts={allAlerts} 
               loading={loading}
             />
-          </Suspense>
-        ) : selectedTab === 'config-float' ? (
-          <Suspense 
-            fallback={
-              <div className="flex items-center justify-center h-full text-[#969696]">
-                <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-[#4ec9b0] mr-2"></div>
-                Loading config...
-              </div>
-            }
-          >
-            <FloatConfigPanel />
-          </Suspense>
-        ) : selectedTab === 'listas-float-raw' ? (
-          <Suspense 
-            fallback={
-              <div className="flex items-center justify-center h-full text-[#969696]">
-                <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-[#4ec9b0] mr-2"></div>
-                Loading raw lists...
-              </div>
-            }
-          >
+          )}
+          {selectedTab === 'config-float' && <FloatConfigPanel />}
+          {selectedTab === 'listas-float-raw' && (
             <FloatRawListsSection onSymbolClick={(symbol) => {
               if (!symbol) return;
               const sym = symbol.toUpperCase();
@@ -1037,42 +1045,12 @@ function App() {
               setShowStockInfoModal(true);
               fetchStockInfo(sym);
             }} />
-          </Suspense>
-        ) : selectedTab === 'buy-list' ? (
-          <Suspense 
-            fallback={
-              <div className="flex items-center justify-center h-full text-[#969696]">
-                <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-[#4ec9b0] mr-2"></div>
-                Loading buy list...
-              </div>
-            }
-          >
-            <BuyListSection />
-          </Suspense>
-        ) : selectedTab === 'pnl' ? (
-          <Suspense 
-            fallback={
-              <div className="flex items-center justify-center h-full text-[#969696]">
-                <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-[#4ec9b0] mr-2"></div>
-                Loading P&L section...
-              </div>
-            }
-          >
-            <PnLSection />
-          </Suspense>
-        ) : selectedTab === 'orders' ? (
-          <Suspense 
-            fallback={
-              <div className="flex items-center justify-center h-full text-[#969696]">
-                <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-[#4ec9b0] mr-2"></div>
-                Loading Orders...
-              </div>
-            }
-          >
-            <OrdersSection />
-          </Suspense>
-        ) : (
-          <div className="h-full flex">
+          )}
+          {selectedTab === 'buy-list' && <BuyListSection />}
+          {selectedTab === 'pnl' && <PnLSection />}
+          {selectedTab === 'orders' && <OrdersSection />}
+          {!['dashboard', 'config-float', 'listas-float-raw', 'buy-list', 'pnl', 'orders'].includes(selectedTab) && (
+            <div className="h-full flex">
             {/* Main Alerts Content */}
             <div className="flex-1 flex flex-col">
               {/* Clean Table Header */}
@@ -1754,7 +1732,8 @@ function App() {
               </div>
             </div>
           </div>
-        )}
+          )}
+        </Suspense>
       </div>
     </div>
   );

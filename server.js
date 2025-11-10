@@ -2516,9 +2516,19 @@ const pendingStopLossQueue = new Map(); // Map<symbol, { stockPrice, quantity, c
 // Cache of current positions by symbol (updated from WebSocket)
 const positionsCache = new Map(); // Map<symbol, { PositionID, Symbol, Quantity, ... }>
 
+// Cache of current orders by OrderID (updated from WebSocket)
+const ordersCache = new Map(); // Map<OrderID, { OrderID, Symbol, Status, Legs, ... }>
+
+// Track last time we received an order update from websocket
+let lastOrderUpdateTime = null;
+
 // Maintain WebSocket connection to positions to keep cache updated
 let positionsWs = null;
 let positionsWsReconnectTimer = null;
+
+// Maintain WebSocket connection to orders to keep cache updated
+let ordersWs = null;
+let ordersWsReconnectTimer = null;
 
 function connectPositionsWebSocket() {
   const apiKey = process.env.PNL_API_KEY;
@@ -2612,11 +2622,113 @@ function connectPositionsWebSocket() {
   }
 }
 
+// Connect to orders WebSocket to cache orders
+function connectOrdersWebSocket() {
+  const apiKey = process.env.PNL_API_KEY;
+  const wsBaseUrl = process.env.PNL_WS_BASE_URL || 'wss://sections-bot.inbitme.com';
+  
+  if (!apiKey) {
+    console.warn('⚠️ PNL_API_KEY not configured, cannot connect to orders WebSocket');
+    return;
+  }
+  
+  // Close existing connection if any
+  if (ordersWs) {
+    try {
+      ordersWs.close();
+    } catch (e) {}
+    ordersWs = null;
+  }
+  
+  const wsUrl = `${wsBaseUrl}/ws/orders?api_key=${encodeURIComponent(apiKey)}`;
+  console.log('🔌 Connecting to orders WebSocket for orders cache...');
+  
+  try {
+    ordersWs = new WebSocket(wsUrl);
+    
+    ordersWs.on('open', () => {
+      console.log('✅ Orders WebSocket connected for orders cache');
+      // Clear reconnect timer on successful connection
+      if (ordersWsReconnectTimer) {
+        clearTimeout(ordersWsReconnectTimer);
+        ordersWsReconnectTimer = null;
+      }
+    });
+    
+    ordersWs.on('message', (data) => {
+      try {
+        const messageStr = Buffer.isBuffer(data) ? data.toString('utf8') : data.toString();
+        const dataObj = JSON.parse(messageStr);
+        
+        // Skip heartbeat messages and stream status
+        if (dataObj.Heartbeat || dataObj.StreamStatus) {
+          return;
+        }
+        
+        // Handle order updates
+        if (dataObj.OrderID) {
+          const order = dataObj;
+          const orderId = order.OrderID;
+          
+          // Update last order update time to track websocket activity
+          lastOrderUpdateTime = Date.now();
+          
+          // Update cache with order
+          ordersCache.set(orderId, {
+            ...order,
+            lastUpdated: Date.now()
+          });
+          
+          // Log order updates for debugging (only for active orders)
+          if (order.Status === 'ACK' || order.Status === 'DON' || order.Status === 'REC') {
+            const symbol = order.Legs && order.Legs.length > 0 ? order.Legs[0].Symbol : 'UNKNOWN';
+            console.log(`📋 Order cache updated: ${orderId} (${symbol}, Status: ${order.Status})`);
+          }
+          
+          // Remove order from cache if it's cancelled or filled (status indicates completion)
+          // Status values like CAN, FIL, etc. indicate the order is no longer active
+          if (order.Status === 'CAN' || order.Status === 'FIL' || order.Status === 'EXP') {
+            ordersCache.delete(orderId);
+            console.log(`📋 Order removed from cache: ${orderId} (Status: ${order.Status})`);
+          }
+        }
+      } catch (err) {
+        console.error('⚠️ Error parsing orders WebSocket message:', err.message);
+      }
+    });
+    
+    ordersWs.on('error', (error) => {
+      console.error('❌ Orders WebSocket error:', error.message);
+    });
+    
+    ordersWs.on('close', (code, reason) => {
+      console.log(`🔌 Orders WebSocket closed (${code}): ${reason || 'No reason'}`);
+      ordersWs = null;
+      
+      // Reconnect after delay (exponential backoff, max 30 seconds)
+      const delay = Math.min(30000, 1000 * Math.pow(2, Math.min(5, 0)));
+      ordersWsReconnectTimer = setTimeout(() => {
+        console.log('🔄 Reconnecting orders WebSocket...');
+        connectOrdersWebSocket();
+      }, delay);
+    });
+    
+  } catch (err) {
+    console.error('❌ Failed to create orders WebSocket:', err.message);
+    ordersWs = null;
+    // Retry after delay
+    ordersWsReconnectTimer = setTimeout(() => {
+      connectOrdersWebSocket();
+    }, 5000);
+  }
+}
+
 // Initialize positions WebSocket connection
 if (process.env.PNL_API_KEY) {
   connectPositionsWebSocket();
+  connectOrdersWebSocket();
 } else {
-  console.warn('⚠️ PNL_API_KEY not set, positions monitoring disabled');
+  console.warn('⚠️ PNL_API_KEY not set, positions and orders monitoring disabled');
 }
 
 // Check if a position exists for a symbol using the cache
@@ -3405,24 +3517,121 @@ async function deleteOrder(orderId) {
   }
 }
 
+// Helper function to get active SELL orders for a symbol from orders websocket
+// Analyzes the orders websocket stream to find active sell orders with status ACK or DON
+async function getActiveSellOrdersFromWebSocket(symbol) {
+  const normalizedSymbol = symbol.toUpperCase();
+  const activeSellOrders = [];
+  
+  // Check if orders websocket is connected
+  const isWebSocketConnected = ordersWs && ordersWs.readyState === WebSocket.OPEN;
+  
+  if (!isWebSocketConnected) {
+    console.warn(`⚠️ Orders websocket not connected - cannot analyze orders for ${normalizedSymbol}`);
+    // Try to reconnect if not connected
+    if (process.env.PNL_API_KEY && !ordersWs) {
+      console.log(`🔄 Attempting to connect orders websocket...`);
+      connectOrdersWebSocket();
+      // Wait a moment for connection to establish
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    return activeSellOrders;
+  }
+  
+  // Wait a brief moment to allow any pending websocket messages to be processed
+  // This ensures we have the latest order data from the websocket stream
+  await new Promise(resolve => setTimeout(resolve, 100));
+  
+  // Check if websocket is receiving data (has received at least one update)
+  if (lastOrderUpdateTime === null) {
+    console.warn(`⚠️ Orders websocket connected but no data received yet for ${normalizedSymbol} - waiting for initial data...`);
+    // Wait a bit longer for initial data
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  
+  // Check how fresh the data is (if last update was more than 5 minutes ago, it might be stale)
+  if (lastOrderUpdateTime !== null) {
+    const dataAge = Date.now() - lastOrderUpdateTime;
+    if (dataAge > 5 * 60 * 1000) {
+      console.warn(`⚠️ Orders websocket data might be stale (last update ${Math.round(dataAge / 1000)}s ago) for ${normalizedSymbol}`);
+    } else {
+      console.log(`✅ Orders websocket data is fresh (last update ${Math.round(dataAge / 1000)}s ago)`);
+    }
+  }
+  
+  // Analyze orders from websocket cache (which contains real-time data from websocket stream)
+  console.log(`📡 Analyzing orders websocket stream for ${normalizedSymbol}... (${ordersCache.size} orders received from websocket)`);
+  
+  for (const [orderId, order] of ordersCache.entries()) {
+    // Check if order has legs with the symbol we're looking for
+    if (order.Legs && Array.isArray(order.Legs)) {
+      for (const leg of order.Legs) {
+        const legSymbol = (leg.Symbol || '').toUpperCase();
+        const buyOrSell = leg.BuyOrSell || '';
+        
+        // Check if this is a SELL order for the symbol we're looking for
+        if (legSymbol === normalizedSymbol && buyOrSell.toUpperCase() === 'SELL') {
+          // Check if order status is ACK or DON (active sell orders)
+          if (order.Status === 'ACK' || order.Status === 'DON') {
+            activeSellOrders.push({
+              orderId: orderId,
+              order: order,
+              symbol: legSymbol,
+              status: order.Status,
+              quantity: leg.QuantityRemaining || leg.QuantityOrdered || '0'
+            });
+            console.log(`🔍 Found active SELL order from websocket stream: ${orderId} (${legSymbol}, Status: ${order.Status})`);
+            break; // Found a matching leg, no need to check other legs
+          }
+        }
+      }
+    }
+  }
+  
+  return activeSellOrders;
+}
+
 // Helper function to delete all SELL orders for a symbol
-// Uses WebSocket orders data if available, or tracks orders from buy entries
+// Analyzes orders websocket to check for active sell orders with status ACK or DON, then deletes them
 async function deleteAllSellOrdersForSymbol(symbol) {
   try {
-    console.log(`🗑️ Deleting all SELL orders for ${symbol}...`);
+    const normalizedSymbol = symbol.toUpperCase();
+    console.log(`🗑️ Deleting all SELL orders for ${normalizedSymbol}...`);
     
-    // Track orders from buy entries - check if we have stop-loss order IDs stored
     const ordersToDelete = [];
     
-    // Check buy list for stop-loss order IDs for this symbol
+    // First, analyze orders websocket stream to get active sell orders with status ACK or DON
+    console.log(`📡 Analyzing orders websocket stream for active SELL orders for ${normalizedSymbol}...`);
+    const activeSellOrders = await getActiveSellOrdersFromWebSocket(normalizedSymbol);
+    
+    // Add order IDs from websocket analysis
+    for (const sellOrder of activeSellOrders) {
+      ordersToDelete.push(sellOrder.orderId);
+    }
+    
+    // Also check buy list for stop-loss order IDs for this symbol (fallback)
     for (const buyEntry of buyList) {
-      if (buyEntry.ticker === symbol && buyEntry.stopLoss?.orderId) {
-        ordersToDelete.push(buyEntry.stopLoss.orderId);
+      if (buyEntry.ticker === normalizedSymbol && buyEntry.stopLoss?.orderId) {
+        const orderId = buyEntry.stopLoss.orderId;
+        // Only add if not already in the list
+        if (!ordersToDelete.includes(orderId)) {
+          ordersToDelete.push(orderId);
+          console.log(`🔍 Found stop-loss order from buy list: ${orderId} (${normalizedSymbol})`);
+        }
       }
     }
     
-    // Also check if we have orders from WebSocket (if available)
-    // For now, we'll rely on stored order IDs from buy entries
+    if (ordersToDelete.length === 0) {
+      console.log(`✅ No active SELL orders found for ${normalizedSymbol} (checked orders websocket)`);
+      return {
+        success: true,
+        deleted: 0,
+        failed: 0,
+        results: []
+      };
+    }
+    
+    console.log(`🗑️ Deleting ${ordersToDelete.length} SELL order(s) for ${normalizedSymbol} (from orders websocket analysis)...`);
     
     const deletionResults = [];
     for (const orderId of ordersToDelete) {
@@ -3438,7 +3647,7 @@ async function deleteAllSellOrdersForSymbol(symbol) {
     const successful = deletionResults.filter(r => r.success).length;
     const failed = deletionResults.filter(r => !r.success).length;
     
-    console.log(`✅ Deleted ${successful} SELL order(s) for ${symbol}${failed > 0 ? `, ${failed} failed` : ''}`);
+    console.log(`✅ Deleted ${successful} SELL order(s) for ${normalizedSymbol}${failed > 0 ? `, ${failed} failed` : ''}`);
     
     return {
       success: successful > 0 || ordersToDelete.length === 0,
@@ -3636,25 +3845,78 @@ app.post('/api/sell_all', requireDbReady, requireAuth, async (req, res) => {
     console.log(`💸 Sell All: Executing panic sell (cancels orders & sells all positions)`);
     
     // Delete all existing SELL orders for all symbols before executing sell_all
-    // Collect all unique symbols from buy list that have stop-loss orders
+    // Analyze orders websocket to find all symbols with active SELL orders (ACK or DON status)
+    // This is the same logic as manual sell - analyze the orders websocket stream
     const symbolsWithSellOrders = new Set();
-    for (const buyEntry of buyList) {
-      if (buyEntry.stopLoss?.orderId) {
-        symbolsWithSellOrders.add(buyEntry.ticker);
+    
+    // Check if orders websocket is connected and has data
+    const isWebSocketConnected = ordersWs && ordersWs.readyState === WebSocket.OPEN;
+    
+    if (isWebSocketConnected && lastOrderUpdateTime !== null) {
+      // Wait a brief moment to allow any pending websocket messages to be processed
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      // Analyze orders from websocket cache to find all symbols with active SELL orders
+      console.log(`📡 Analyzing orders websocket stream for all active SELL orders... (${ordersCache.size} orders in cache)`);
+      
+      for (const [orderId, order] of ordersCache.entries()) {
+        // Check if order has legs with SELL orders
+        if (order.Legs && Array.isArray(order.Legs)) {
+          for (const leg of order.Legs) {
+            const legSymbol = (leg.Symbol || '').toUpperCase();
+            const buyOrSell = leg.BuyOrSell || '';
+            
+            // Check if this is a SELL order with ACK or DON status (active sell orders)
+            if (legSymbol && buyOrSell.toUpperCase() === 'SELL') {
+              if (order.Status === 'ACK' || order.Status === 'DON') {
+                symbolsWithSellOrders.add(legSymbol);
+                console.log(`🔍 Found active SELL order for ${legSymbol}: ${orderId} (Status: ${order.Status})`);
+              }
+            }
+          }
+        }
+      }
+      
+      console.log(`📊 Found ${symbolsWithSellOrders.size} symbol(s) with active SELL orders:`, Array.from(symbolsWithSellOrders));
+    } else {
+      console.warn(`⚠️ Orders websocket not connected or no data - will only check buyList for stop-loss orders`);
+      
+      // Fallback: collect symbols from buy list that have stop-loss orders
+      for (const buyEntry of buyList) {
+        if (buyEntry.stopLoss?.orderId) {
+          symbolsWithSellOrders.add(buyEntry.ticker);
+        }
       }
     }
     
-    console.log(`🗑️ Deleting existing SELL orders for ${symbolsWithSellOrders.size} symbol(s) before sell_all...`);
-    const deletePromises = Array.from(symbolsWithSellOrders).map(symbol => deleteAllSellOrdersForSymbol(symbol));
-    const deleteResults = await Promise.all(deletePromises);
-    
-    const totalDeleted = deleteResults.reduce((sum, r) => sum + r.deleted, 0);
-    const totalFailed = deleteResults.reduce((sum, r) => sum + r.failed, 0);
-    
-    if (totalDeleted > 0) {
-      console.log(`✅ Deleted ${totalDeleted} existing SELL order(s) before sell_all${totalFailed > 0 ? `, ${totalFailed} failed` : ''}`);
-      // Small delay after deletion to ensure orders are fully cancelled
-      await new Promise(resolve => setTimeout(resolve, 300));
+    // Delete all SELL orders for each symbol found
+    if (symbolsWithSellOrders.size > 0) {
+      console.log(`🗑️ Deleting existing SELL orders for ${symbolsWithSellOrders.size} symbol(s) before sell_all...`);
+      
+      // Delete orders sequentially to avoid overwhelming the API
+      const deleteResults = [];
+      for (const symbol of symbolsWithSellOrders) {
+        const result = await deleteAllSellOrdersForSymbol(symbol);
+        deleteResults.push(result);
+        
+        // Small delay between symbols to avoid rate limiting
+        if (symbolsWithSellOrders.size > 1) {
+          await new Promise(resolve => setTimeout(resolve, 150));
+        }
+      }
+      
+      const totalDeleted = deleteResults.reduce((sum, r) => sum + r.deleted, 0);
+      const totalFailed = deleteResults.reduce((sum, r) => sum + r.failed, 0);
+      
+      if (totalDeleted > 0) {
+        console.log(`✅ Deleted ${totalDeleted} existing SELL order(s) before sell_all${totalFailed > 0 ? `, ${totalFailed} failed` : ''}`);
+        // Small delay after deletion to ensure orders are fully cancelled
+        await new Promise(resolve => setTimeout(resolve, 300));
+      } else {
+        console.log(`ℹ️ No SELL orders found to delete (or already deleted)`);
+      }
+    } else {
+      console.log(`ℹ️ No symbols with active SELL orders found - proceeding with sell_all`);
     }
     
     // According to API documentation: POST /sell_all with no body

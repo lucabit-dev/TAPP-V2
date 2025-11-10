@@ -211,28 +211,119 @@ const OrdersSection: React.FC = () => {
     try { return new Date(iso).toLocaleTimeString(); } catch { return iso; }
   };
 
-  // Check if order can be cancelled (status is "received" and not filled)
+  // Check if order can be cancelled
+  // Show cancel button for orders with remaining quantity that are not in terminal states
+  // Specifically allow: Queued, DON, ACK, REC, and any active status with remaining quantity
   const canCancelOrder = (order: Order): boolean => {
     const leg = order.Legs && order.Legs.length > 0 ? order.Legs[0] : undefined;
-    if (!leg) return false;
-    
-    // Check if status indicates "received" (not filled)
-    const statusUpper = order.Status?.toUpperCase() || '';
-    const statusDescUpper = order.StatusDescription?.toUpperCase() || '';
-    
-    // Check if order is received (common statuses: REC, RECEIVED, QUEUED, PENDING, etc.)
-    const isReceived = statusUpper.includes('REC') || 
-                       statusDescUpper.includes('RECEIVED') || 
-                       statusDescUpper.includes('QUEUED') ||
-                       statusDescUpper.includes('PENDING') ||
-                       statusDescUpper.includes('OPEN');
+    if (!leg) {
+      console.log('❌ Order has no leg:', order.OrderID);
+      return false;
+    }
     
     // Check if order hasn't been filled (QuantityRemaining > 0)
     const qtyRemaining = typeof leg.QuantityRemaining === 'number' 
       ? leg.QuantityRemaining 
       : parseFloat(String(leg.QuantityRemaining || '0'));
     
-    return isReceived && qtyRemaining > 0;
+    // If order is fully filled, it can't be cancelled
+    if (qtyRemaining <= 0) {
+      console.log('❌ Order fully filled:', order.OrderID, 'qtyRemaining:', qtyRemaining);
+      return false;
+    }
+    
+    // Check status fields (case-insensitive)
+    const status = (order.Status || '').trim();
+    const statusUpper = status.toUpperCase();
+    const statusDesc = (order.StatusDescription || '').trim();
+    const statusDescUpper = statusDesc.toUpperCase();
+    
+    // Terminal states that cannot be cancelled
+    const terminalStates = ['FILLED', 'FIL', 'CANCELLED', 'CANCELED', 'CAN', 'EXPIRED', 'EXP', 'REJECTED', 'REJ'];
+    const isTerminal = terminalStates.some(term => 
+      statusUpper === term || 
+      statusDescUpper.includes(term)
+    );
+    
+    // If order is in a terminal state, it can't be cancelled
+    if (isTerminal) {
+      console.log('❌ Order in terminal state:', order.OrderID, 'status:', status, 'desc:', statusDesc);
+      return false;
+    }
+    
+    // Explicitly allow cancellation for DON and ACK statuses (check first, highest priority)
+    // These are active orders that can be cancelled
+    // Check both exact match and case variations to be thorough
+    const isDON = statusUpper === 'DON' || status === 'DON' || status === 'don' || status === 'Don';
+    const isACK = statusUpper === 'ACK' || status === 'ACK' || status === 'ack' || status === 'Ack';
+    
+    if (isDON || isACK) {
+      console.log('✅ DON/ACK order can be cancelled:', {
+        OrderID: order.OrderID,
+        Status: status,
+        StatusUpper: statusUpper,
+        StatusDescription: statusDesc,
+        QuantityRemaining: qtyRemaining,
+        isDON,
+        isACK
+      });
+      return true; // DON and ACK orders can always be cancelled if they have remaining quantity
+    }
+    
+    // Explicitly allow cancellation for Queued orders (check both Status and StatusDescription)
+    const isQueued = 
+      statusUpper === 'QUEUED' || 
+      statusDescUpper === 'QUEUED' ||
+      statusDescUpper.includes('QUEUED');
+    
+    if (isQueued) {
+      console.log('✅ Queued order can be cancelled:', order.OrderID, 'status:', status, 'desc:', statusDesc, 'qtyRemaining:', qtyRemaining);
+      return true;
+    }
+    
+    // Allow cancellation for other active statuses
+    const isActiveStatus = 
+      statusUpper === 'REC' ||
+      statusUpper.startsWith('REC') ||
+      statusDescUpper.includes('RECEIVED') ||
+      statusDescUpper.includes('PENDING') ||
+      statusDescUpper.includes('OPEN') ||
+      statusDescUpper.includes('ACKNOWLEDGED');
+    
+    // Show cancel button if:
+    // 1. Order has remaining quantity AND
+    // 2. Order is Queued, REC, or any active status (not terminal)
+    // Note: DON and ACK are already handled above
+    // More permissive: if order has remaining quantity and is not terminal, allow cancellation
+    const result = (isQueued || isActiveStatus || (qtyRemaining > 0 && !isTerminal));
+    
+    // Additional check: if order has remaining quantity and is not explicitly terminal, allow cancellation
+    // This ensures we don't miss any cancellable orders
+    const canCancelPermissive = qtyRemaining > 0 && !isTerminal;
+    
+    if (result || canCancelPermissive) {
+      console.log('✅ Order can be cancelled:', {
+        OrderID: order.OrderID,
+        Status: status,
+        StatusDescription: statusDesc,
+        QuantityRemaining: qtyRemaining,
+        isTerminal,
+        result,
+        canCancelPermissive
+      });
+    } else {
+      console.log('❌ Order cannot be cancelled:', {
+        OrderID: order.OrderID,
+        Status: status,
+        StatusDescription: statusDesc,
+        QuantityRemaining: qtyRemaining,
+        isTerminal,
+        isQueued,
+        isActiveStatus
+      });
+    }
+    
+    return result || canCancelPermissive;
   };
 
   // Cancel order handler
@@ -300,12 +391,9 @@ const OrdersSection: React.FC = () => {
       <div className="flex-1 overflow-hidden">
         {loading ? (
           <div className="h-full flex items-center justify-center">
-            <div className="text-center">
-              <div className="w-12 h-12 bg-[#2a2820] rounded-lg flex items-center justify-center mx-auto mb-4">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#4ade80]"></div>
-              </div>
-              <h3 className="text-lg font-medium text-[#eae9e9] mb-2">Connecting...</h3>
-              <p className="opacity-60 text-sm">Establishing WebSocket connection...</p>
+            <div className="flex flex-col items-center space-y-3">
+              <div className="w-6 h-6 border-2 border-[#2a2820] border-t-[#808080] rounded-full animate-spin"></div>
+              <p className="text-xs text-[#808080] uppercase tracking-wider">Connecting</p>
             </div>
           </div>
         ) : ordersArray.length === 0 ? (
@@ -350,6 +438,19 @@ const OrdersSection: React.FC = () => {
                   const canCancel = canCancelOrder(order);
                   const isCanceling = cancelingOrders.has(order.OrderID);
                   
+                  // Debug logging for orders with DON, ACK, or Queued status
+                  if (order.Status === 'DON' || order.Status === 'ACK' || 
+                      order.StatusDescription?.toUpperCase().includes('QUEUED')) {
+                    console.log('🔍 Order cancel check:', {
+                      OrderID: order.OrderID,
+                      Status: order.Status,
+                      StatusDescription: order.StatusDescription,
+                      QuantityRemaining: leg?.QuantityRemaining,
+                      canCancel,
+                      hasLeg: !!leg
+                    });
+                  }
+                  
                   return (
                     <div
                       key={order.OrderID}
@@ -392,19 +493,17 @@ const OrdersSection: React.FC = () => {
                           <div className="opacity-60 text-xs font-mono">{formatDate(order.OpenedDateTime)}</div>
                         </div>
                         <div className="col-span-1 text-center">
-                          {canCancel && (
+                          {canCancel ? (
                             <button
                               onClick={() => handleCancelOrder(order.OrderID)}
                               disabled={isCanceling}
-                              className={`px-2 py-1 text-xs font-semibold rounded transition-colors ${
-                                isCanceling
-                                  ? 'bg-[#2a2820] text-[#eae9e9] opacity-50 cursor-not-allowed'
-                                  : 'bg-[#f87171] hover:bg-[#ef4444] text-[#14130e]'
-                              }`}
+                              className="px-2 py-1 text-xs font-semibold rounded transition-colors bg-[#f87171] hover:bg-[#ef4444] text-[#14130e] disabled:bg-[#2a2820] disabled:text-[#eae9e9] disabled:opacity-50 disabled:cursor-not-allowed"
                               title={isCanceling ? 'Cancelling...' : 'Cancel order'}
                             >
                               {isCanceling ? '...' : 'Cancel'}
                             </button>
+                          ) : (
+                            <span className="text-xs text-[#808080] opacity-50">—</span>
                           )}
                         </div>
                       </div>
