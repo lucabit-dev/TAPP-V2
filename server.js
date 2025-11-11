@@ -3497,6 +3497,15 @@ async function deleteOrder(orderId) {
     // Check if deletion was successful (200 or 204 are success codes)
     if (resp.ok || resp.status === 200 || resp.status === 204) {
       console.log(`✅ Order ${orderIdStr} deleted successfully: ${status}`);
+      
+      // Immediately remove order from cache after successful deletion
+      // The websocket will eventually send an update, but we remove it now to prevent
+      // the order from being detected as active in subsequent checks
+      if (ordersCache.has(orderIdStr)) {
+        ordersCache.delete(orderIdStr);
+        console.log(`🗑️ Removed order ${orderIdStr} from cache after deletion`);
+      }
+      
       return { success: true, status };
     } else {
       let errorMessage = `HTTP ${status}`;
@@ -3540,13 +3549,13 @@ async function getActiveSellOrdersFromWebSocket(symbol) {
   
   // Wait a brief moment to allow any pending websocket messages to be processed
   // This ensures we have the latest order data from the websocket stream
-  await new Promise(resolve => setTimeout(resolve, 100));
+  await new Promise(resolve => setTimeout(resolve, 200));
   
   // Check if websocket is receiving data (has received at least one update)
   if (lastOrderUpdateTime === null) {
     console.warn(`⚠️ Orders websocket connected but no data received yet for ${normalizedSymbol} - waiting for initial data...`);
     // Wait a bit longer for initial data
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await new Promise(resolve => setTimeout(resolve, 800));
   }
   
   // Check how fresh the data is (if last update was more than 5 minutes ago, it might be stale)
@@ -3733,10 +3742,88 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
     if (side === 'SELL') {
       console.log(`🗑️ Deleting existing SELL orders for ${symbol} before creating new sell order...`);
       const deleteResult = await deleteAllSellOrdersForSymbol(symbol);
-      if (deleteResult.deleted > 0) {
-        console.log(`✅ Deleted ${deleteResult.deleted} existing SELL order(s) for ${symbol}`);
-        // Small delay after deletion to ensure orders are fully cancelled
-        await new Promise(resolve => setTimeout(resolve, 200));
+      
+      if (deleteResult.failed > 0) {
+        console.warn(`⚠️ Failed to delete ${deleteResult.failed} SELL order(s) for ${symbol}. Results:`, deleteResult.results);
+      }
+      
+      if (deleteResult.deleted > 0 || deleteResult.failed > 0) {
+        console.log(`📊 Deletion summary for ${symbol}: ${deleteResult.deleted} deleted, ${deleteResult.failed} failed`);
+        
+        // Wait for the external API to process the deletion
+        // Even though we've removed orders from cache, the API needs time to process the DELETE request
+        console.log(`⏳ Waiting for external API to process deletion...`);
+        await new Promise(resolve => setTimeout(resolve, 600));
+        
+        // Verify that all active sell orders were actually deleted
+        // Since we remove from cache immediately after deletion, this should find no remaining orders
+        // unless there were orders we couldn't delete or new orders appeared
+        console.log(`🔍 Verifying deletion - checking for remaining active SELL orders for ${symbol}...`);
+        const remainingOrders = await getActiveSellOrdersFromWebSocket(symbol);
+        
+        if (remainingOrders.length > 0) {
+          console.warn(`⚠️ Found ${remainingOrders.length} remaining active SELL order(s) for ${symbol} after deletion. This might be due to:`);
+          console.warn(`   1. Orders that failed to delete (check deletion results)`);
+          console.warn(`   2. New orders that appeared after deletion`);
+          console.warn(`   3. Orders that weren't in the cache initially`);
+          console.warn(`   Order IDs: ${remainingOrders.map(o => o.orderId).join(', ')}`);
+          
+          // Try to delete remaining orders one more time
+          const retryOrders = remainingOrders.map(o => o.orderId);
+          for (const orderId of retryOrders) {
+            console.log(`🔄 Retrying deletion of order ${orderId}...`);
+            const retryResult = await deleteOrder(orderId);
+            if (retryResult.success) {
+              console.log(`✅ Successfully deleted order ${orderId} on retry`);
+            } else {
+              console.error(`❌ Failed to delete order ${orderId} on retry:`, retryResult.error);
+            }
+            // Small delay between retries
+            await new Promise(resolve => setTimeout(resolve, 150));
+          }
+          
+          // Wait again after retry for API to process
+          await new Promise(resolve => setTimeout(resolve, 600));
+          
+          // Final verification
+          const finalRemaining = await getActiveSellOrdersFromWebSocket(symbol);
+          if (finalRemaining.length > 0) {
+            // Check if these are the same orders that failed to delete
+            const failedOrderIds = deleteResult.results
+              .filter(r => !r.success)
+              .map(r => r.orderId);
+            const areFailedOrders = finalRemaining.every(o => failedOrderIds.includes(o.orderId));
+            
+            if (areFailedOrders) {
+              console.error(`❌ Cannot delete ${finalRemaining.length} SELL order(s) for ${symbol}. These orders may be in a state that prevents deletion.`);
+              console.error(`   Order IDs: ${finalRemaining.map(o => o.orderId).join(', ')}`);
+              console.error(`   Attempting to proceed anyway - the API may reject the new order if these are still active`);
+              // Continue anyway - let the API handle the conflict
+            } else {
+              const errorMsg = `Cannot create new sell order: ${finalRemaining.length} active SELL order(s) still exist for ${symbol} after deletion attempts. Order IDs: ${finalRemaining.map(o => o.orderId).join(', ')}`;
+              console.error(`❌ ${errorMsg}`);
+              return res.status(400).json({
+                success: false,
+                error: errorMsg,
+                data: {
+                  symbol,
+                  remainingOrders: finalRemaining.map(o => ({ orderId: o.orderId, status: o.status })),
+                  deletionAttempts: deleteResult
+                }
+              });
+            }
+          } else {
+            console.log(`✅ All active SELL orders successfully deleted for ${symbol} after retry`);
+          }
+        } else {
+          console.log(`✅ Verified: No remaining active SELL orders for ${symbol}`);
+        }
+        
+        // Additional wait to ensure external API has fully processed the deletion
+        // This helps prevent the API from rejecting the new order due to timing issues
+        await new Promise(resolve => setTimeout(resolve, 400));
+      } else {
+        console.log(`ℹ️ No active SELL orders found for ${symbol} - proceeding with new order`);
       }
     }
     
