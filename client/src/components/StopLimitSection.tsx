@@ -1,0 +1,413 @@
+import React from 'react';
+import { useAuth } from '../auth/AuthContext';
+
+interface StopLimitSnapshot {
+  symbol: string;
+  groupKey: string;
+  groupLabel: string;
+  avgPrice: number;
+  quantity: number;
+  stageIndex: number;
+  stageLabel: string;
+  stageDescription: string;
+  nextTrigger: number | null;
+  nextStageLabel: string | null;
+  nextStageDescription: string | null;
+  stopPrice: number | null;
+  limitPrice: number | null;
+  orderId: string | null;
+  orderStatus: string | null;
+  unrealizedQty: number | null;
+  autoSellTrigger: number | null;
+  progress: number | null;
+  status: string;
+  statusLabel: string;
+  pendingCreate: boolean;
+  pendingUpdate: boolean;
+  autoSellExecuted: boolean;
+  createdAt: number | null;
+  updatedAt: number | null;
+}
+
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
+
+const statusStyles: Record<string, string> = {
+  active: 'bg-[#1e3a2e] text-[#4ade80] border border-[#4ade80]/30',
+  'creating-order': 'bg-[#3a2e1e] text-[#facc15] border border-[#facc15]/30',
+  'updating-order': 'bg-[#1e313a] text-[#38bdf8] border border-[#38bdf8]/30',
+  queued: 'bg-[#312f20] text-[#fde68a] border border-[#fde68a]/30',
+  'awaiting-stoplimit': 'bg-[#332f1f] text-[#fde68a] border border-[#fde68a]/30',
+  'awaiting-ack': 'bg-[#2f1f33] text-[#e879f9] border border-[#e879f9]/30',
+  'auto-sell-executed': 'bg-[#3a1e1e] text-[#f87171] border border-[#f87171]/30'
+};
+
+const statusDot: Record<string, string> = {
+  active: 'bg-[#4ade80]',
+  'creating-order': 'bg-[#facc15]',
+  'updating-order': 'bg-[#38bdf8]',
+  queued: 'bg-[#fde68a]',
+  'awaiting-stoplimit': 'bg-[#fde68a]',
+  'awaiting-ack': 'bg-[#e879f9]',
+  'auto-sell-executed': 'bg-[#f87171]'
+};
+
+const StopLimitSection: React.FC = () => {
+  const { fetchWithAuth } = useAuth();
+  const [rows, setRows] = React.useState<StopLimitSnapshot[]>([]);
+  const [loading, setLoading] = React.useState<boolean>(true);
+  const [error, setError] = React.useState<string | null>(null);
+  const [isAutoRefresh, setIsAutoRefresh] = React.useState<boolean>(true);
+  const [lastUpdated, setLastUpdated] = React.useState<number | null>(null);
+  const refreshIntervalRef = React.useRef<number | null>(null);
+
+  const fetchStatus = React.useCallback(async () => {
+    try {
+      const response = await fetchWithAuth(`${API_BASE_URL}/stoplimit/status`);
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      if (!data.success) {
+        throw new Error(data.error || 'Failed to load StopLimit status');
+      }
+
+      setRows(Array.isArray(data.data) ? data.data : []);
+      setError(null);
+      setLastUpdated(Date.now());
+    } catch (err: any) {
+      setError(err.message || 'Failed to load StopLimit status');
+    } finally {
+      setLoading(false);
+    }
+  }, [fetchWithAuth]);
+
+  React.useEffect(() => {
+    fetchStatus();
+  }, [fetchStatus]);
+
+  React.useEffect(() => {
+    if (isAutoRefresh) {
+      if (refreshIntervalRef.current) {
+        clearInterval(refreshIntervalRef.current);
+      }
+      refreshIntervalRef.current = window.setInterval(() => {
+        fetchStatus();
+      }, 4000);
+    } else if (refreshIntervalRef.current) {
+      clearInterval(refreshIntervalRef.current);
+      refreshIntervalRef.current = null;
+    }
+
+    return () => {
+      if (refreshIntervalRef.current) {
+        clearInterval(refreshIntervalRef.current);
+        refreshIntervalRef.current = null;
+      }
+    };
+  }, [isAutoRefresh, fetchStatus]);
+
+  const summary = React.useMemo(() => {
+    const total = rows.length;
+    const active = rows.filter(row => row.status === 'active').length;
+    const pending = rows.filter(row =>
+      row.status === 'creating-order' ||
+      row.status === 'awaiting-stoplimit' ||
+      row.status === 'awaiting-ack' ||
+      row.status === 'updating-order' ||
+      row.status === 'queued'
+    ).length;
+    const autoSold = rows.filter(row => row.autoSellExecuted || row.status === 'auto-sell-executed').length;
+
+    const groupCounts = rows.reduce<Record<string, number>>((acc, row) => {
+      acc[row.groupLabel] = (acc[row.groupLabel] || 0) + 1;
+      return acc;
+    }, {});
+
+    return { total, active, pending, autoSold, groupCounts };
+  }, [rows]);
+
+  const formatCurrency = (value: number | null) => {
+    if (value === null || value === undefined || Number.isNaN(value)) return 'N/A';
+    return `$${value.toFixed(2)}`;
+  };
+
+  const formatOffset = (value: number | null) => {
+    if (value === null || value === undefined || Number.isNaN(value)) return 'N/A';
+    return `${value >= 0 ? '+' : ''}${value.toFixed(2)}`;
+  };
+
+  const formatNumber = (value: number | null, decimals = 2) => {
+    if (value === null || value === undefined || Number.isNaN(value)) return 'N/A';
+    return value.toFixed(decimals);
+  };
+
+  const formatRelativeTime = (timestamp: number | null) => {
+    if (!timestamp) return 'N/A';
+    const diff = Date.now() - timestamp;
+    if (diff < 0) return 'Just now';
+    const seconds = Math.floor(diff / 1000);
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
+  };
+
+  const formatTimestamp = (timestamp: number | null) => {
+    if (!timestamp) return 'N/A';
+    const date = new Date(timestamp);
+    return date.toLocaleTimeString();
+  };
+
+  const describeOrderStatus = (status: string | null) => {
+    if (!status) return null;
+    const upper = status.toUpperCase();
+    switch (upper) {
+      case 'DON':
+        return 'Queued (DON – awaiting market hours)';
+      case 'QUE':
+      case 'QUEUED':
+        return 'Queued';
+      case 'ACK':
+        return 'Acknowledged (ACK)';
+      case 'REC':
+        return 'Received (REC)';
+      default:
+        return upper;
+    }
+  };
+
+  const refreshClass = isAutoRefresh
+    ? 'bg-[#1e3a2e] text-[#4ade80] border border-[#4ade80]/30 hover:bg-[#1e3a2e]/80'
+    : 'bg-[#2a2820] text-[#eae9e9]/80 border border-[#2a2820] hover:bg-[#1f1e18]';
+
+  return (
+    <div className="h-full flex flex-col bg-[#14130e]">
+      <div className="p-4 border-b border-[#2a2820]/60 bg-gradient-to-r from-[#14130e] to-[#0f0e0a]">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between space-y-3 lg:space-y-0">
+          <div>
+            <h2 className="text-sm font-bold text-[#eae9e9] tracking-wider uppercase">Stop Limit Automation</h2>
+            <p className="text-xs text-[#eae9e9]/60 mt-1">
+              Live overview of automated StopLimit management for active positions
+            </p>
+          </div>
+          <div className="flex items-center space-x-3">
+            <div className="text-[11px] text-[#eae9e9]/60">
+              Last update: {lastUpdated ? `${formatRelativeTime(lastUpdated)} (${formatTimestamp(lastUpdated)})` : 'N/A'}
+            </div>
+            <button
+              onClick={() => fetchStatus()}
+              className="px-3 py-1.5 text-xs font-semibold rounded border border-[#2a2820] text-[#eae9e9]/80 hover:text-[#eae9e9] hover:border-[#eae9e9]/30 transition-colors"
+            >
+              Refresh
+            </button>
+            <button
+              onClick={() => setIsAutoRefresh(prev => !prev)}
+              className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors ${refreshClass}`}
+            >
+              Auto {isAutoRefresh ? 'ON' : 'OFF'}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="px-3 py-2 border-b border-[#2a2820]/40">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+          <SummaryCard
+            title="Tracked Positions"
+            value={summary.total}
+            subtitle={Object.entries(summary.groupCounts)
+              .map(([group, count]) => `${group}: ${count}`)
+              .join(' • ') || 'No positions tracked'}
+          />
+          <SummaryCard
+            title="Active Stops"
+            value={summary.active}
+            subtitle="Stops currently enforced"
+          />
+          <SummaryCard
+            title="Pending Actions"
+            value={summary.pending}
+            subtitle="Orders awaiting execution or update"
+          />
+          <SummaryCard
+            title="Auto-Sell Executed"
+            value={summary.autoSold}
+            subtitle="Positions exited automatically"
+          />
+        </div>
+      </div>
+
+      {error && (
+        <div className="px-4 pt-3">
+          <div className="bg-[#3a1e1e] border border-[#f87171] text-[#f87171] text-xs rounded p-3">
+            {error}
+          </div>
+        </div>
+      )}
+
+      <div className="flex-1 overflow-hidden">
+        {loading ? (
+          <div className="h-full flex items-center justify-center">
+            <div className="text-center">
+              <div className="w-12 h-12 bg-[#2a2820] rounded-lg flex items-center justify-center mx-auto mb-4">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#4ade80]"></div>
+              </div>
+              <h3 className="text-sm font-medium text-[#eae9e9] mb-1">Loading Stop Limit data...</h3>
+              <p className="text-xs text-[#eae9e9]/60">Fetching the latest automation status</p>
+            </div>
+          </div>
+        ) : rows.length === 0 ? (
+          <div className="h-full flex items-center justify-center">
+            <div className="text-center text-[#eae9e9]/70">
+              <div className="w-12 h-12 bg-[#2a2820] rounded-lg flex items-center justify-center mx-auto mb-4">
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 19V6a2 2 0 012-2h2a2 2 0 012 2v13m-4-5h6" />
+                </svg>
+              </div>
+              <h3 className="text-base font-semibold text-[#eae9e9]">No tracked positions yet</h3>
+              <p className="text-xs mt-1">StopLimit automation will appear once new positions are opened.</p>
+            </div>
+          </div>
+        ) : (
+          <div className="h-full flex flex-col">
+            <div className="bg-[#14130e] border-b border-[#2a2820]/40 px-4 py-2 sticky top-0 z-10">
+              <div className="grid grid-cols-12 gap-2 text-[10px] font-semibold text-[#eae9e9]/50 uppercase tracking-wider">
+                <div className="col-span-2">Symbol</div>
+                <div className="col-span-1 text-center">Group</div>
+                <div className="col-span-2">Stage</div>
+                <div className="col-span-1 text-right">Unrealized / Auto</div>
+                <div className="col-span-2">Stop / Limit</div>
+                <div className="col-span-2">Progress</div>
+                <div className="col-span-2">Order / Updated</div>
+              </div>
+            </div>
+            <div className="flex-1 overflow-auto">
+              <div className="divide-y divide-[#2a2820]/50">
+                {rows.map((row) => {
+                  const orderStatusLabel = describeOrderStatus(row.orderStatus);
+                  const orderStatusClass =
+                    row.status === 'queued'
+                      ? 'text-[#fde68a]'
+                      : 'text-[#eae9e9]/50';
+
+                  return (
+                    <div
+                      key={row.symbol}
+                      className="px-4 py-3 bg-[#14130e] hover:bg-[#1e1d17] transition-colors"
+                    >
+                      <div className="grid grid-cols-12 gap-2 items-center text-xs text-[#eae9e9]/80">
+                      <div className="col-span-2 flex items-center space-x-3">
+                        <div className={`w-2 h-2 rounded-full ${statusDot[row.status] || 'bg-[#808080]'}`}></div>
+                        <div>
+                          <div className="text-sm font-semibold text-[#eae9e9]">{row.symbol}</div>
+                          <div className="flex items-center space-x-2 mt-1">
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${statusStyles[row.status] || 'bg-[#2a2820] text-[#eae9e9]/80 border border-[#2a2820]'}`}>
+                              {row.statusLabel}
+                            </span>
+                            <span className="text-[10px] text-[#eae9e9]/50">
+                              Avg {formatCurrency(row.avgPrice)}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="col-span-1 text-center">
+                        <div className="font-semibold text-[#eae9e9]">{row.groupLabel}</div>
+                        <div className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Group {row.groupKey}</div>
+                      </div>
+                      <div className="col-span-2">
+                        <div className="font-semibold text-[#eae9e9]">{row.stageLabel}</div>
+                        <div className="text-[10px] text-[#eae9e9]/60">{row.stageDescription}</div>
+                        {row.nextTrigger !== null && row.nextStageLabel && (
+                          <div className="text-[10px] text-[#eae9e9]/45 mt-1">
+                            Next: {row.nextStageLabel} at {formatOffset(row.nextTrigger)}
+                          </div>
+                        )}
+                      </div>
+                      <div className="col-span-1 text-right">
+                        <div className={`font-mono font-semibold ${row.unrealizedQty !== null && row.unrealizedQty >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
+                          {row.unrealizedQty !== null ? formatNumber(row.unrealizedQty, 2) : 'N/A'}
+                        </div>
+                        <div className="text-[10px] text-[#eae9e9]/50">
+                          Target {row.autoSellTrigger !== null ? formatNumber(row.autoSellTrigger, 2) : 'N/A'}
+                        </div>
+                        <div className="text-[10px] text-[#eae9e9]/45">
+                          Qty {row.quantity ? row.quantity.toLocaleString() : 'N/A'}
+                        </div>
+                      </div>
+                      <div className="col-span-2">
+                        <div className="flex items-center space-x-2">
+                          <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Stop</span>
+                          <span className="font-mono text-sm text-[#eae9e9]">{formatCurrency(row.stopPrice)}</span>
+                        </div>
+                        <div className="flex items-center space-x-2">
+                          <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Limit</span>
+                          <span className="font-mono text-sm text-[#eae9e9]">{formatCurrency(row.limitPrice)}</span>
+                        </div>
+                      </div>
+                      <div className="col-span-2">
+                        {row.progress !== null ? (
+                          <div className="space-y-1">
+                            <div className="w-full h-2 bg-[#2a2820] rounded-full overflow-hidden">
+                              <div
+                                className={`h-full rounded-full transition-all duration-500 ${row.progress >= 0.75 ? 'bg-[#22c55e]' : row.progress >= 0.4 ? 'bg-[#38bdf8]' : 'bg-[#facc15]'}`}
+                                style={{ width: `${Math.min(100, Math.max(0, row.progress * 100))}%` }}
+                              ></div>
+                            </div>
+                            <div className="flex items-center justify-between text-[10px] text-[#eae9e9]/60">
+                              <span>{(Math.min(100, Math.max(0, (row.progress || 0) * 100))).toFixed(0)}%</span>
+                              <span>Auto sell at {row.autoSellTrigger !== null ? formatNumber(row.autoSellTrigger, 2) : 'N/A'}</span>
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="text-[10px] text-[#eae9e9]/50">Progress N/A</span>
+                        )}
+                      </div>
+                        <div className="col-span-2">
+                          <div className="font-mono text-xs text-[#eae9e9] truncate">
+                            {row.orderId || 'No order ID yet'}
+                          </div>
+                          {orderStatusLabel && (
+                            <div className={`text-[10px] font-medium ${orderStatusClass}`}>
+                              Order Status: {orderStatusLabel}
+                            </div>
+                          )}
+                          <div className="text-[10px] text-[#eae9e9]/50">
+                            Updated {formatRelativeTime(row.updatedAt)} · {formatTimestamp(row.updatedAt)}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+interface SummaryCardProps {
+  title: string;
+  value: number;
+  subtitle: string;
+}
+
+const SummaryCard: React.FC<SummaryCardProps> = ({ title, value, subtitle }) => (
+  <div className="bg-[#14130e] border border-[#2a2820]/40 rounded-md p-3 hover:border-[#2a2820]/60 transition-colors duration-200">
+    <div className="text-[10px] font-medium text-[#eae9e9]/55 uppercase tracking-[0.15em]">
+      {title}
+    </div>
+    <div className="text-lg font-semibold text-[#eae9e9] leading-none mt-2">{value}</div>
+    <div className="text-[11px] text-[#eae9e9]/45 mt-2 leading-snug">{subtitle}</div>
+  </div>
+);
+
+export default StopLimitSection;
+

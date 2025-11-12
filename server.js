@@ -12,6 +12,7 @@ const ConditionsService = require('./conditions');
 const FloatSegmentationService = require('./api/floatSegmentationService');
 const MACDEMAVerificationService = require('./macdEmaVerificationService');
 const PnLProxyService = require('./pnlProxyService');
+const StopLimitService = require('./stopLimitService');
 
 const app = express();
 const server = http.createServer(app);
@@ -109,6 +110,8 @@ app.use('/api/auth', requireDbReady, authRoutes);
 app.get('/api/protected/ping', requireDbReady, requireAuth, (req, res) => {
   res.json({ ok: true, user: req.user });
 });
+
+// StopLimit automation status
 
 // Initialize services
 const chartsWatcherService = new ChartsWatcherService();
@@ -2519,6 +2522,24 @@ const positionsCache = new Map(); // Map<symbol, { PositionID, Symbol, Quantity,
 // Cache of current orders by OrderID (updated from WebSocket)
 const ordersCache = new Map(); // Map<OrderID, { OrderID, Symbol, Status, Legs, ... }>
 
+const ACTIVE_ORDER_STATUS_SET = new Set(['ACK', 'DON', 'REC', 'QUE', 'QUEUED']);
+function isActiveOrderStatus(status) {
+  return ACTIVE_ORDER_STATUS_SET.has((status || '').toUpperCase());
+}
+
+// StopLimit automation service
+const stopLimitService = new StopLimitService({ ordersCache });
+
+app.get('/api/stoplimit/status', requireDbReady, requireAuth, (req, res) => {
+  try {
+    const snapshot = stopLimitService.getSnapshot();
+    res.json({ success: true, data: snapshot });
+  } catch (e) {
+    console.error('❌ Error retrieving StopLimit snapshot:', e);
+    res.status(500).json({ success: false, error: e.message || 'Failed to retrieve StopLimit status' });
+  }
+});
+
 // Track last time we received an order update from websocket
 let lastOrderUpdateTime = null;
 
@@ -2585,10 +2606,19 @@ function connectPositionsWebSocket() {
               lastUpdated: Date.now()
             });
             console.log(`📊 Position cache updated: ${symbol} (${quantity} shares)`);
+
+            if (stopLimitService) {
+              stopLimitService.handlePositionUpdate(dataObj).catch(err => {
+                console.error(`❌ StopLimitService position handler error for ${symbol}:`, err);
+              });
+            }
           } else {
             // Position closed or quantity is 0, remove from cache
             positionsCache.delete(symbol);
             console.log(`📊 Position removed from cache: ${symbol}`);
+            if (stopLimitService) {
+              stopLimitService.cleanupPosition(symbol);
+            }
           }
         }
       } catch (err) {
@@ -2679,8 +2709,12 @@ function connectOrdersWebSocket() {
             lastUpdated: Date.now()
           });
           
+          if (stopLimitService) {
+            stopLimitService.handleOrderUpdate(order);
+          }
+
           // Log order updates for debugging (only for active orders)
-          if (order.Status === 'ACK' || order.Status === 'DON' || order.Status === 'REC') {
+          if (isActiveOrderStatus(order.Status)) {
             const symbol = order.Legs && order.Legs.length > 0 ? order.Legs[0].Symbol : 'UNKNOWN';
             console.log(`📋 Order cache updated: ${orderId} (${symbol}, Status: ${order.Status})`);
           }
@@ -3527,7 +3561,7 @@ async function deleteOrder(orderId) {
 }
 
 // Helper function to get active SELL orders for a symbol from orders websocket
-// Analyzes the orders websocket stream to find active sell orders with status ACK or DON
+// Analyzes the orders websocket stream to find active sell orders based on active statuses
 async function getActiveSellOrdersFromWebSocket(symbol) {
   const normalizedSymbol = symbol.toUpperCase();
   const activeSellOrders = [];
@@ -3580,8 +3614,8 @@ async function getActiveSellOrdersFromWebSocket(symbol) {
         
         // Check if this is a SELL order for the symbol we're looking for
         if (legSymbol === normalizedSymbol && buyOrSell.toUpperCase() === 'SELL') {
-          // Check if order status is ACK or DON (active sell orders)
-          if (order.Status === 'ACK' || order.Status === 'DON') {
+          // Check if order status is considered active (includes ACK, DON, REC, QUE, etc.)
+          if (isActiveOrderStatus(order.Status)) {
             activeSellOrders.push({
               orderId: orderId,
               order: order,
@@ -3740,6 +3774,35 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
     // Delete all existing SELL orders for this symbol before creating new sell order
     // Only one SELL order can be active per stock at a time
     if (side === 'SELL') {
+      const queuedSellOrders = [];
+      try {
+        const activeSellOrders = await getActiveSellOrdersFromWebSocket(symbol);
+        for (const sellOrder of activeSellOrders) {
+          const status = (sellOrder.status || '').toUpperCase();
+          if (status === 'DON' || status === 'QUE' || status === 'QUEUED') {
+            queuedSellOrders.push({
+              orderId: sellOrder.orderId,
+              status,
+              quantity: sellOrder.quantity
+            });
+          }
+        }
+      } catch (err) {
+        console.warn(`⚠️ Unable to inspect existing sell orders for ${symbol}:`, err.message);
+      }
+
+      if (queuedSellOrders.length > 0) {
+        console.log(`⏳ Queued SELL order already exists for ${symbol}; skipping new sell request.`);
+        return res.status(200).json({
+          success: false,
+          error: `Queued sell order already exists for ${symbol}.`,
+          data: {
+            symbol,
+            queuedOrders: queuedSellOrders
+          }
+        });
+      }
+
       console.log(`🗑️ Deleting existing SELL orders for ${symbol} before creating new sell order...`);
       const deleteResult = await deleteAllSellOrdersForSymbol(symbol);
       
@@ -3932,7 +3995,7 @@ app.post('/api/sell_all', requireDbReady, requireAuth, async (req, res) => {
     console.log(`💸 Sell All: Executing panic sell (cancels orders & sells all positions)`);
     
     // Delete all existing SELL orders for all symbols before executing sell_all
-    // Analyze orders websocket to find all symbols with active SELL orders (ACK or DON status)
+    // Analyze orders websocket to find all symbols with active SELL orders (ACK, DON, REC, QUE, etc.)
     // This is the same logic as manual sell - analyze the orders websocket stream
     const symbolsWithSellOrders = new Set();
     
@@ -3953,9 +4016,9 @@ app.post('/api/sell_all', requireDbReady, requireAuth, async (req, res) => {
             const legSymbol = (leg.Symbol || '').toUpperCase();
             const buyOrSell = leg.BuyOrSell || '';
             
-            // Check if this is a SELL order with ACK or DON status (active sell orders)
+            // Check if this is a SELL order with an active status (ACK, DON, REC, QUE, etc.)
             if (legSymbol && buyOrSell.toUpperCase() === 'SELL') {
-              if (order.Status === 'ACK' || order.Status === 'DON') {
+              if (isActiveOrderStatus(order.Status)) {
                 symbolsWithSellOrders.add(legSymbol);
                 console.log(`🔍 Found active SELL order for ${legSymbol}: ${orderId} (Status: ${order.Status})`);
               }

@@ -12,6 +12,7 @@ const BuyListSection = lazy(() => import('./components/BuyListSection'));
 const FloatRawListsSection = lazy(() => import('./components/FloatRawListsSection'));
 const PnLSection = lazy(() => import('./components/PnLSection'));
 const OrdersSection = lazy(() => import('./components/OrdersSection'));
+const StopLimitSection = lazy(() => import('./components/StopLimitSection'));
 const Login = lazy(() => import('./components/Login'));
 
 // Loading fallback component - Minimalistic design
@@ -115,7 +116,7 @@ function App() {
   const [newValidAlertsCount, setNewValidAlertsCount] = useState(0);
   const [conditionStats, setConditionStats] = useState<any>(null);
   const [showStats, setShowStats] = useState(false);
-  const [selectedTab, setSelectedTab] = useState<'all' | 'valid' | 'filtered' | 'dashboard' | 'config-float' | 'listas-float-raw' | 'buy-list' | 'pnl' | 'orders'>('listas-float-raw');
+  const [selectedTab, setSelectedTab] = useState<'all' | 'valid' | 'filtered' | 'dashboard' | 'config-float' | 'listas-float-raw' | 'buy-list' | 'pnl' | 'orders' | 'stoplimit'>('listas-float-raw');
   const [alertsCollapsed, setAlertsCollapsed] = useState(true); // Start collapsed
   const [manualSymbol, setManualSymbol] = useState('');
   const [manualAnalysis, setManualAnalysis] = useState<any>(null);
@@ -636,6 +637,7 @@ function App() {
                     { key: 'config-float', label: 'Config FLOAT', count: 0 },
                     { key: 'buy-list', label: 'Buy List', count: 0 },
                     { key: 'pnl', label: 'P&L', count: 0 },
+                    { key: 'stoplimit', label: 'Stop Limit', count: 0 },
                     { key: 'orders', label: 'Orders', count: 0 }
                   ].map(tab => (
                     <button
@@ -1048,8 +1050,9 @@ function App() {
           )}
           {selectedTab === 'buy-list' && <BuyListSection />}
           {selectedTab === 'pnl' && <PnLSection />}
+          {selectedTab === 'stoplimit' && <StopLimitSection />}
           {selectedTab === 'orders' && <OrdersSection />}
-          {!['dashboard', 'config-float', 'listas-float-raw', 'buy-list', 'pnl', 'orders'].includes(selectedTab) && (
+          {!['dashboard', 'config-float', 'listas-float-raw', 'buy-list', 'pnl', 'orders', 'stoplimit'].includes(selectedTab) && (
             <div className="h-full flex">
             {/* Main Alerts Content */}
             <div className="flex-1 flex flex-col">

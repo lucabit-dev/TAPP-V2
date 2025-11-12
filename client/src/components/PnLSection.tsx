@@ -710,7 +710,7 @@ const PnLSection: React.FC = () => {
           <div className="h-full flex flex-col">
             {/* Table Header */}
             <div className="bg-[#14130e] border-b border-[#2a2820] px-4 py-2 sticky top-0 z-10">
-              <div className="grid grid-cols-12 gap-2 text-xs font-medium opacity-60 uppercase tracking-wide">
+              <div className="grid grid-cols-13 gap-2 text-xs font-medium opacity-60 uppercase tracking-wide">
                 <div className="col-span-2">Symbol</div>
                 <div className="col-span-1 text-center">Side</div>
                 <div className="col-span-1 text-right">Qty</div>
@@ -718,6 +718,7 @@ const PnLSection: React.FC = () => {
                 <div className="col-span-1 text-right">Last</div>
                 <div className="col-span-1 text-right">Market Value</div>
                 <div className="col-span-1 text-right">Unrealized P&L</div>
+                <div className="col-span-1 text-right">P&L per share</div>
                 <div className="col-span-1 text-right">P&L %</div>
                 <div className="col-span-1 text-right">Today's P&L</div>
                 <div className="col-span-1 text-right">Time</div>
@@ -744,7 +745,7 @@ const PnLSection: React.FC = () => {
                         index % 2 === 0 ? 'bg-[#0f0e0a]' : 'bg-[#14130e]'
                       }`}
                     >
-                      <div className="grid grid-cols-12 gap-2 items-center text-sm">
+                      <div className="grid grid-cols-13 gap-2 items-center text-sm">
                         {/* Symbol */}
                         <div className="col-span-2">
                           <div className="font-semibold text-[#eae9e9]">{position.Symbol}</div>
@@ -784,6 +785,13 @@ const PnLSection: React.FC = () => {
                         <div className="col-span-1 text-right">
                           <div className={`font-semibold font-mono text-xs ${unrealizedPL >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
                             {formatPrice(position.UnrealizedProfitLoss)}
+                          </div>
+                        </div>
+
+                        {/* P&L per share */}
+                        <div className="col-span-1 text-right">
+                          <div className={`font-semibold font-mono text-xs ${parseFloat(position.UnrealizedProfitLossQty || '0') >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
+                            {formatPrice(position.UnrealizedProfitLossQty)}
                           </div>
                         </div>
 
