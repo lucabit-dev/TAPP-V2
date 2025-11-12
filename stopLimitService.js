@@ -15,7 +15,7 @@ class StopLimitService {
       A: {
         label: 'Group A',
         priceRange: { minExclusive: 0, maxInclusive: 5 },
-        initialOffset: -0.15,
+        initialOffset: -0.10,
         stages: [
           { trigger: 0.25, stopOffset: 0.0, label: 'Break-even' },
           { trigger: 0.35, stopOffset: 0.15, label: '+0.15 from buy' },
@@ -26,7 +26,7 @@ class StopLimitService {
       B: {
         label: 'Group B',
         priceRange: { minExclusive: 5, maxInclusive: 10 },
-        initialOffset: -0.20,
+        initialOffset: -0.15,
         stages: [
           { trigger: 0.35, stopOffset: 0.0, label: 'Break-even' },
           { trigger: 0.50, stopOffset: 0.20, label: '+0.20 from buy' },
@@ -37,7 +37,7 @@ class StopLimitService {
       C: {
         label: 'Group C',
         priceRange: { minExclusive: 10, maxInclusive: 12 },
-        initialOffset: -0.30,
+        initialOffset: -0.20,
         stages: [
           { trigger: 0.45, stopOffset: 0.0, label: 'Break-even' },
           { trigger: 0.60, stopOffset: 0.25, label: '+0.25 from buy' },
@@ -824,6 +824,16 @@ class StopLimitService {
   isQueuedStatus(status) {
     const upper = (status || '').toUpperCase();
     return upper === 'DON' || upper === 'QUE' || upper === 'QUEUED';
+  }
+
+  isTrackingSymbol(symbol) {
+    const key = typeof symbol === 'string' ? symbol.trim().toUpperCase() : '';
+    if (!key) return false;
+    return this.trackedPositions.has(key);
+  }
+
+  getTrackedSymbols() {
+    return Array.from(this.trackedPositions.keys());
   }
 }
 

@@ -2530,6 +2530,52 @@ function isActiveOrderStatus(status) {
 // StopLimit automation service
 const stopLimitService = new StopLimitService({ ordersCache });
 
+const STOPLIMIT_POSITION_SYNC_INTERVAL_MS = parseInt(process.env.STOPLIMIT_POSITION_SYNC_MS || '5000', 10);
+let isStopLimitSyncRunning = false;
+
+async function syncStopLimitWithPositionsCache() {
+  if (!stopLimitService) return;
+  if (isStopLimitSyncRunning) return;
+
+  const positions = Array.from(positionsCache.values());
+  const activeSymbols = new Set(positionsCache.keys());
+
+  if (positions.length === 0) {
+    stopLimitService.pruneInactiveSymbols(activeSymbols);
+    return;
+  }
+
+  isStopLimitSyncRunning = true;
+  try {
+    for (const position of positions) {
+      const symbol = (position?.Symbol || '').toString().trim().toUpperCase();
+      if (!symbol) continue;
+
+      if (!stopLimitService.isTrackingSymbol(symbol)) {
+        console.log(`🆕 StopLimitService: Detected active position ${symbol}; ensuring StopLimit automation is initialized.`);
+      }
+
+      try {
+        await stopLimitService.handlePositionUpdate(position);
+      } catch (err) {
+        console.error(`❌ StopLimitService: Failed to sync position ${symbol}:`, err?.message || err);
+      }
+    }
+
+    stopLimitService.pruneInactiveSymbols(activeSymbols);
+  } catch (err) {
+    console.error('❌ StopLimitService: Unexpected error during position sync:', err?.message || err);
+  } finally {
+    isStopLimitSyncRunning = false;
+  }
+}
+
+setInterval(() => {
+  syncStopLimitWithPositionsCache().catch((err) => {
+    console.error('❌ StopLimitService: Unhandled error in position sync interval:', err?.message || err);
+  });
+}, STOPLIMIT_POSITION_SYNC_INTERVAL_MS);
+
 app.get('/api/stoplimit/status', requireDbReady, requireAuth, (req, res) => {
   try {
     const snapshot = stopLimitService.getSnapshot();
