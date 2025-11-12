@@ -697,7 +697,7 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
                     return (
                       <>
                         <div
-                          className="grid gap-0.5 text-[9px] opacity-60 mb-0.5 sticky top-0 bg-[#14130e] py-1 z-10"
+                      className="grid gap-0.5 text-[11px] opacity-70 mb-0.5 sticky top-0 bg-[#14130e] py-1 z-10"
                           style={{ gridTemplateColumns: `50px repeat(${headers.length}, minmax(60px, 1fr)) 60px` }}
                         >
                           {/* Origin column at the start */}
@@ -741,7 +741,7 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
                             return (
                               <div
                                 key={`${symbolVal || 'row'}-${idx}`}
-                                className={`grid gap-0.5 text-[9px] border-b border-[#2a2820] py-0.5 ${rowBgColor} ${hoverColor}`}
+                                className={`grid gap-0.5 text-[11px] border-b border-[#2a2820] py-0.5 ${rowBgColor} ${hoverColor}`}
                                 style={{ gridTemplateColumns: `50px repeat(${headers.length}, minmax(60px, 1fr)) 60px` }}
                                 title={`Ver detalles de ${symbolVal || ''} - Tech: ${meetsTech ? '✓' : '✗'}, All Momentum: ${allMomentumColumnsPass ? '✓' : '✗'} ${meetsAll ? '(READY TO BUY)' : ''}`}
                               >
@@ -779,7 +779,7 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
                                     const status = symbolForBuy ? buyStatuses[symbolForBuy] : null;
                                     const isDisabled = isBuying || !symbolForBuy;
                                     
-                                    let buttonClass = 'px-2 py-0.5 text-[9px] font-semibold rounded transition-colors';
+                                    let buttonClass = 'px-2 py-0.5 text-[11px] font-semibold rounded transition-colors';
                                     let buttonText = 'BUY';
                                     let buttonTitle = `Send buy signal for ${symbolVal}`;
                                     

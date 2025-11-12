@@ -173,9 +173,16 @@ const StopLimitSection: React.FC = () => {
       case 'QUEUED':
         return 'Queued';
       case 'ACK':
-        return 'Acknowledged (ACK)';
+        return 'Received (ACK)';
       case 'REC':
         return 'Received (REC)';
+      case 'OUT':
+        return 'Cancelled (OUT)';
+      case 'REJ':
+        return 'Rejected (REJ)';
+      case 'FLL':
+      case 'FIL':
+        return 'Filled';
       default:
         return upper;
     }

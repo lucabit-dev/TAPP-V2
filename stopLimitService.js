@@ -1,6 +1,7 @@
 const fetch = require('node-fetch');
 
 const ACTIVE_ORDER_STATUSES = new Set(['ACK', 'DON', 'REC', 'QUE', 'QUEUED']);
+const NON_ACTIVE_STATUSES = new Set(['CAN', 'FIL', 'EXP', 'OUT', 'REJ', 'FLL']);
 
 class StopLimitService {
   constructor({ ordersCache }) {
@@ -141,12 +142,41 @@ class StopLimitService {
       }
       state.orderId = order.OrderID;
       state.updatedAt = Date.now();
-    } else if (status === 'CAN' || status === 'FIL' || status === 'EXP') {
+    } else if (NON_ACTIVE_STATUSES.has(status)) {
       if (state.orderId === order.OrderID) {
         console.log(`ℹ️ StopLimitService: StopLimit order ${order.OrderID} for ${symbol} is no longer active (status ${status})`);
         state.orderId = null;
         state.orderStatus = status;
         state.updatedAt = Date.now();
+
+        if (status === 'FLL' || status === 'FIL') {
+          console.log(`✅ StopLimitService: Position ${symbol} filled (order status ${status}) – ending tracking.`);
+          this.cleanupPosition(symbol);
+        } else if (status === 'OUT' || status === 'REJ') {
+          const fallback = this.findLatestRelevantOrder(symbol);
+          if (!fallback) {
+            console.log(`ℹ️ StopLimitService: No follow-up order found for ${symbol} after ${status}; keeping position tracked.`);
+          } else {
+            const fallbackStatus = (fallback.status || '').toUpperCase();
+            if (this.isQueuedStatus(fallbackStatus) || fallbackStatus === 'ACK') {
+              console.log(`ℹ️ StopLimitService: Found fallback order ${fallback.orderId} with status ${fallbackStatus} for ${symbol}; re-linking.`);
+              state.orderId = fallback.orderId;
+              state.orderStatus = fallbackStatus;
+              state.updatedAt = Date.now();
+              const limit = this.parseNumber(fallback.order.LimitPrice ?? fallback.leg?.LimitPrice ?? fallback.leg?.Price);
+              if (limit !== null && limit !== undefined) {
+                state.lastLimitPrice = limit;
+              }
+              const stopPrice = this.parseNumber(fallback.order.StopPrice ?? fallback.order.StopLimitPrice ?? fallback.leg?.StopPrice ?? fallback.leg?.StopLimitPrice);
+              if (stopPrice !== null && stopPrice !== undefined) {
+                state.lastStopPrice = stopPrice;
+              }
+            } else if (fallbackStatus === 'FLL' || fallbackStatus === 'FIL') {
+              console.log(`✅ StopLimitService: Fallback order ${fallback.orderId} is filled; cleaning up position ${symbol}.`);
+              this.cleanupPosition(symbol);
+            }
+          }
+        }
       }
     }
   }
@@ -380,7 +410,7 @@ class StopLimitService {
     for (const [orderId, order] of this.ordersCache.entries()) {
       if (!order || !order.Legs) continue;
       const status = (order.Status || '').toUpperCase();
-      if (ACTIVE_ORDER_STATUSES.has(status) === false) continue;
+      if (ACTIVE_ORDER_STATUSES.has(status) === false || status === 'OUT' || status === 'REJ' || status === 'FLL') continue;
       for (const leg of order.Legs) {
         if ((leg.Symbol || '').toUpperCase() !== normalized) continue;
         if ((leg.BuyOrSell || '').toUpperCase() !== 'SELL') continue;
@@ -397,7 +427,9 @@ class StopLimitService {
     for (const [orderId, order] of this.ordersCache.entries()) {
       if (!order || !order.Legs) continue;
       if ((order.OrderType || '').toUpperCase() !== 'STOPLIMIT') continue;
-      if (!ACTIVE_ORDER_STATUSES.has((order.Status || '').toUpperCase())) continue;
+      const status = (order.Status || '').toUpperCase();
+      if (!ACTIVE_ORDER_STATUSES.has(status)) continue;
+      if (status === 'OUT' || status === 'REJ' || status === 'FLL') continue;
 
       for (const leg of order.Legs) {
         if ((leg.Symbol || '').toUpperCase() === normalized && (leg.BuyOrSell || '').toUpperCase() === 'SELL') {
@@ -406,6 +438,42 @@ class StopLimitService {
       }
     }
     return null;
+  }
+
+  findLatestRelevantOrder(symbol) {
+    const normalized = symbol.toUpperCase();
+    let fallback = null;
+
+    for (const [orderId, order] of this.ordersCache.entries()) {
+      if (!order || !order.Legs) continue;
+      const status = (order.Status || '').toUpperCase();
+      const consideredStatus =
+        ACTIVE_ORDER_STATUSES.has(status) ||
+        this.isQueuedStatus(status) ||
+        status === 'ACK' ||
+        status === 'FLL' ||
+        status === 'FIL';
+
+      if (!consideredStatus) continue;
+
+      for (const leg of order.Legs) {
+        if ((leg.Symbol || '').toUpperCase() !== normalized) continue;
+        if ((leg.BuyOrSell || '').toUpperCase() !== 'SELL') continue;
+
+        const updatedAt = order.lastUpdated || order.TimeStamp || order.Timestamp || Date.now();
+        if (!fallback || updatedAt > fallback.updatedAt) {
+          fallback = {
+            orderId,
+            order,
+            leg,
+            status,
+            updatedAt
+          };
+        }
+      }
+    }
+
+    return fallback;
   }
 
   calculateStopAndLimit(avgPrice, stopOffset) {

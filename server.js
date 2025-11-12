@@ -3774,33 +3774,20 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
     // Delete all existing SELL orders for this symbol before creating new sell order
     // Only one SELL order can be active per stock at a time
     if (side === 'SELL') {
-      const queuedSellOrders = [];
       try {
         const activeSellOrders = await getActiveSellOrdersFromWebSocket(symbol);
-        for (const sellOrder of activeSellOrders) {
-          const status = (sellOrder.status || '').toUpperCase();
-          if (status === 'DON' || status === 'QUE' || status === 'QUEUED') {
-            queuedSellOrders.push({
-              orderId: sellOrder.orderId,
-              status,
-              quantity: sellOrder.quantity
-            });
-          }
+        const queuedSellOrders = activeSellOrders.filter(order => {
+          const status = (order.status || '').toUpperCase();
+          return status === 'DON' || status === 'QUE' || status === 'QUEUED';
+        });
+        if (queuedSellOrders.length > 0) {
+          console.log(`⏳ Found ${queuedSellOrders.length} queued SELL order(s) for ${symbol}. They will be cancelled before placing the manual sell.`);
+          queuedSellOrders.forEach(order => {
+            console.log(`   • Queued order ${order.orderId} (status ${order.status}, qty ${order.quantity})`);
+          });
         }
       } catch (err) {
         console.warn(`⚠️ Unable to inspect existing sell orders for ${symbol}:`, err.message);
-      }
-
-      if (queuedSellOrders.length > 0) {
-        console.log(`⏳ Queued SELL order already exists for ${symbol}; skipping new sell request.`);
-        return res.status(200).json({
-          success: false,
-          error: `Queued sell order already exists for ${symbol}.`,
-          data: {
-            symbol,
-            queuedOrders: queuedSellOrders
-          }
-        });
       }
 
       console.log(`🗑️ Deleting existing SELL orders for ${symbol} before creating new sell order...`);
