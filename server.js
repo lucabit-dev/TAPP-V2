@@ -2615,6 +2615,10 @@ function connectPositionsWebSocket() {
           } else {
             // Position closed or quantity is 0, remove from cache
             positionsCache.delete(symbol);
+            if (typeof lastBuyTsByTicker !== 'undefined' && lastBuyTsByTicker.has(symbol)) {
+              lastBuyTsByTicker.delete(symbol);
+              console.log(`🔁 Reset buy lock for ${symbol} (position closed)`);
+            }
             console.log(`📊 Position removed from cache: ${symbol}`);
             if (stopLimitService) {
               stopLimitService.cleanupPosition(symbol);

@@ -108,6 +108,24 @@ class StopLimitService {
       state.positionId = position?.PositionID || state.positionId;
       state.lastUnrealizedQty = unrealizedQty;
       state.updatedAt = Date.now();
+
+      if (state.autoSellExecuted || !state.orderId || NON_ACTIVE_STATUSES.has((state.orderStatus || '').toUpperCase())) {
+        console.log(`🔄 StopLimitService: Reinitializing StopLimit tracking for ${symbol}`);
+        state.stageIndex = -1;
+        state.orderId = null;
+        state.orderStatus = null;
+        state.pendingCreate = false;
+        state.pendingUpdate = false;
+        state.autoSellExecuted = false;
+        state.lastStopPrice = null;
+        state.lastLimitPrice = null;
+      }
+
+      if (!state.orderId && state.stageIndex !== -1) {
+        state.stageIndex = -1;
+      }
+
+      await this.ensureInitialOrder(state);
     }
 
     if (state.autoSellExecuted) {
