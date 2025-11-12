@@ -15,7 +15,7 @@ class StopLimitService {
       A: {
         label: 'Group A',
         priceRange: { minExclusive: 0, maxInclusive: 5 },
-        initialOffset: -0.20,
+        initialOffset: -0.15,
         stages: [
           { trigger: 0.25, stopOffset: 0.0, label: 'Break-even' },
           { trigger: 0.35, stopOffset: 0.15, label: '+0.15 from buy' },
@@ -26,7 +26,7 @@ class StopLimitService {
       B: {
         label: 'Group B',
         priceRange: { minExclusive: 5, maxInclusive: 10 },
-        initialOffset: -0.35,
+        initialOffset: -0.20,
         stages: [
           { trigger: 0.35, stopOffset: 0.0, label: 'Break-even' },
           { trigger: 0.50, stopOffset: 0.20, label: '+0.20 from buy' },
@@ -37,7 +37,7 @@ class StopLimitService {
       C: {
         label: 'Group C',
         priceRange: { minExclusive: 10, maxInclusive: 12 },
-        initialOffset: -0.45,
+        initialOffset: -0.30,
         stages: [
           { trigger: 0.45, stopOffset: 0.0, label: 'Break-even' },
           { trigger: 0.60, stopOffset: 0.25, label: '+0.25 from buy' },
@@ -185,6 +185,15 @@ class StopLimitService {
     if (this.trackedPositions.has(symbol)) {
       console.log(`🧹 StopLimitService: Removing tracking for ${symbol} (position closed)`);
       this.trackedPositions.delete(symbol);
+    }
+  }
+
+  pruneInactiveSymbols(activeSymbols) {
+    const activeSet = activeSymbols instanceof Set ? activeSymbols : new Set(activeSymbols);
+    for (const symbol of Array.from(this.trackedPositions.keys())) {
+      if (!activeSet.has(symbol)) {
+        this.cleanupPosition(symbol);
+      }
     }
   }
 

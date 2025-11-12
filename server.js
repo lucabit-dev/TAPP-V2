@@ -2620,6 +2620,11 @@ function connectPositionsWebSocket() {
               stopLimitService.cleanupPosition(symbol);
             }
           }
+          
+          if (stopLimitService) {
+            const activeSymbols = new Set(positionsCache.keys());
+            stopLimitService.pruneInactiveSymbols(activeSymbols);
+          }
         }
       } catch (err) {
         console.error('⚠️ Error parsing positions WebSocket message:', err.message);
@@ -3960,6 +3965,10 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
         error: errorMessage || `Failed to sell ${symbol}: Network or parsing error`,
         data: { symbol, quantity, orderType, notifyStatus, response: responseData } 
       });
+    }
+
+    if (isSuccess && stopLimitService && side === 'SELL') {
+      stopLimitService.cleanupPosition(symbol);
     }
     
     // External API responded (even if error), return 200 with success flag
