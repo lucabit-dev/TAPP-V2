@@ -203,7 +203,21 @@ class StopLimitService {
       return;
     }
 
-    const existingOrder = this.findActiveStopLimitOrder(state.symbol);
+    let existingOrder = this.findActiveStopLimitOrder(state.symbol);
+    if (!existingOrder) {
+      const fallback = this.findLatestRelevantOrder(state.symbol);
+      if (fallback) {
+        const status = (fallback.status || '').toUpperCase();
+        if (status === 'ACK' || this.isQueuedStatus(status)) {
+          existingOrder = fallback;
+        } else if (status === 'FLL' || status === 'FIL') {
+          console.log(`✅ StopLimitService: Latest order for ${state.symbol} already filled (status ${status}), skipping tracking.`);
+          this.cleanupPosition(state.symbol);
+          return;
+        }
+      }
+    }
+
     if (existingOrder) {
       const { orderId, order } = existingOrder;
       state.orderId = orderId;
