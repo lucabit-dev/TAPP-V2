@@ -135,6 +135,10 @@ let buyTriggerMode = 'positive'; // 'cross' | 'positive'
 // Track last buy timestamp per ticker to prevent duplicate buys on the same UTC day
 const lastBuyTsByTicker = new Map();
 
+// Cached positions and orders (updated via WebSocket streams)
+const positionsCache = new Map(); // Map<symbol, { PositionID, Symbol, Quantity, ... }>
+const ordersCache = new Map(); // Map<OrderID, { OrderID, Symbol, Status, Legs, ... }>
+
 // Helper function to normalize timestamp (keeps UTC, formatting is done on frontend)
 // This function is here for consistency but doesn't actually change the timestamp
 // The frontend will format timestamps as UTC-4 for display
@@ -2346,6 +2350,35 @@ app.post('/api/buys/enabled', (req, res) => {
 // Returns { success: boolean, notifyStatus: string, responseData: any, errorMessage: string | null, quantity: number, limitPrice: number | null }
 async function sendBuyOrder(symbol, configId = null, groupKey = null) {
   try {
+    const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+    if (!normalizedSymbol) {
+      return {
+        success: false,
+        notifyStatus: 'ERROR: Invalid symbol',
+        responseData: null,
+        errorMessage: 'Invalid symbol',
+        quantity: 0,
+        limitPrice: null,
+        stopLoss: null
+      };
+    }
+
+    // Prevent duplicate buys when an active position already exists
+    const existingPosition = positionsCache.get(normalizedSymbol);
+    const existingQty = existingPosition ? parseFloat(existingPosition.Quantity || '0') : 0;
+    if (existingQty > 0) {
+      console.log(`ℹ️ sendBuyOrder: Skipping ${normalizedSymbol} because an active position exists (${existingQty} shares).`);
+      return {
+        success: false,
+        notifyStatus: 'SKIPPED: Position already active',
+        responseData: { message: 'Position already active' },
+        errorMessage: null,
+        quantity: 0,
+        limitPrice: null,
+        stopLoss: null
+      };
+    }
+
     // Get current stock price using Polygon service
     let currentPrice = null;
     try {
@@ -2516,22 +2549,21 @@ async function sendBuyOrder(symbol, configId = null, groupKey = null) {
 // Queue for pending stop-loss orders that need to be created after buy orders are filled
 const pendingStopLossQueue = new Map(); // Map<symbol, { stockPrice, quantity, createdAt, attempts }>
 
-// Cache of current positions by symbol (updated from WebSocket)
-const positionsCache = new Map(); // Map<symbol, { PositionID, Symbol, Quantity, ... }>
-
-// Cache of current orders by OrderID (updated from WebSocket)
-const ordersCache = new Map(); // Map<OrderID, { OrderID, Symbol, Status, Legs, ... }>
-
 const ACTIVE_ORDER_STATUS_SET = new Set(['ACK', 'DON', 'REC', 'QUE', 'QUEUED']);
 function isActiveOrderStatus(status) {
   return ACTIVE_ORDER_STATUS_SET.has((status || '').toUpperCase());
 }
 
 // StopLimit automation service
-const stopLimitService = new StopLimitService({ ordersCache });
+const stopLimitService = new StopLimitService({ ordersCache, positionsCache });
 
 const STOPLIMIT_POSITION_SYNC_INTERVAL_MS = parseInt(process.env.STOPLIMIT_POSITION_SYNC_MS || '5000', 10);
+const STOPLIMIT_POSITION_STALE_THRESHOLD_MS = parseInt(process.env.STOPLIMIT_POSITION_STALE_MS || '60000', 10);
+const STOPLIMIT_POSITION_RECONNECT_MIN_INTERVAL_MS = parseInt(process.env.STOPLIMIT_POSITION_RECONNECT_MIN_MS || '10000', 10);
 let isStopLimitSyncRunning = false;
+let lastPositionUpdateTime = null;
+let lastPositionsConnectAttempt = 0;
+let positionsReconnectAttempts = 0;
 
 async function syncStopLimitWithPositionsCache() {
   if (!stopLimitService) return;
@@ -2570,11 +2602,31 @@ async function syncStopLimitWithPositionsCache() {
   }
 }
 
-setInterval(() => {
+function ensurePositionsWebSocketHealthy() {
+  const now = Date.now();
+  const disconnected = !positionsWs || positionsWs.readyState !== WebSocket.OPEN;
+  const stale = !lastPositionUpdateTime || (now - lastPositionUpdateTime > STOPLIMIT_POSITION_STALE_THRESHOLD_MS);
+
+  if ((disconnected || stale) && (now - lastPositionsConnectAttempt) >= STOPLIMIT_POSITION_RECONNECT_MIN_INTERVAL_MS) {
+    const staleSeconds = stale && lastPositionUpdateTime ? Math.round((now - lastPositionUpdateTime) / 1000) : null;
+    console.warn(`⚠️ Positions WebSocket ${disconnected ? 'disconnected' : `stale (${staleSeconds ?? 'unknown'}s without updates)`}; reconnecting...`);
+    if (positionsWsReconnectTimer) {
+      clearTimeout(positionsWsReconnectTimer);
+      positionsWsReconnectTimer = null;
+    }
+    connectPositionsWebSocket();
+  }
+}
+
+function runStopLimitMonitoring() {
+  ensurePositionsWebSocketHealthy();
   syncStopLimitWithPositionsCache().catch((err) => {
     console.error('❌ StopLimitService: Unhandled error in position sync interval:', err?.message || err);
   });
-}, STOPLIMIT_POSITION_SYNC_INTERVAL_MS);
+}
+
+setInterval(runStopLimitMonitoring, STOPLIMIT_POSITION_SYNC_INTERVAL_MS);
+setTimeout(() => runStopLimitMonitoring(), 0);
 
 app.get('/api/stoplimit/status', requireDbReady, requireAuth, (req, res) => {
   try {
@@ -2606,6 +2658,8 @@ function connectPositionsWebSocket() {
     return;
   }
   
+  lastPositionsConnectAttempt = Date.now();
+
   // Close existing connection if any
   if (positionsWs) {
     try {
@@ -2622,6 +2676,8 @@ function connectPositionsWebSocket() {
     
     positionsWs.on('open', () => {
       console.log('✅ Positions WebSocket connected for stop-loss monitoring');
+       lastPositionUpdateTime = Date.now();
+       positionsReconnectAttempts = 0;
       // Clear reconnect timer on successful connection
       if (positionsWsReconnectTimer) {
         clearTimeout(positionsWsReconnectTimer);
@@ -2634,6 +2690,8 @@ function connectPositionsWebSocket() {
         const messageStr = Buffer.isBuffer(data) ? data.toString('utf8') : data.toString();
         const dataObj = JSON.parse(messageStr);
         
+        lastPositionUpdateTime = Date.now();
+
         // Skip heartbeat messages
         if (dataObj.Heartbeat) {
           return;
@@ -2683,14 +2741,17 @@ function connectPositionsWebSocket() {
     
     positionsWs.on('error', (error) => {
       console.error('❌ Positions WebSocket error:', error.message);
+      lastPositionUpdateTime = null;
     });
     
     positionsWs.on('close', (code, reason) => {
       console.log(`🔌 Positions WebSocket closed (${code}): ${reason || 'No reason'}`);
       positionsWs = null;
+      lastPositionUpdateTime = null;
       
       // Reconnect after delay (exponential backoff, max 30 seconds)
-      const delay = Math.min(30000, 1000 * Math.pow(2, Math.min(5, 0)));
+      positionsReconnectAttempts = Math.min(positionsReconnectAttempts + 1, 6);
+      const delay = Math.min(30000, 1000 * Math.pow(2, Math.max(0, positionsReconnectAttempts - 1)));
       positionsWsReconnectTimer = setTimeout(() => {
         console.log('🔄 Reconnecting positions WebSocket...');
         connectPositionsWebSocket();
@@ -2700,10 +2761,14 @@ function connectPositionsWebSocket() {
   } catch (err) {
     console.error('❌ Failed to create positions WebSocket:', err.message);
     positionsWs = null;
+    lastPositionUpdateTime = null;
+    positionsReconnectAttempts = Math.min(positionsReconnectAttempts + 1, 6);
     // Retry after delay
+    const delay = Math.min(30000, 1000 * Math.pow(2, Math.max(0, positionsReconnectAttempts - 1)));
     positionsWsReconnectTimer = setTimeout(() => {
+      console.log('🔄 Retrying positions WebSocket connection after error...');
       connectPositionsWebSocket();
-    }, 5000);
+    }, delay);
   }
 }
 
@@ -2765,7 +2830,9 @@ function connectOrdersWebSocket() {
           });
           
           if (stopLimitService) {
-            stopLimitService.handleOrderUpdate(order);
+            stopLimitService.handleOrderUpdate(order).catch(err => {
+              console.error(`❌ StopLimitService order handler error for ${orderId}:`, err);
+            });
           }
 
           // Log order updates for debugging (only for active orders)
@@ -2972,17 +3039,29 @@ async function createStopLossOrder(symbol, stockPrice, quantity) {
     
     // Build stop-loss order body - using StopLimit for proper stop-loss functionality
     // StopLimit orders need both stop_price (trigger) and limit_price (execution)
-    // For stop-loss, both are set to the stop-loss price
+    const limitOffset = stopLimitService?.limitOffset ?? 0.05;
+    const limitPrice = Math.round((stopLossPrice - limitOffset) * 100) / 100;
+    if (limitPrice <= 0) {
+      console.warn(`⚠️ Skipping stop-loss for ${symbol}: calculated limit price ${limitPrice} is not positive`);
+      return {
+        success: false,
+        notifyStatus: `ERROR: Limit price ${limitPrice} is not positive`,
+        responseData: null,
+        errorMessage: `Limit price ${limitPrice} is not positive`,
+        stopLossPrice: null
+      };
+    }
+
     const stopLossOrderBody = {
       symbol: symbol,
       side: 'SELL',
       order_type: 'StopLimit',
       quantity: quantity,
-      limit_price: stopLossPrice,
+      limit_price: limitPrice,
       stop_price: stopLossPrice // Trigger when price drops to this level
     };
     
-    console.log(`🛡️ Creating stop-loss order for ${symbol}: ${quantity} shares at STOP_LIMIT ${stopLossPrice} (offset: -${stopLossOffset.toFixed(2)})`);
+    console.log(`🛡️ Creating stop-loss order for ${symbol}: ${quantity} shares at STOP ${stopLossPrice} / LIMIT ${limitPrice} (offset: -${stopLossOffset.toFixed(2)}, limit gap: ${limitOffset.toFixed(2)})`);
     
     // Send stop-loss order to external service using POST /order
     let notifyStatus = '';
@@ -3065,6 +3144,8 @@ async function createStopLossOrder(symbol, stockPrice, quantity) {
       errorMessage: !isSuccess ? errorMessage : null,
       stopLossPrice: stopLossPrice,
       stopLossOffset: stopLossOffset,
+      limitOffset: limitOffset,
+      limitPrice: limitPrice,
       orderId: orderId
     };
   } catch (e) {

@@ -4,9 +4,11 @@ const ACTIVE_ORDER_STATUSES = new Set(['ACK', 'DON', 'REC', 'QUE', 'QUEUED']);
 const NON_ACTIVE_STATUSES = new Set(['CAN', 'FIL', 'EXP', 'OUT', 'REJ', 'FLL']);
 
 class StopLimitService {
-  constructor({ ordersCache }) {
+  constructor({ ordersCache, positionsCache }) {
     this.ordersCache = ordersCache;
+    this.positionsCache = positionsCache || null;
     this.trackedPositions = new Map(); // Map<symbol, PositionState>
+    this.orderWaiters = new Map(); // Map<symbol, Set<OrderWaiter>>
 
     this.limitOffset = 0.05; // stop_price = limit_price + 0.05
     this.apiBaseUrl = 'https://sections-bot.inbitme.com';
@@ -135,33 +137,56 @@ class StopLimitService {
     await this.evaluateAdjustments(state, unrealizedQty);
   }
 
-  handleOrderUpdate(order) {
-    if (!order || !order.OrderID || !order.Legs || !Array.isArray(order.Legs)) {
+  async handleOrderUpdate(order) {
+    if (!order || !order.OrderID || !order.Legs || !Array.isArray(order.Legs) || order.Legs.length === 0) {
       return;
     }
 
-    const leg = order.Legs.find(l => (l.Symbol || '').toUpperCase());
+    for (const orderLeg of order.Legs) {
+      const legSymbol = (orderLeg.Symbol || '').toUpperCase();
+      if (legSymbol) {
+        this.resolveOrderWaiters(legSymbol, order);
+      }
+    }
+
+    const leg = order.Legs.find(l => {
+      const sym = (l.Symbol || '').toUpperCase();
+      const side = (l.BuyOrSell || '').toUpperCase();
+      return sym && side === 'SELL';
+    });
     if (!leg) return;
 
     const symbol = (leg.Symbol || '').toUpperCase();
     if (!symbol) return;
 
-    const state = this.trackedPositions.get(symbol);
+    if (this.getOrderType(order) !== 'STOPLIMIT') return;
+
+    let state = this.trackedPositions.get(symbol);
+    if (!state && this.positionsCache && typeof this.positionsCache.get === 'function') {
+      const position = this.positionsCache.get(symbol);
+      if (position) {
+        try {
+          await this.handlePositionUpdate(position);
+        } catch (err) {
+          console.error(`❌ StopLimitService: Failed to bootstrap position tracking for ${symbol}:`, err);
+        }
+        state = this.trackedPositions.get(symbol);
+      }
+    }
+
     if (!state) return;
 
-    if ((order.OrderType || '').toUpperCase() !== 'STOPLIMIT') return;
-    if ((leg.BuyOrSell || '').toUpperCase() !== 'SELL') return;
-
+    const previousOrderId = state.orderId;
     const status = (order.Status || '').toUpperCase();
     state.orderStatus = status;
+
     if (ACTIVE_ORDER_STATUSES.has(status)) {
-      if (state.orderId !== order.OrderID) {
+      if (previousOrderId !== order.OrderID) {
         console.log(`📝 StopLimitService: Linked StopLimit order ${order.OrderID} to ${symbol}`);
       }
-      state.orderId = order.OrderID;
-      state.updatedAt = Date.now();
+      this.updateStateFromOrder(state, order.OrderID, order, leg, status);
     } else if (NON_ACTIVE_STATUSES.has(status)) {
-      if (state.orderId === order.OrderID) {
+      if (previousOrderId === order.OrderID) {
         console.log(`ℹ️ StopLimitService: StopLimit order ${order.OrderID} for ${symbol} is no longer active (status ${status})`);
         state.orderId = null;
         state.orderStatus = status;
@@ -170,6 +195,7 @@ class StopLimitService {
         if (status === 'FLL' || status === 'FIL') {
           console.log(`✅ StopLimitService: Position ${symbol} filled (order status ${status}) – ending tracking.`);
           this.cleanupPosition(symbol);
+          return;
         } else if (status === 'OUT' || status === 'REJ') {
           const fallback = this.findLatestRelevantOrder(symbol);
           if (!fallback) {
@@ -178,17 +204,7 @@ class StopLimitService {
             const fallbackStatus = (fallback.status || '').toUpperCase();
             if (this.isQueuedStatus(fallbackStatus) || fallbackStatus === 'ACK') {
               console.log(`ℹ️ StopLimitService: Found fallback order ${fallback.orderId} with status ${fallbackStatus} for ${symbol}; re-linking.`);
-              state.orderId = fallback.orderId;
-              state.orderStatus = fallbackStatus;
-              state.updatedAt = Date.now();
-              const limit = this.parseNumber(fallback.order.LimitPrice ?? fallback.leg?.LimitPrice ?? fallback.leg?.Price);
-              if (limit !== null && limit !== undefined) {
-                state.lastLimitPrice = limit;
-              }
-              const stopPrice = this.parseNumber(fallback.order.StopPrice ?? fallback.order.StopLimitPrice ?? fallback.leg?.StopPrice ?? fallback.leg?.StopLimitPrice);
-              if (stopPrice !== null && stopPrice !== undefined) {
-                state.lastStopPrice = stopPrice;
-              }
+              this.updateStateFromOrder(state, fallback.orderId, fallback.order, fallback.leg, fallbackStatus);
             } else if (fallbackStatus === 'FLL' || fallbackStatus === 'FIL') {
               console.log(`✅ StopLimitService: Fallback order ${fallback.orderId} is filled; cleaning up position ${symbol}.`);
               this.cleanupPosition(symbol);
@@ -204,6 +220,7 @@ class StopLimitService {
       console.log(`🧹 StopLimitService: Removing tracking for ${symbol} (position closed)`);
       this.trackedPositions.delete(symbol);
     }
+    this.clearOrderWaiters(symbol);
   }
 
   pruneInactiveSymbols(activeSymbols) {
@@ -246,30 +263,7 @@ class StopLimitService {
     }
 
     if (existingOrder) {
-      const { orderId, order } = existingOrder;
-      state.orderId = orderId;
-      state.orderStatus = (order.Status || '').toUpperCase();
-      state.stageIndex = Math.max(state.stageIndex, 0);
-      const existingLimit = this.parseNumber(order.LimitPrice);
-      if (existingLimit !== null && existingLimit !== undefined) {
-        state.lastLimitPrice = existingLimit;
-      } else if (order.Legs && order.Legs.length > 0) {
-        const legLimit = this.parseNumber(order.Legs[0].LimitPrice ?? order.Legs[0].Price);
-        if (legLimit !== null && legLimit !== undefined) {
-          state.lastLimitPrice = legLimit;
-        }
-      }
-      const existingStop = this.parseNumber(order.StopPrice ?? order.StopLimitPrice ?? order.StopPriceValue);
-      if (existingStop !== null && existingStop !== undefined) {
-        state.lastStopPrice = existingStop;
-      } else if (order.Legs && order.Legs.length > 0) {
-        const legStop = this.parseNumber(order.Legs[0].StopPrice ?? order.Legs[0].StopLimitPrice);
-        if (legStop !== null && legStop !== undefined) {
-          state.lastStopPrice = legStop;
-        }
-      }
-      state.updatedAt = Date.now();
-      state.pendingCreate = false;
+      this.updateStateFromOrder(state, existingOrder.orderId, existingOrder.order, existingOrder.leg, existingOrder.order?.Status);
       console.log(`ℹ️ StopLimitService: Existing StopLimit order found for ${state.symbol} (status ${state.orderStatus}) - skipping creation`);
       return;
     }
@@ -315,9 +309,15 @@ class StopLimitService {
         state.updatedAt = Date.now();
       } else {
         console.error(`❌ StopLimitService: Failed to create StopLimit for ${state.symbol}: ${response.error || response.notifyStatus}`);
+        if (await this.maybeAttachExistingStopLimit(state, 'create-rejected')) {
+          console.log(`ℹ️ StopLimitService: Linked existing StopLimit order for ${state.symbol} after rejection.`);
+        }
       }
     } catch (err) {
       console.error(`❌ StopLimitService: Error creating StopLimit for ${state.symbol}:`, err);
+      if (await this.maybeAttachExistingStopLimit(state, 'create-error')) {
+        console.log(`ℹ️ StopLimitService: Linked existing StopLimit order for ${state.symbol} after error.`);
+      }
     } finally {
       state.pendingCreate = false;
     }
@@ -474,7 +474,7 @@ class StopLimitService {
 
       for (const leg of order.Legs) {
         if ((leg.Symbol || '').toUpperCase() === normalized && (leg.BuyOrSell || '').toUpperCase() === 'SELL') {
-          return { orderId, order };
+          return { orderId, order, leg };
         }
       }
     }
@@ -659,7 +659,7 @@ class StopLimitService {
 
   extractOrderId(data) {
     if (!data || typeof data !== 'object') return null;
-    return data.order_id || data.orderId || data.id || null;
+    return data.order_id || data.orderId || data.OrderID || data.id || null;
   }
 
   extractErrorMessage(data) {
@@ -824,6 +824,203 @@ class StopLimitService {
   isQueuedStatus(status) {
     const upper = (status || '').toUpperCase();
     return upper === 'DON' || upper === 'QUE' || upper === 'QUEUED';
+  }
+
+  async maybeAttachExistingStopLimit(state, reason = '') {
+    if (!state || !state.symbol) return false;
+
+    const active = this.findActiveStopLimitOrder(state.symbol);
+    if (active) {
+      this.updateStateFromOrder(state, active.orderId, active.order, active.leg, active.order?.Status);
+      console.log(`ℹ️ StopLimitService: Active StopLimit order linked for ${state.symbol} (reason=${reason || 'unknown'})`);
+      return true;
+    }
+
+    const fallback = this.findLatestRelevantOrder(state.symbol);
+    if (fallback) {
+      this.updateStateFromOrder(state, fallback.orderId, fallback.order, fallback.leg, fallback.status);
+      console.log(`ℹ️ StopLimitService: Latest relevant order (${fallback.status}) linked for ${state.symbol} (reason=${reason || 'unknown'})`);
+      return true;
+    }
+
+    const awaited = await this.waitForOrderFromStream(
+      state.symbol,
+      (order) => {
+        const leg = this.extractStopLimitSellLeg(order, state.symbol);
+        if (!leg) return false;
+        const orderId = this.extractOrderId(order);
+        if (!orderId) return false;
+        const status = (order.Status || '').toUpperCase();
+        if (!ACTIVE_ORDER_STATUSES.has(status)) return false;
+        return { orderId, order, leg };
+      },
+      4000
+    );
+
+    if (awaited && awaited.order && awaited.leg) {
+      const resolvedOrderId = awaited.orderId || this.extractOrderId(awaited.order);
+      if (resolvedOrderId) {
+        this.updateStateFromOrder(state, resolvedOrderId, awaited.order, awaited.leg, awaited.order?.Status);
+        console.log(`ℹ️ StopLimitService: Streamed StopLimit order linked for ${state.symbol} (reason=${reason || 'unknown'})`);
+        return true;
+      }
+    }
+
+    const retryActive = this.findActiveStopLimitOrder(state.symbol);
+    if (retryActive) {
+      this.updateStateFromOrder(state, retryActive.orderId, retryActive.order, retryActive.leg, retryActive.order?.Status);
+      console.log(`ℹ️ StopLimitService: Active StopLimit order linked for ${state.symbol} on retry (reason=${reason || 'unknown'})`);
+      return true;
+    }
+
+    return false;
+  }
+
+  updateStateFromOrder(state, orderId, order, leg = null, statusOverride = null) {
+    if (!state || !order) return;
+
+    const resolvedOrderId = orderId || this.extractOrderId(order);
+    if (resolvedOrderId) {
+      state.orderId = resolvedOrderId;
+    }
+    const status = (statusOverride || order.Status || '').toUpperCase() || null;
+    state.orderStatus = status;
+    state.stageIndex = Math.max(state.stageIndex, 0);
+
+    const legs = Array.isArray(order.Legs) ? order.Legs : [];
+    const matchingLeg = leg || legs.find(l => (l.Symbol || '').toUpperCase() === state.symbol) || legs[0] || null;
+
+    const orderLimit = this.parseNumber(
+      order.LimitPrice ??
+      order.Price ??
+      order.limit_price ??
+      order.limitPrice
+    );
+    const legLimit = this.parseNumber(
+      matchingLeg?.LimitPrice ??
+      matchingLeg?.Price ??
+      matchingLeg?.limit_price ??
+      matchingLeg?.limitPrice
+    );
+    const resolvedLimit = orderLimit ?? legLimit;
+    if (resolvedLimit !== null && resolvedLimit !== undefined) {
+      state.lastLimitPrice = resolvedLimit;
+    }
+
+    const orderStop = this.parseNumber(
+      order.StopPrice ??
+      order.StopLimitPrice ??
+      order.StopPriceValue ??
+      order.stop_price ??
+      order.stopPrice
+    );
+    const legStop = this.parseNumber(
+      matchingLeg?.StopPrice ??
+      matchingLeg?.StopLimitPrice ??
+      matchingLeg?.stop_price ??
+      matchingLeg?.stopPrice
+    );
+    const resolvedStop = orderStop ?? legStop;
+    if (resolvedStop !== null && resolvedStop !== undefined) {
+      state.lastStopPrice = resolvedStop;
+    }
+
+    state.pendingCreate = false;
+    state.pendingUpdate = false;
+    state.updatedAt = Date.now();
+  }
+
+  getOrderType(order) {
+    if (!order) return '';
+    return (order.OrderType || order.order_type || order.orderType || '').toUpperCase();
+  }
+
+  extractStopLimitSellLeg(order, symbol) {
+    if (!order || !symbol) return null;
+    const type = this.getOrderType(order);
+    if (type !== 'STOPLIMIT') return null;
+    const target = symbol.toUpperCase();
+    const legs = Array.isArray(order.Legs) ? order.Legs : [];
+    for (const leg of legs) {
+      const legSymbol = (leg.Symbol || leg.symbol || '').toUpperCase();
+      const side = (leg.BuyOrSell || leg.buy_or_sell || leg.side || '').toUpperCase();
+      if (legSymbol === target && side === 'SELL') {
+        return leg;
+      }
+    }
+    return null;
+  }
+
+  waitForOrderFromStream(symbol, predicate, timeoutMs = 3000) {
+    const key = typeof symbol === 'string' ? symbol.trim().toUpperCase() : '';
+    if (!key) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      const existing = this.orderWaiters.get(key);
+      const waiters = existing || new Set();
+      if (!existing) this.orderWaiters.set(key, waiters);
+
+      let settled = false;
+      const entry = {
+        predicate: typeof predicate === 'function' ? predicate : null,
+        settle: null,
+        timeoutId: null
+      };
+
+      const cleanup = () => {
+        if (waiters.has(entry)) {
+          waiters.delete(entry);
+        }
+        if (waiters.size === 0) {
+          this.orderWaiters.delete(key);
+        }
+      };
+
+      entry.settle = (value) => {
+        if (settled) return;
+        settled = true;
+        if (entry.timeoutId) clearTimeout(entry.timeoutId);
+        cleanup();
+        resolve(value);
+      };
+
+      entry.timeoutId = setTimeout(() => {
+        entry.settle(null);
+      }, Math.max(0, timeoutMs || 0));
+
+      waiters.add(entry);
+    });
+  }
+
+  resolveOrderWaiters(symbol, order) {
+    const key = typeof symbol === 'string' ? symbol.trim().toUpperCase() : '';
+    if (!key) return;
+    const waiters = this.orderWaiters.get(key);
+    if (!waiters || waiters.size === 0) return;
+
+    for (const entry of Array.from(waiters)) {
+      let result = order;
+      if (entry.predicate) {
+        try {
+          result = entry.predicate(order);
+        } catch (err) {
+          continue;
+        }
+      }
+      if (result) {
+        const value = result === true ? { order } : result;
+        entry.settle(value);
+      }
+    }
+  }
+
+  clearOrderWaiters(symbol) {
+    const key = typeof symbol === 'string' ? symbol.trim().toUpperCase() : '';
+    const waiters = key ? this.orderWaiters.get(key) : null;
+    if (!waiters || waiters.size === 0) return;
+    for (const entry of Array.from(waiters)) {
+      entry.settle(null);
+    }
+    this.orderWaiters.delete(key);
   }
 
   isTrackingSymbol(symbol) {
