@@ -12,7 +12,8 @@ class StopLimitService {
     this.analysisEnabled = true;
     this.analysisChangedAt = Date.now();
 
-    this.limitOffset = 0.05; // stop_price = limit_price + 0.05
+    this.limitOffset = 0.02; // stop_price = limit_price + 0.05 (limit is 0.05 below stop)
+    console.log(`⚙️ StopLimitService initialized with limitOffset=${this.limitOffset} (limit will be ${this.limitOffset} below stop price)`);
     this.apiBaseUrl = 'https://sections-bot.inbitme.com';
 
     this.groupConfigs = {
@@ -21,33 +22,39 @@ class StopLimitService {
         priceRange: { minExclusive: 0, maxInclusive: 5 },
         initialOffset: -0.10,
         stages: [
-          { trigger: 0.25, stopOffset: 0.0, label: 'Break-even' },
-          { trigger: 0.35, stopOffset: 0.15, label: '+0.15 from buy' },
-          { trigger: 0.50, stopOffset: 0.30, label: '+0.30 from buy' }
+          { trigger: 0.05, stopOffset: 0.05, label: 'Break-even' },
+          { trigger: 0.10, stopOffset: 0.04, label: '+0.10 from buy' },
+          { trigger: 0.20, stopOffset: 0.10, label: '+0.20 from buy' },
+          { trigger: 0.35, stopOffset: 0.28, label: '+0.35 from buy' },
+          { trigger: 0.50, stopOffset: 0.40, label: '+0.50 from buy' }
         ],
-        autoSellTrigger: 0.70
+        autoSellTrigger: 0.75
       },
       B: {
         label: 'Group B',
         priceRange: { minExclusive: 5, maxInclusive: 10 },
         initialOffset: -0.15,
         stages: [
-          { trigger: 0.35, stopOffset: 0.0, label: 'Break-even' },
-          { trigger: 0.50, stopOffset: 0.20, label: '+0.20 from buy' },
-          { trigger: 0.70, stopOffset: 0.50, label: '+0.50 from buy' }
+          { trigger: 0.05, stopOffset: 0.10, label: 'Break-even' },
+          { trigger: 0.10, stopOffset: 0.02, label: '+0.10 from buy' },
+          { trigger: 0.20, stopOffset: 0.10, label: '+0.20 from buy' },
+          { trigger: 0.40, stopOffset: 0.30, label: '+0.40 from buy' },
+          { trigger: 0.60, stopOffset: 0.50, label: '+0.60 from buy' }
         ],
-        autoSellTrigger: 0.90
+        autoSellTrigger: 0.95
       },
       C: {
         label: 'Group C',
         priceRange: { minExclusive: 10, maxInclusive: 12 },
         initialOffset: -0.20,
         stages: [
-          { trigger: 0.45, stopOffset: 0.0, label: 'Break-even' },
-          { trigger: 0.60, stopOffset: 0.25, label: '+0.25 from buy' },
-          { trigger: 0.90, stopOffset: 0.50, label: '+0.50 from buy' }
+          { trigger: 0.05, stopOffset: 0.10, label: 'Break-even' },
+          { trigger: 0.10, stopOffset: 0.02, label: '+0.10 from buy' },
+          { trigger: 0.30, stopOffset: 0.10, label: '+0.30 from buy' },
+          { trigger: 0.50, stopOffset: 0.30, label: '+0.50 from buy' },
+          { trigger: 0.80, stopOffset: 0.60, label: '+0.80 from buy' }
         ],
-        autoSellTrigger: 1.25
+        autoSellTrigger: 0.95
       }
     };
   }
@@ -102,7 +109,8 @@ class StopLimitService {
         lastUnrealizedQty: unrealizedQty,
         createdAt: Date.now(),
         updatedAt: Date.now(),
-        orderStatus: null
+        orderStatus: null,
+        lastOrderCreateAttempt: null
       };
       this.trackedPositions.set(symbol, state);
     } else {
@@ -112,8 +120,16 @@ class StopLimitService {
       state.lastUnrealizedQty = unrealizedQty;
       state.updatedAt = Date.now();
 
-      if (state.autoSellExecuted || !state.orderId || NON_ACTIVE_STATUSES.has((state.orderStatus || '').toUpperCase())) {
-        console.log(`🔄 StopLimitService: Reinitializing StopLimit tracking for ${symbol}`);
+      // Only reset if order is truly inactive (cancelled, filled, rejected) or if we have no orderId
+      // Don't reset if we're waiting for websocket update (orderId set but status null)
+      const orderStatusUpper = (state.orderStatus || '').toUpperCase();
+      const shouldReset = 
+        state.autoSellExecuted || 
+        (!state.orderId && state.stageIndex >= 0) ||
+        (state.orderStatus && NON_ACTIVE_STATUSES.has(orderStatusUpper));
+
+      if (shouldReset) {
+        console.log(`🔄 StopLimitService: Reinitializing StopLimit tracking for ${symbol} (autoSell=${state.autoSellExecuted}, orderId=${state.orderId}, status=${state.orderStatus})`);
         state.stageIndex = -1;
         state.orderId = null;
         state.orderStatus = null;
@@ -122,9 +138,8 @@ class StopLimitService {
         state.autoSellExecuted = false;
         state.lastStopPrice = null;
         state.lastLimitPrice = null;
-      }
-
-      if (!state.orderId && state.stageIndex !== -1) {
+      } else if (!state.orderId && state.stageIndex !== -1) {
+        // If we have no orderId but stageIndex is set, reset stageIndex
         state.stageIndex = -1;
       }
     }
@@ -385,9 +400,11 @@ class StopLimitService {
     for (const [key, config] of Object.entries(this.groupConfigs)) {
       const { minExclusive, maxInclusive } = config.priceRange;
       if (price > minExclusive && price <= maxInclusive) {
+        console.log(`📊 StopLimitService: Resolved group ${key} for price ${price} (range: ${minExclusive} < price <= ${maxInclusive}, initialOffset=${config.initialOffset})`);
         return key;
       }
     }
+    console.warn(`⚠️ StopLimitService: No group found for price ${price}`);
     return null;
   }
 
@@ -397,6 +414,47 @@ class StopLimitService {
     }
 
     if (state.pendingCreate) {
+      console.log(`⏸️ StopLimitService: Order creation already in progress for ${state.symbol}, skipping duplicate attempt`);
+      return;
+    }
+
+    // If we already have an orderId set (even if not yet in cache), don't create another
+    if (state.orderId) {
+      // Verify the order still exists in cache or is still valid
+      const cachedOrder = this.ordersCache.get(state.orderId);
+      if (cachedOrder) {
+        const status = (cachedOrder.Status || '').toUpperCase();
+        if (ACTIVE_ORDER_STATUSES.has(status) || this.isQueuedStatus(status)) {
+          // Order exists and is active, update state and return
+          const leg = cachedOrder.Legs?.find(l => 
+            (l.Symbol || '').toUpperCase() === state.symbol && 
+            (l.BuyOrSell || '').toUpperCase() === 'SELL'
+          );
+          if (leg) {
+            this.updateStateFromOrder(state, state.orderId, cachedOrder, leg, status);
+            console.log(`✅ StopLimitService: Order ${state.orderId} for ${state.symbol} found in cache (status: ${status}), skipping creation`);
+            return;
+          }
+        }
+      }
+      // If orderId exists but order not in cache yet (websocket delay), wait a bit
+      // Don't create duplicate - the websocket update will arrive soon
+      if (!cachedOrder && state.stageIndex >= 0) {
+        console.log(`⏳ StopLimitService: Order ${state.orderId} for ${state.symbol} not yet in cache (stageIndex=${state.stageIndex}), waiting for websocket update...`);
+        return;
+      }
+      // If orderId exists but stageIndex is -1, something went wrong - check if order exists
+      if (!cachedOrder && state.stageIndex === -1) {
+        console.log(`⚠️ StopLimitService: OrderId ${state.orderId} exists for ${state.symbol} but stageIndex is -1, checking for existing order...`);
+        // Fall through to check for existing orders
+      }
+    }
+
+    // Prevent rapid duplicate creation attempts (within 5 seconds)
+    const now = Date.now();
+    if (state.lastOrderCreateAttempt && (now - state.lastOrderCreateAttempt) < 5000) {
+      const secondsSince = ((now - state.lastOrderCreateAttempt) / 1000).toFixed(1);
+      console.log(`⏸️ StopLimitService: Recent order creation attempt for ${state.symbol} ${secondsSince}s ago, preventing duplicate (orderId: ${state.orderId || 'none'}, stageIndex: ${state.stageIndex})`);
       return;
     }
 
@@ -421,23 +479,38 @@ class StopLimitService {
       return;
     }
 
-    if (state.stageIndex >= 0 && state.orderId) {
+    // If stageIndex >= 0, we've already created an initial order - don't create again
+    if (state.stageIndex >= 0) {
+      console.log(`⏸️ StopLimitService: StageIndex >= 0 for ${state.symbol} (stageIndex=${state.stageIndex}, orderId=${state.orderId || 'none'}), skipping creation`);
       return;
     }
 
+    // Set flags BEFORE async operations to prevent race conditions
     state.pendingCreate = true;
+    state.lastOrderCreateAttempt = Date.now();
+    
     try {
       const config = this.groupConfigs[state.groupKey];
+      if (!config) {
+        console.error(`❌ StopLimitService: No config found for group ${state.groupKey}`);
+        state.pendingCreate = false;
+        return;
+      }
+      
+      console.log(`🔍 StopLimitService: Group ${state.groupKey} config - initialOffset=${config.initialOffset}, avgPrice=${state.avgPrice}`);
       const offsets = this.calculateStopAndLimit(state.avgPrice, config.initialOffset);
       if (!offsets) {
         console.warn(`⚠️ StopLimitService: Could not calculate initial stop/limit for ${state.symbol}`);
+        state.pendingCreate = false;
         return;
       }
 
       const { stopPrice, limitPrice } = offsets;
-      console.log(`🛡️ StopLimitService: Creating initial StopLimit for ${state.symbol} (${config.label}) - stop ${stopPrice}, limit ${limitPrice}`);
+      const stopDiffFromAvg = this.roundPrice(state.avgPrice - stopPrice);
+      console.log(`🛡️ StopLimitService: Creating initial StopLimit for ${state.symbol} (${config.label}) - stop ${stopPrice}, limit ${limitPrice} (avgPrice=${state.avgPrice}, initialOffset=${config.initialOffset}, stopDiffFromAvg=${stopDiffFromAvg})`);
 
-      await this.deleteExistingSellOrders(state.symbol);
+      // Delete any existing SELL orders (but not the one we're about to create, if any)
+      await this.deleteExistingSellOrders(state.symbol, state.orderId);
 
       const body = {
         symbol: state.symbol,
@@ -448,26 +521,36 @@ class StopLimitService {
         limit_price: limitPrice
       };
 
+      console.log(`📤 StopLimitService: Sending order creation request for ${state.symbol} (stop=${stopPrice}, limit=${limitPrice})`);
       const response = await this.postOrder(body);
+      
       if (response.success) {
+        // Always set stageIndex to 0 on success to prevent duplicate creation
+        // even if orderId extraction failed (websocket will provide it later)
         state.stageIndex = 0;
         state.lastStopPrice = stopPrice;
         state.lastLimitPrice = limitPrice;
         if (response.orderId) {
           state.orderId = response.orderId;
-          console.log(`✅ StopLimitService: Initial StopLimit order created for ${state.symbol} (order_id=${response.orderId})`);
+          console.log(`✅ StopLimitService: Initial StopLimit order created for ${state.symbol} (order_id=${response.orderId}, stop=${stopPrice}, limit=${limitPrice})`);
         } else {
-          console.warn(`⚠️ StopLimitService: Initial StopLimit created for ${state.symbol} but no order_id returned`);
+          console.warn(`⚠️ StopLimitService: Initial StopLimit created for ${state.symbol} but no order_id returned in response. StageIndex set to 0 to prevent duplicates. Will wait for websocket update. Response: ${JSON.stringify(response.responseData || {}).substring(0, 200)}`);
+          // Don't set orderId to null - leave it as is, websocket will update it
+          // But stageIndex = 0 will prevent duplicate creation
         }
         state.updatedAt = Date.now();
       } else {
         console.error(`❌ StopLimitService: Failed to create StopLimit for ${state.symbol}: ${response.error || response.notifyStatus}`);
+        // Reset stageIndex on failure so we can retry
+        state.stageIndex = -1;
         if (await this.maybeAttachExistingStopLimit(state, 'create-rejected')) {
           console.log(`ℹ️ StopLimitService: Linked existing StopLimit order for ${state.symbol} after rejection.`);
         }
       }
     } catch (err) {
       console.error(`❌ StopLimitService: Error creating StopLimit for ${state.symbol}:`, err);
+      // Reset stageIndex on error so we can retry
+      state.stageIndex = -1;
       if (await this.maybeAttachExistingStopLimit(state, 'create-error')) {
         console.log(`ℹ️ StopLimitService: Linked existing StopLimit order for ${state.symbol} after error.`);
       }
@@ -587,7 +670,7 @@ class StopLimitService {
     }
   }
 
-  async deleteExistingSellOrders(symbol) {
+  async deleteExistingSellOrders(symbol, excludeOrderId = null) {
     if (!this.analysisEnabled) {
       return;
     }
@@ -597,13 +680,20 @@ class StopLimitService {
       return;
     }
 
-    const cancellableOrders = orders.filter(order => !this.isQueuedStatus(order.status));
+    // Filter out the order we want to exclude (if any) and queued orders
+    const cancellableOrders = orders.filter(order => {
+      if (excludeOrderId && order.orderId === excludeOrderId) {
+        return false; // Don't delete the order we're excluding
+      }
+      return !this.isQueuedStatus(order.status);
+    });
+
     if (!cancellableOrders.length) {
-      console.log(`ℹ️ StopLimitService: Existing SELL order(s) for ${symbol} are queued; keeping pending order in place.`);
+      console.log(`ℹ️ StopLimitService: Existing SELL order(s) for ${symbol} are queued or excluded; keeping pending order in place.`);
       return;
     }
 
-    console.log(`🗑️ StopLimitService: Deleting ${cancellableOrders.length} existing SELL order(s) for ${symbol} before creating new StopLimit`);
+    console.log(`🗑️ StopLimitService: Deleting ${cancellableOrders.length} existing SELL order(s) for ${symbol} before creating new StopLimit${excludeOrderId ? ` (excluding ${excludeOrderId})` : ''}`);
     for (const { orderId } of cancellableOrders) {
       try {
         await this.deleteOrder(orderId);
@@ -691,6 +781,10 @@ class StopLimitService {
     const stopPrice = this.roundPrice(avgPrice + stopOffset);
     const limitPrice = this.roundPrice(stopPrice - this.limitOffset);
 
+    // Debug logging to verify calculation
+    const limitDiffFromAvg = this.roundPrice(avgPrice - limitPrice);
+    console.log(`🔢 StopLimitService: Price calculation - avgPrice=${avgPrice}, stopOffset=${stopOffset}, limitOffset=${this.limitOffset}, stopPrice=${stopPrice}, limitPrice=${limitPrice}, limitDiffFromAvg=${limitDiffFromAvg}`);
+
     if (stopPrice <= 0 || limitPrice <= 0) {
       console.warn(`⚠️ StopLimitService: Calculated non-positive prices (stop=${stopPrice}, limit=${limitPrice})`);
       return null;
@@ -738,11 +832,17 @@ class StopLimitService {
       }
 
       const success = resp.ok;
+      const extractedOrderId = success ? this.extractOrderId(data) : null;
+      
+      if (success && !extractedOrderId) {
+        console.warn(`⚠️ StopLimitService: Order creation succeeded but orderId extraction failed. Response data: ${JSON.stringify(data).substring(0, 500)}`);
+      }
+      
       const result = {
         success,
         notifyStatus,
         responseData: data,
-        orderId: success ? this.extractOrderId(data) : null
+        orderId: extractedOrderId
       };
 
       if (!success) {
@@ -827,8 +927,58 @@ class StopLimitService {
   }
 
   extractOrderId(data) {
-    if (!data || typeof data !== 'object') return null;
-    return data.order_id || data.orderId || data.OrderID || data.id || null;
+    if (data === null || data === undefined) return null;
+
+    if (typeof data === 'string') {
+      const match = data.match(/order[_\s-]*id["']?\s*[:=]\s*["']?([A-Za-z0-9-]+)/i);
+      return match ? match[1] : null;
+    }
+
+    if (typeof data === 'number') {
+      return data;
+    }
+
+    if (Array.isArray(data)) {
+      for (const item of data) {
+        const value = this.extractOrderId(item);
+        if (value) return value;
+      }
+      return null;
+    }
+
+    if (typeof data === 'object') {
+      const direct =
+        data.order_id ??
+        data.orderId ??
+        data.orderID ??
+        data.OrderID ??
+        data.OrderId ??
+        data.orderid ??
+        data.id ??
+        null;
+      if (direct !== null && direct !== undefined) {
+        return direct;
+      }
+
+      const nestedKeys = ['order', 'Order', 'data', 'Data', 'result', 'payload', 'response', 'details'];
+      for (const key of nestedKeys) {
+        if (key in data) {
+          const nested = this.extractOrderId(data[key]);
+          if (nested) return nested;
+        }
+      }
+
+      for (const value of Object.values(data)) {
+        if (value && typeof value === 'object') {
+          const nested = this.extractOrderId(value);
+          if (nested) return nested;
+        }
+      }
+
+      return null;
+    }
+
+    return null;
   }
 
   extractErrorMessage(data) {
