@@ -120,16 +120,18 @@ class StopLimitService {
       state.lastUnrealizedQty = unrealizedQty;
       state.updatedAt = Date.now();
 
-      // Only reset if order is truly inactive (cancelled, filled, rejected) or if we have no orderId
+      // Only reset if order is truly inactive (cancelled, filled, rejected)
+      // Don't reset if we recently created an order (even if orderId extraction failed)
       // Don't reset if we're waiting for websocket update (orderId set but status null)
       const orderStatusUpper = (state.orderStatus || '').toUpperCase();
+      const recentlyCreated = state.lastOrderCreateAttempt && (Date.now() - state.lastOrderCreateAttempt) < 10000; // 10 seconds
       const shouldReset = 
         state.autoSellExecuted || 
-        (!state.orderId && state.stageIndex >= 0) ||
-        (state.orderStatus && NON_ACTIVE_STATUSES.has(orderStatusUpper));
+        (state.orderStatus && NON_ACTIVE_STATUSES.has(orderStatusUpper) && !recentlyCreated) ||
+        (!state.orderId && state.stageIndex >= 0 && !recentlyCreated && !state.pendingCreate);
 
       if (shouldReset) {
-        console.log(`🔄 StopLimitService: Reinitializing StopLimit tracking for ${symbol} (autoSell=${state.autoSellExecuted}, orderId=${state.orderId}, status=${state.orderStatus})`);
+        console.log(`🔄 StopLimitService: Reinitializing StopLimit tracking for ${symbol} (autoSell=${state.autoSellExecuted}, orderId=${state.orderId}, status=${state.orderStatus}, recentlyCreated=${recentlyCreated})`);
         state.stageIndex = -1;
         state.orderId = null;
         state.orderStatus = null;
@@ -138,10 +140,9 @@ class StopLimitService {
         state.autoSellExecuted = false;
         state.lastStopPrice = null;
         state.lastLimitPrice = null;
-      } else if (!state.orderId && state.stageIndex !== -1) {
-        // If we have no orderId but stageIndex is set, reset stageIndex
-        state.stageIndex = -1;
+        state.lastOrderCreateAttempt = null;
       }
+      // Don't reset stageIndex if we recently created an order - wait for websocket to provide orderId
     }
 
     state.updatedAt = Date.now();
@@ -154,7 +155,20 @@ class StopLimitService {
       return;
     }
 
-    await this.ensureInitialOrder(state);
+    // Only ensure initial order if we haven't created one yet
+    // If stageIndex >= 0, we've already created an order (even if orderId not yet set)
+    // If we have an orderId, we definitely have an order
+    // If we recently attempted creation, wait for it to complete
+    const hasOrder = state.stageIndex >= 0 || state.orderId || (state.pendingCreate && state.lastOrderCreateAttempt);
+    
+    if (!hasOrder) {
+      await this.ensureInitialOrder(state);
+    } else if (state.stageIndex >= 0) {
+      // We have an order, just evaluate adjustments (price updates based on unrealized profit)
+      // Don't try to create another order
+      console.log(`✅ StopLimitService: ${symbol} already has StopLimit order (stageIndex=${state.stageIndex}, orderId=${state.orderId || 'pending'}), skipping creation, evaluating adjustments only`);
+    }
+    
     await this.evaluateAdjustments(state, unrealizedQty);
   }
 
@@ -539,6 +553,7 @@ class StopLimitService {
           // But stageIndex = 0 will prevent duplicate creation
         }
         state.updatedAt = Date.now();
+        console.log(`🔒 StopLimitService: Order creation complete for ${state.symbol}. State locked: stageIndex=${state.stageIndex}, orderId=${state.orderId || 'pending'}, lastOrderCreateAttempt=${state.lastOrderCreateAttempt ? new Date(state.lastOrderCreateAttempt).toISOString() : 'none'}`);
       } else {
         console.error(`❌ StopLimitService: Failed to create StopLimit for ${state.symbol}: ${response.error || response.notifyStatus}`);
         // Reset stageIndex on failure so we can retry
