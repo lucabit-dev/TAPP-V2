@@ -9,6 +9,8 @@ class StopLimitService {
     this.positionsCache = positionsCache || null;
     this.trackedPositions = new Map(); // Map<symbol, PositionState>
     this.orderWaiters = new Map(); // Map<symbol, Set<OrderWaiter>>
+    this.analysisEnabled = true;
+    this.analysisChangedAt = Date.now();
 
     this.limitOffset = 0.05; // stop_price = limit_price + 0.05
     this.apiBaseUrl = 'https://sections-bot.inbitme.com';
@@ -103,7 +105,6 @@ class StopLimitService {
         orderStatus: null
       };
       this.trackedPositions.set(symbol, state);
-      await this.ensureInitialOrder(state);
     } else {
       state.avgPrice = avgPrice;
       state.quantity = quantity;
@@ -126,14 +127,19 @@ class StopLimitService {
       if (!state.orderId && state.stageIndex !== -1) {
         state.stageIndex = -1;
       }
+    }
 
-      await this.ensureInitialOrder(state);
+    state.updatedAt = Date.now();
+
+    if (!this.analysisEnabled) {
+      return;
     }
 
     if (state.autoSellExecuted) {
       return;
     }
 
+    await this.ensureInitialOrder(state);
     await this.evaluateAdjustments(state, unrealizedQty);
   }
 
@@ -191,6 +197,8 @@ class StopLimitService {
         state.orderId = null;
         state.orderStatus = status;
         state.updatedAt = Date.now();
+        state.pendingCreate = false;
+        state.pendingUpdate = false;
 
         if (status === 'FLL' || status === 'FIL') {
           console.log(`✅ StopLimitService: Position ${symbol} filled (order status ${status}) – ending tracking.`);
@@ -208,6 +216,20 @@ class StopLimitService {
             } else if (fallbackStatus === 'FLL' || fallbackStatus === 'FIL') {
               console.log(`✅ StopLimitService: Fallback order ${fallback.orderId} is filled; cleaning up position ${symbol}.`);
               this.cleanupPosition(symbol);
+            }
+          }
+        }
+
+        if (status !== 'FLL' && status !== 'FIL') {
+          if (!this.analysisEnabled) {
+            // Do nothing else when automation is disabled; cleanup will happen via cache refresh.
+          } else if (!this.hasActivePosition(symbol)) {
+            this.cleanupPosition(symbol);
+          } else if (!state.orderId && !state.pendingCreate && !state.pendingUpdate) {
+            try {
+              await this.ensureInitialOrder(state);
+            } catch (err) {
+              console.error(`❌ StopLimitService: Failed to ensure StopLimit after ${status} for ${symbol}:`, err);
             }
           }
         }
@@ -232,6 +254,133 @@ class StopLimitService {
     }
   }
 
+  setAnalysisEnabled(enabled) {
+    const normalized = !!enabled;
+    if (this.analysisEnabled === normalized) {
+      return this.analysisEnabled;
+    }
+
+    this.analysisEnabled = normalized;
+    this.analysisChangedAt = Date.now();
+
+    if (!normalized) {
+      for (const state of this.trackedPositions.values()) {
+        state.pendingCreate = false;
+        state.pendingUpdate = false;
+      }
+    }
+
+    console.log(`⚙️ StopLimitService: Automation ${normalized ? 'enabled' : 'disabled'}`);
+    return this.analysisEnabled;
+  }
+
+  isAnalysisEnabled() {
+    return this.analysisEnabled;
+  }
+
+  getAnalysisChangedAt() {
+    return this.analysisChangedAt;
+  }
+
+  getActivePositionSymbols() {
+    if (!this.positionsCache || typeof this.positionsCache.values !== 'function') {
+      return null;
+    }
+
+    const activeSymbols = new Set();
+    for (const position of this.positionsCache.values()) {
+      const symbol = (position?.Symbol || '').toUpperCase();
+      if (!symbol) continue;
+
+      const quantity = this.parseNumber(position?.Quantity);
+      if (!quantity || quantity <= 0) continue;
+
+      const longShort = (position?.LongShort || '').toUpperCase();
+      if (longShort && longShort !== 'LONG') continue;
+
+      activeSymbols.add(symbol);
+    }
+
+    return activeSymbols;
+  }
+
+  hasActivePosition(symbol) {
+    if (!symbol) return false;
+    const normalized = symbol.toUpperCase();
+
+    if (!this.positionsCache || typeof this.positionsCache.get !== 'function') {
+      // Assume active when no cache is available to avoid false negatives
+      return true;
+    }
+
+    const position = this.positionsCache.get(normalized);
+    if (!position) return false;
+
+    const quantity = this.parseNumber(position?.Quantity);
+    if (!quantity || quantity <= 0) return false;
+
+    const longShort = (position?.LongShort || '').toUpperCase();
+    if (longShort && longShort !== 'LONG') return false;
+
+    return true;
+  }
+
+  refreshTrackedPositionsFromCaches() {
+    const activeSymbols = this.getActivePositionSymbols();
+    if (activeSymbols) {
+      for (const symbol of Array.from(this.trackedPositions.keys())) {
+        if (!activeSymbols.has(symbol)) {
+          this.cleanupPosition(symbol);
+        }
+      }
+    }
+
+    for (const state of Array.from(this.trackedPositions.values())) {
+      this.realignStateWithOrders(state);
+    }
+  }
+
+  realignStateWithOrders(state) {
+    if (!state) return;
+
+    const active = this.findActiveStopLimitOrder(state.symbol);
+    if (active) {
+      const status = active.order?.Status || active.order?.status || null;
+      const statusUpper = (status || '').toUpperCase();
+      const currentStatusUpper = (state.orderStatus || '').toUpperCase();
+      if (
+        state.orderId !== active.orderId ||
+        currentStatusUpper !== statusUpper
+      ) {
+        this.updateStateFromOrder(state, active.orderId, active.order, active.leg, status);
+      }
+      return;
+    }
+
+    const fallback = this.findLatestRelevantOrder(state.symbol);
+    if (fallback) {
+      const statusUpper = (fallback.status || '').toUpperCase();
+      if (
+        state.orderId !== fallback.orderId ||
+        (state.orderStatus || '').toUpperCase() !== statusUpper
+      ) {
+        this.updateStateFromOrder(state, fallback.orderId, fallback.order, fallback.leg, fallback.status);
+      }
+
+      if ((statusUpper === 'FIL' || statusUpper === 'FLL') && !this.hasActivePosition(state.symbol)) {
+        this.cleanupPosition(state.symbol);
+      }
+      return;
+    }
+
+    if (state.orderId || state.orderStatus) {
+      state.orderId = null;
+      state.orderStatus = null;
+      state.pendingUpdate = false;
+      state.updatedAt = Date.now();
+    }
+  }
+
   resolveGroup(price) {
     for (const [key, config] of Object.entries(this.groupConfigs)) {
       const { minExclusive, maxInclusive } = config.priceRange;
@@ -243,6 +392,10 @@ class StopLimitService {
   }
 
   async ensureInitialOrder(state) {
+    if (!this.analysisEnabled) {
+      return;
+    }
+
     if (state.pendingCreate) {
       return;
     }
@@ -268,7 +421,7 @@ class StopLimitService {
       return;
     }
 
-    if (state.stageIndex >= 0) {
+    if (state.stageIndex >= 0 && state.orderId) {
       return;
     }
 
@@ -324,6 +477,10 @@ class StopLimitService {
   }
 
   async evaluateAdjustments(state, unrealizedQty) {
+    if (!this.analysisEnabled) {
+      return;
+    }
+
     if (typeof unrealizedQty !== 'number' || Number.isNaN(unrealizedQty)) {
       return;
     }
@@ -348,6 +505,10 @@ class StopLimitService {
   }
 
   async updateStopLimitStage(state, stopOffset, label, stageNumber) {
+    if (!this.analysisEnabled) {
+      return;
+    }
+
     if (this.isQueuedStatus(state.orderStatus)) {
       console.log(`⏳ StopLimitService: StopLimit order for ${state.symbol} is queued (${state.orderStatus}); skipping update to stage ${stageNumber}`);
       return;
@@ -395,6 +556,10 @@ class StopLimitService {
   }
 
   async executeAutoSell(state) {
+    if (!this.analysisEnabled) {
+      return;
+    }
+
     state.autoSellExecuted = true;
 
     try {
@@ -423,6 +588,10 @@ class StopLimitService {
   }
 
   async deleteExistingSellOrders(symbol) {
+    if (!this.analysisEnabled) {
+      return;
+    }
+
     const orders = this.findActiveSellOrders(symbol);
     if (!orders.length) {
       return;
@@ -672,8 +841,13 @@ class StopLimitService {
   }
 
   getSnapshot() {
+    this.refreshTrackedPositionsFromCaches();
+
     const rows = [];
     for (const state of this.trackedPositions.values()) {
+      if (!this.hasActivePosition(state.symbol)) {
+        continue;
+      }
       rows.push(this.toSnapshot(state));
     }
     return rows.sort((a, b) => a.symbol.localeCompare(b.symbol));
@@ -765,6 +939,10 @@ class StopLimitService {
   }
 
   getStatus(state) {
+    if (!this.analysisEnabled) {
+      return 'analysis-disabled';
+    }
+
     const orderStatus = (state.orderStatus || '').toUpperCase();
     if (state.autoSellExecuted) return 'auto-sell-executed';
     if (state.pendingCreate) return 'creating-order';
@@ -792,6 +970,8 @@ class StopLimitService {
         return 'Awaiting StopLimit';
       case 'awaiting-ack':
         return 'Awaiting Confirmation';
+      case 'analysis-disabled':
+        return 'Automation Disabled';
       case 'active':
       default:
         return 'Active';

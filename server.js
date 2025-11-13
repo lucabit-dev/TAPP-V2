@@ -2569,6 +2569,11 @@ async function syncStopLimitWithPositionsCache() {
   if (!stopLimitService) return;
   if (isStopLimitSyncRunning) return;
 
+  if (!stopLimitService.isAnalysisEnabled()) {
+    stopLimitService.refreshTrackedPositionsFromCaches();
+    return;
+  }
+
   const positions = Array.from(positionsCache.values());
   const activeSymbols = new Set(positionsCache.keys());
 
@@ -2631,10 +2636,46 @@ setTimeout(() => runStopLimitMonitoring(), 0);
 app.get('/api/stoplimit/status', requireDbReady, requireAuth, (req, res) => {
   try {
     const snapshot = stopLimitService.getSnapshot();
-    res.json({ success: true, data: snapshot });
+    res.json({
+      success: true,
+      data: snapshot,
+      analysisEnabled: stopLimitService.isAnalysisEnabled(),
+      analysisChangedAt: stopLimitService.getAnalysisChangedAt()
+    });
   } catch (e) {
     console.error('❌ Error retrieving StopLimit snapshot:', e);
     res.status(500).json({ success: false, error: e.message || 'Failed to retrieve StopLimit status' });
+  }
+});
+
+app.post('/api/stoplimit/analysis', requireDbReady, requireAuth, async (req, res) => {
+  try {
+    const { enabled } = req.body || {};
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ success: false, error: '`enabled` must be a boolean' });
+    }
+
+    const previous = stopLimitService.isAnalysisEnabled();
+    const current = stopLimitService.setAnalysisEnabled(enabled);
+
+    if (current && !previous) {
+      setTimeout(() => {
+        try {
+          runStopLimitMonitoring();
+        } catch (err) {
+          console.error('⚠️ Failed to trigger StopLimit monitoring after enabling automation:', err?.message || err);
+        }
+      }, 0);
+    }
+
+    res.json({
+      success: true,
+      analysisEnabled: stopLimitService.isAnalysisEnabled(),
+      analysisChangedAt: stopLimitService.getAnalysisChangedAt()
+    });
+  } catch (err) {
+    console.error('❌ Failed to update StopLimit automation state:', err);
+    res.status(500).json({ success: false, error: err?.message || 'Failed to update automation state' });
   }
 });
 

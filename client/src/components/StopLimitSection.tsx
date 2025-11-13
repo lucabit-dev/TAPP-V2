@@ -38,7 +38,8 @@ const statusStyles: Record<string, string> = {
   queued: 'bg-[#312f20] text-[#fde68a] border border-[#fde68a]/30',
   'awaiting-stoplimit': 'bg-[#332f1f] text-[#fde68a] border border-[#fde68a]/30',
   'awaiting-ack': 'bg-[#2f1f33] text-[#e879f9] border border-[#e879f9]/30',
-  'auto-sell-executed': 'bg-[#3a1e1e] text-[#f87171] border border-[#f87171]/30'
+  'auto-sell-executed': 'bg-[#3a1e1e] text-[#f87171] border border-[#f87171]/30',
+  'analysis-disabled': 'bg-[#3a1e1e] text-[#f87171] border border-[#f87171]/40'
 };
 
 const statusDot: Record<string, string> = {
@@ -48,7 +49,8 @@ const statusDot: Record<string, string> = {
   queued: 'bg-[#fde68a]',
   'awaiting-stoplimit': 'bg-[#fde68a]',
   'awaiting-ack': 'bg-[#e879f9]',
-  'auto-sell-executed': 'bg-[#f87171]'
+  'auto-sell-executed': 'bg-[#f87171]',
+  'analysis-disabled': 'bg-[#f87171]'
 };
 
 const StopLimitSection: React.FC = () => {
@@ -56,8 +58,10 @@ const StopLimitSection: React.FC = () => {
   const [rows, setRows] = React.useState<StopLimitSnapshot[]>([]);
   const [loading, setLoading] = React.useState<boolean>(true);
   const [error, setError] = React.useState<string | null>(null);
-  const [isAutoRefresh, setIsAutoRefresh] = React.useState<boolean>(true);
+  const [analysisEnabled, setAnalysisEnabled] = React.useState<boolean>(true);
+  const [analysisChangedAt, setAnalysisChangedAt] = React.useState<number | null>(null);
   const [lastUpdated, setLastUpdated] = React.useState<number | null>(null);
+  const [isTogglingAutomation, setIsTogglingAutomation] = React.useState<boolean>(false);
   const refreshIntervalRef = React.useRef<number | null>(null);
 
   const fetchStatus = React.useCallback(async () => {
@@ -74,6 +78,8 @@ const StopLimitSection: React.FC = () => {
       }
 
       setRows(Array.isArray(data.data) ? data.data : []);
+      setAnalysisEnabled(data.analysisEnabled !== false);
+      setAnalysisChangedAt(typeof data.analysisChangedAt === 'number' ? data.analysisChangedAt : null);
       setError(null);
       setLastUpdated(Date.now());
     } catch (err: any) {
@@ -88,17 +94,13 @@ const StopLimitSection: React.FC = () => {
   }, [fetchStatus]);
 
   React.useEffect(() => {
-    if (isAutoRefresh) {
-      if (refreshIntervalRef.current) {
-        clearInterval(refreshIntervalRef.current);
-      }
-      refreshIntervalRef.current = window.setInterval(() => {
-        fetchStatus();
-      }, 4000);
-    } else if (refreshIntervalRef.current) {
+    if (refreshIntervalRef.current) {
       clearInterval(refreshIntervalRef.current);
-      refreshIntervalRef.current = null;
     }
+
+    refreshIntervalRef.current = window.setInterval(() => {
+      fetchStatus();
+    }, 4000);
 
     return () => {
       if (refreshIntervalRef.current) {
@@ -106,18 +108,52 @@ const StopLimitSection: React.FC = () => {
         refreshIntervalRef.current = null;
       }
     };
-  }, [isAutoRefresh, fetchStatus]);
+  }, [fetchStatus]);
+
+  const toggleAutomation = React.useCallback(async () => {
+    if (isTogglingAutomation) return;
+    setIsTogglingAutomation(true);
+    setError(null);
+
+    try {
+      const target = !analysisEnabled;
+      const response = await fetchWithAuth(`${API_BASE_URL}/stoplimit/analysis`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ enabled: target })
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || `HTTP ${response.status}`);
+      }
+
+      setAnalysisEnabled(data.analysisEnabled !== false);
+      setAnalysisChangedAt(
+        typeof data.analysisChangedAt === 'number' ? data.analysisChangedAt : Date.now()
+      );
+      await fetchStatus();
+    } catch (err: any) {
+      setError(err.message || 'Failed to update StopLimit automation');
+    } finally {
+      setIsTogglingAutomation(false);
+    }
+  }, [analysisEnabled, fetchStatus, fetchWithAuth, isTogglingAutomation]);
 
   const summary = React.useMemo(() => {
     const total = rows.length;
-    const active = rows.filter(row => row.status === 'active').length;
-    const pending = rows.filter(row =>
-      row.status === 'creating-order' ||
-      row.status === 'awaiting-stoplimit' ||
-      row.status === 'awaiting-ack' ||
-      row.status === 'updating-order' ||
-      row.status === 'queued'
-    ).length;
+    const active = analysisEnabled ? rows.filter(row => row.status === 'active').length : 0;
+    const pending = analysisEnabled
+      ? rows.filter(row =>
+          row.status === 'creating-order' ||
+          row.status === 'awaiting-stoplimit' ||
+          row.status === 'awaiting-ack' ||
+          row.status === 'updating-order' ||
+          row.status === 'queued'
+        ).length
+      : 0;
     const autoSold = rows.filter(row => row.autoSellExecuted || row.status === 'auto-sell-executed').length;
 
     const groupCounts = rows.reduce<Record<string, number>>((acc, row) => {
@@ -126,7 +162,7 @@ const StopLimitSection: React.FC = () => {
     }, {});
 
     return { total, active, pending, autoSold, groupCounts };
-  }, [rows]);
+  }, [rows, analysisEnabled]);
 
   const formatCurrency = (value: number | null) => {
     if (value === null || value === undefined || Number.isNaN(value)) return 'N/A';
@@ -188,9 +224,13 @@ const StopLimitSection: React.FC = () => {
     }
   };
 
-  const refreshClass = isAutoRefresh
+  const automationStatusClass = analysisEnabled ? 'text-[#4ade80]' : 'text-[#f87171]';
+  const automationButtonClass = analysisEnabled
     ? 'bg-[#1e3a2e] text-[#4ade80] border border-[#4ade80]/30 hover:bg-[#1e3a2e]/80'
-    : 'bg-[#2a2820] text-[#eae9e9]/80 border border-[#2a2820] hover:bg-[#1f1e18]';
+    : 'bg-[#3a1e1e] text-[#f87171] border border-[#f87171]/40 hover:bg-[#3a1e1e]/80';
+  const automationButtonLabel = isTogglingAutomation
+    ? 'Updating...'
+    : `Auto ${analysisEnabled ? 'ON' : 'OFF'}`;
 
   return (
     <div className="h-full flex flex-col bg-[#14130e]">
@@ -202,25 +242,38 @@ const StopLimitSection: React.FC = () => {
               Live overview of automated StopLimit management for active positions
             </p>
           </div>
-          <div className="flex items-center space-x-3">
+          <div className="flex flex-col items-start lg:items-end space-y-2">
             <div className="text-[11px] text-[#eae9e9]/60">
               Last update: {lastUpdated ? `${formatRelativeTime(lastUpdated)} (${formatTimestamp(lastUpdated)})` : 'N/A'}
             </div>
-            <button
-              onClick={() => fetchStatus()}
-              className="px-3 py-1.5 text-xs font-semibold rounded border border-[#2a2820] text-[#eae9e9]/80 hover:text-[#eae9e9] hover:border-[#eae9e9]/30 transition-colors"
-            >
-              Refresh
-            </button>
-            <button
-              onClick={() => setIsAutoRefresh(prev => !prev)}
-              className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors ${refreshClass}`}
-            >
-              Auto {isAutoRefresh ? 'ON' : 'OFF'}
-            </button>
+            <div className={`text-[11px] font-semibold ${automationStatusClass}`}>
+              Automation {analysisEnabled ? 'Enabled' : 'Disabled'}
+              {analysisChangedAt ? ` • ${formatRelativeTime(analysisChangedAt)} (${formatTimestamp(analysisChangedAt)})` : ''}
+            </div>
+            <div className="flex items-center space-x-3">
+              <button
+                onClick={() => fetchStatus()}
+                className="px-3 py-1.5 text-xs font-semibold rounded border border-[#2a2820] text-[#eae9e9]/80 hover:text-[#eae9e9] hover:border-[#eae9e9]/30 transition-colors"
+              >
+                Refresh
+              </button>
+              <button
+                onClick={toggleAutomation}
+                disabled={isTogglingAutomation}
+                className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors ${automationButtonClass} ${isTogglingAutomation ? 'opacity-60 cursor-not-allowed' : ''}`}
+              >
+                {automationButtonLabel}
+              </button>
+            </div>
           </div>
         </div>
       </div>
+
+      {!analysisEnabled && (
+        <div className="px-4 py-2 bg-[#3a1e1e] border-b border-[#f87171]/40 text-[#f87171] text-xs">
+          StopLimit automation is disabled. Orders will not be created or updated automatically while AUTO is OFF.
+        </div>
+      )}
 
       <div className="px-3 py-2 border-b border-[#2a2820]/40">
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
@@ -234,12 +287,12 @@ const StopLimitSection: React.FC = () => {
           <SummaryCard
             title="Active Stops"
             value={summary.active}
-            subtitle="Stops currently enforced"
+            subtitle={analysisEnabled ? 'Stops currently enforced' : 'Automation paused'}
           />
           <SummaryCard
             title="Pending Actions"
             value={summary.pending}
-            subtitle="Orders awaiting execution or update"
+            subtitle={analysisEnabled ? 'Orders awaiting execution or update' : 'Automation paused'}
           />
           <SummaryCard
             title="Auto-Sell Executed"
@@ -300,7 +353,9 @@ const StopLimitSection: React.FC = () => {
                   const orderStatusClass =
                     row.status === 'queued'
                       ? 'text-[#fde68a]'
-                      : 'text-[#eae9e9]/50';
+                      : row.status === 'analysis-disabled'
+                        ? 'text-[#f87171]'
+                        : 'text-[#eae9e9]/50';
 
                   return (
                     <div
@@ -308,72 +363,72 @@ const StopLimitSection: React.FC = () => {
                       className="px-4 py-3 bg-[#14130e] hover:bg-[#1e1d17] transition-colors"
                     >
                       <div className="grid grid-cols-12 gap-2 items-center text-xs text-[#eae9e9]/80">
-                      <div className="col-span-2 flex items-center space-x-3">
-                        <div className={`w-2 h-2 rounded-full ${statusDot[row.status] || 'bg-[#808080]'}`}></div>
-                        <div>
-                          <div className="text-sm font-semibold text-[#eae9e9]">{row.symbol}</div>
-                          <div className="flex items-center space-x-2 mt-1">
-                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${statusStyles[row.status] || 'bg-[#2a2820] text-[#eae9e9]/80 border border-[#2a2820]'}`}>
-                              {row.statusLabel}
-                            </span>
-                            <span className="text-[10px] text-[#eae9e9]/50">
-                              Avg {formatCurrency(row.avgPrice)}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                      <div className="col-span-1 text-center">
-                        <div className="font-semibold text-[#eae9e9]">{row.groupLabel}</div>
-                        <div className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Group {row.groupKey}</div>
-                      </div>
-                      <div className="col-span-2">
-                        <div className="font-semibold text-[#eae9e9]">{row.stageLabel}</div>
-                        <div className="text-[10px] text-[#eae9e9]/60">{row.stageDescription}</div>
-                        {row.nextTrigger !== null && row.nextStageLabel && (
-                          <div className="text-[10px] text-[#eae9e9]/45 mt-1">
-                            Next: {row.nextStageLabel} at {formatOffset(row.nextTrigger)}
-                          </div>
-                        )}
-                      </div>
-                      <div className="col-span-1 text-right">
-                        <div className={`font-mono font-semibold ${row.unrealizedQty !== null && row.unrealizedQty >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
-                          {row.unrealizedQty !== null ? formatNumber(row.unrealizedQty, 2) : 'N/A'}
-                        </div>
-                        <div className="text-[10px] text-[#eae9e9]/50">
-                          Target {row.autoSellTrigger !== null ? formatNumber(row.autoSellTrigger, 2) : 'N/A'}
-                        </div>
-                        <div className="text-[10px] text-[#eae9e9]/45">
-                          Qty {row.quantity ? row.quantity.toLocaleString() : 'N/A'}
-                        </div>
-                      </div>
-                      <div className="col-span-2">
-                        <div className="flex items-center space-x-2">
-                          <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Stop</span>
-                          <span className="font-mono text-sm text-[#eae9e9]">{formatCurrency(row.stopPrice)}</span>
-                        </div>
-                        <div className="flex items-center space-x-2">
-                          <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Limit</span>
-                          <span className="font-mono text-sm text-[#eae9e9]">{formatCurrency(row.limitPrice)}</span>
-                        </div>
-                      </div>
-                      <div className="col-span-2">
-                        {row.progress !== null ? (
-                          <div className="space-y-1">
-                            <div className="w-full h-2 bg-[#2a2820] rounded-full overflow-hidden">
-                              <div
-                                className={`h-full rounded-full transition-all duration-500 ${row.progress >= 0.75 ? 'bg-[#22c55e]' : row.progress >= 0.4 ? 'bg-[#38bdf8]' : 'bg-[#facc15]'}`}
-                                style={{ width: `${Math.min(100, Math.max(0, row.progress * 100))}%` }}
-                              ></div>
-                            </div>
-                            <div className="flex items-center justify-between text-[10px] text-[#eae9e9]/60">
-                              <span>{(Math.min(100, Math.max(0, (row.progress || 0) * 100))).toFixed(0)}%</span>
-                              <span>Auto sell at {row.autoSellTrigger !== null ? formatNumber(row.autoSellTrigger, 2) : 'N/A'}</span>
+                        <div className="col-span-2 flex items-center space-x-3">
+                          <div className={`w-2 h-2 rounded-full ${statusDot[row.status] || 'bg-[#808080]'}`}></div>
+                          <div>
+                            <div className="text-sm font-semibold text-[#eae9e9]">{row.symbol}</div>
+                            <div className="flex items-center space-x-2 mt-1">
+                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${statusStyles[row.status] || 'bg-[#2a2820] text-[#eae9e9]/80 border border-[#2a2820]'}`}>
+                                {row.statusLabel}
+                              </span>
+                              <span className="text-[10px] text-[#eae9e9]/50">
+                                Avg {formatCurrency(row.avgPrice)}
+                              </span>
                             </div>
                           </div>
-                        ) : (
-                          <span className="text-[10px] text-[#eae9e9]/50">Progress N/A</span>
-                        )}
-                      </div>
+                        </div>
+                        <div className="col-span-1 text-center">
+                          <div className="font-semibold text-[#eae9e9]">{row.groupLabel}</div>
+                          <div className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Group {row.groupKey}</div>
+                        </div>
+                        <div className="col-span-2">
+                          <div className="font-semibold text-[#eae9e9]">{row.stageLabel}</div>
+                          <div className="text-[10px] text-[#eae9e9]/60">{row.stageDescription}</div>
+                          {row.nextTrigger !== null && row.nextStageLabel && (
+                            <div className="text-[10px] text-[#eae9e9]/45 mt-1">
+                              Next: {row.nextStageLabel} at {formatOffset(row.nextTrigger)}
+                            </div>
+                          )}
+                        </div>
+                        <div className="col-span-1 text-right">
+                          <div className={`font-mono font-semibold ${row.unrealizedQty !== null && row.unrealizedQty >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
+                            {row.unrealizedQty !== null ? formatNumber(row.unrealizedQty, 2) : 'N/A'}
+                          </div>
+                          <div className="text-[10px] text-[#eae9e9]/50">
+                            Target {row.autoSellTrigger !== null ? formatNumber(row.autoSellTrigger, 2) : 'N/A'}
+                          </div>
+                          <div className="text-[10px] text-[#eae9e9]/45">
+                            Qty {row.quantity ? row.quantity.toLocaleString() : 'N/A'}
+                          </div>
+                        </div>
+                        <div className="col-span-2">
+                          <div className="flex items-center space-x-2">
+                            <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Stop</span>
+                            <span className="font-mono text-sm text-[#eae9e9]">{formatCurrency(row.stopPrice)}</span>
+                          </div>
+                          <div className="flex items-center space-x-2">
+                            <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Limit</span>
+                            <span className="font-mono text-sm text-[#eae9e9]">{formatCurrency(row.limitPrice)}</span>
+                          </div>
+                        </div>
+                        <div className="col-span-2">
+                          {row.progress !== null ? (
+                            <div className="space-y-1">
+                              <div className="w-full h-2 bg-[#2a2820] rounded-full overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full transition-all duration-500 ${row.progress >= 0.75 ? 'bg-[#22c55e]' : row.progress >= 0.4 ? 'bg-[#38bdf8]' : 'bg-[#facc15]'}`}
+                                  style={{ width: `${Math.min(100, Math.max(0, row.progress * 100))}%` }}
+                                ></div>
+                              </div>
+                              <div className="flex items-center justify-between text-[10px] text-[#eae9e9]/60">
+                                <span>{(Math.min(100, Math.max(0, (row.progress || 0) * 100))).toFixed(0)}%</span>
+                                <span>Auto sell at {row.autoSellTrigger !== null ? formatNumber(row.autoSellTrigger, 2) : 'N/A'}</span>
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-[#eae9e9]/50">Progress N/A</span>
+                          )}
+                        </div>
                         <div className="col-span-2">
                           <div className="font-mono text-xs text-[#eae9e9] truncate">
                             {row.orderId || 'No order ID yet'}
