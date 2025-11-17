@@ -8,11 +8,12 @@ class StopLimitService {
     this.ordersCache = ordersCache;
     this.positionsCache = positionsCache || null;
     this.trackedPositions = new Map(); // Map<symbol, PositionState>
+    this.soldPositions = new Map(); // Map<symbol, SoldPositionState>
     this.orderWaiters = new Map(); // Map<symbol, Set<OrderWaiter>>
     this.analysisEnabled = true;
     this.analysisChangedAt = Date.now();
 
-    this.limitOffset = 0.02; // stop_price = limit_price + 0.05 (limit is 0.05 below stop)
+    this.limitOffset = 0.02; // limit price always stays $0.02 below stop (stop_price = limit_price + 0.02)
     console.log(`⚙️ StopLimitService initialized with limitOffset=${this.limitOffset} (limit will be ${this.limitOffset} below stop price)`);
     this.apiBaseUrl = 'https://sections-bot.inbitme.com';
 
@@ -22,11 +23,11 @@ class StopLimitService {
         priceRange: { minExclusive: 0, maxInclusive: 5 },
         initialOffset: -0.10,
         stages: [
-          { trigger: 0.05, stopOffset: 0.05, label: 'Break-even' },
+          { trigger: 0.05, stopOffset: -0.05, label: 'Break-even' },
           { trigger: 0.10, stopOffset: 0.04, label: '+0.10 from buy' },
           { trigger: 0.20, stopOffset: 0.10, label: '+0.20 from buy' },
-          { trigger: 0.35, stopOffset: 0.28, label: '+0.35 from buy' },
-          { trigger: 0.50, stopOffset: 0.40, label: '+0.50 from buy' }
+          { trigger: 0.35, stopOffset: 0.28, label: '+0.28 from buy' },
+          { trigger: 0.50, stopOffset: 0.40, label: '+0.40 from buy' }
         ],
         autoSellTrigger: 0.75
       },
@@ -35,7 +36,7 @@ class StopLimitService {
         priceRange: { minExclusive: 5, maxInclusive: 10 },
         initialOffset: -0.15,
         stages: [
-          { trigger: 0.05, stopOffset: 0.10, label: 'Break-even' },
+          { trigger: 0.05, stopOffset: -0.10, label: 'Break-even' },
           { trigger: 0.10, stopOffset: 0.02, label: '+0.10 from buy' },
           { trigger: 0.20, stopOffset: 0.10, label: '+0.20 from buy' },
           { trigger: 0.40, stopOffset: 0.30, label: '+0.40 from buy' },
@@ -48,7 +49,7 @@ class StopLimitService {
         priceRange: { minExclusive: 10, maxInclusive: 12 },
         initialOffset: -0.20,
         stages: [
-          { trigger: 0.05, stopOffset: 0.10, label: 'Break-even' },
+          { trigger: 0.05, stopOffset: -0.10, label: 'Break-even' },
           { trigger: 0.10, stopOffset: 0.02, label: '+0.10 from buy' },
           { trigger: 0.30, stopOffset: 0.10, label: '+0.30 from buy' },
           { trigger: 0.50, stopOffset: 0.30, label: '+0.50 from buy' },
@@ -67,6 +68,11 @@ class StopLimitService {
     const avgPrice = this.parseNumber(position?.AveragePrice);
     const unrealizedQty = this.parseNumber(position?.UnrealizedProfitLossQty);
     const longShort = (position?.LongShort || '').toUpperCase();
+    
+    // Debug logging for stage evaluation
+    if (unrealizedQty !== null && unrealizedQty !== undefined) {
+      console.log(`📊 StopLimitService: ${symbol} position update - unrealizedQty=${unrealizedQty.toFixed(4)}, quantity=${quantity}, avgPrice=${avgPrice?.toFixed(2)}`);
+    }
 
     if (!quantity || quantity <= 0) {
       this.cleanupPosition(symbol);
@@ -80,11 +86,39 @@ class StopLimitService {
 
     if (longShort !== 'LONG') {
       // Only manage long positions for this automation
+      // If we were tracking this position, cleanup since it's no longer LONG
+      if (this.trackedPositions.has(symbol)) {
+        console.log(`🧹 StopLimitService: Position ${symbol} is no longer LONG (${longShort}), cleaning up tracking`);
+        this.cleanupPosition(symbol);
+      }
+      return;
+    }
+
+    // CRITICAL: If quantity is 0 or negative, position is closed - cleanup immediately
+    if (!quantity || quantity <= 0) {
+      if (this.trackedPositions.has(symbol)) {
+        console.log(`🧹 StopLimitService: Position ${symbol} is closed (quantity: ${quantity}), cleaning up tracking immediately`);
+        this.cleanupPosition(symbol);
+      }
       return;
     }
 
     let state = this.trackedPositions.get(symbol);
     if (!state) {
+      // CRITICAL: Final validation before creating new state
+      // This prevents re-adding closed positions that might have passed earlier checks
+      if (!this.hasActivePosition(symbol)) {
+        console.log(`🧹 StopLimitService: Skipping ${symbol} - position is not active (may have closed)`);
+        return;
+      }
+
+      // Double-check quantity is still valid
+      const currentQuantity = this.parseNumber(position?.Quantity);
+      if (!currentQuantity || currentQuantity <= 0) {
+        console.log(`🧹 StopLimitService: Skipping ${symbol} - quantity is ${currentQuantity}`);
+        return;
+      }
+
       const group = this.resolveGroup(avgPrice);
       if (!group) {
         console.warn(`⚠️ StopLimitService: ${symbol} price ${avgPrice} outside supported range - skipping StopLimit automation`);
@@ -113,7 +147,16 @@ class StopLimitService {
         lastOrderCreateAttempt: null
       };
       this.trackedPositions.set(symbol, state);
+      console.log(`✅ StopLimitService: Started tracking ${symbol} (quantity: ${quantity}, avgPrice: ${avgPrice})`);
     } else {
+      // CRITICAL: Double-check position is still active before updating state
+      // This handles cases where position closes between updates
+      if (!this.hasActivePosition(symbol)) {
+        console.log(`🧹 StopLimitService: Position ${symbol} is no longer active during state update, cleaning up`);
+        this.cleanupPosition(symbol);
+        return;
+      }
+
       state.avgPrice = avgPrice;
       state.quantity = quantity;
       state.positionId = position?.PositionID || state.positionId;
@@ -177,6 +220,7 @@ class StopLimitService {
       return;
     }
 
+    // Resolve order waiters for all legs
     for (const orderLeg of order.Legs) {
       const legSymbol = (orderLeg.Symbol || '').toUpperCase();
       if (legSymbol) {
@@ -184,6 +228,7 @@ class StopLimitService {
       }
     }
 
+    // Find SELL leg
     const leg = order.Legs.find(l => {
       const sym = (l.Symbol || '').toUpperCase();
       const side = (l.BuyOrSell || '').toUpperCase();
@@ -194,12 +239,24 @@ class StopLimitService {
     const symbol = (leg.Symbol || '').toUpperCase();
     if (!symbol) return;
 
-    if (this.getOrderType(order) !== 'STOPLIMIT') return;
+    // Process StopLimit orders and Market SELL orders (from auto-sell)
+    const orderType = this.getOrderType(order);
+    const isStopLimit = orderType === 'STOPLIMIT';
+    const isMarketSell = orderType === 'MARKET' && (leg.BuyOrSell || '').toUpperCase() === 'SELL';
+    
+    if (!isStopLimit && !isMarketSell) return;
 
+    const orderId = order.OrderID;
+    const status = (order.Status || '').toUpperCase();
+    
+    console.log(`📥 StopLimitService: Received ${orderType} SELL order update for ${symbol} - OrderID: ${orderId}, Status: ${status}`);
+
+    // Try to get or create state for this symbol
     let state = this.trackedPositions.get(symbol);
     if (!state && this.positionsCache && typeof this.positionsCache.get === 'function') {
       const position = this.positionsCache.get(symbol);
       if (position) {
+        console.log(`🔄 StopLimitService: Bootstrapping position tracking for ${symbol} from order update`);
         try {
           await this.handlePositionUpdate(position);
         } catch (err) {
@@ -209,20 +266,208 @@ class StopLimitService {
       }
     }
 
-    if (!state) return;
+    // If no state exists, we can't track it (no active position)
+    if (!state) {
+      console.log(`ℹ️ StopLimitService: No tracked state for ${symbol}, order ${orderId} will be linked when position is detected`);
+      return;
+    }
 
     const previousOrderId = state.orderId;
-    const status = (order.Status || '').toUpperCase();
     state.orderStatus = status;
 
-    if (ACTIVE_ORDER_STATUSES.has(status)) {
-      if (previousOrderId !== order.OrderID) {
-        console.log(`📝 StopLimitService: Linked StopLimit order ${order.OrderID} to ${symbol}`);
+    // CRITICAL: Always link the order if it's active or queued, regardless of previous state
+    // This ensures orders from websocket are immediately linked
+    if (ACTIVE_ORDER_STATUSES.has(status) || this.isQueuedStatus(status) || status === 'ACK') {
+      const wasLinked = previousOrderId === orderId;
+      this.updateStateFromOrder(state, orderId, order, leg, status);
+      
+      if (!wasLinked) {
+        console.log(`🔗 StopLimitService: LINKED StopLimit order ${orderId} to ${symbol} (status: ${status}) - Order now tracked`);
+      } else {
+        console.log(`🔄 StopLimitService: Updated StopLimit order ${orderId} for ${symbol} (status: ${status})`);
       }
-      this.updateStateFromOrder(state, order.OrderID, order, leg, status);
-    } else if (NON_ACTIVE_STATUSES.has(status)) {
-      if (previousOrderId === order.OrderID) {
-        console.log(`ℹ️ StopLimitService: StopLimit order ${order.OrderID} for ${symbol} is no longer active (status ${status})`);
+      
+      // Clear pending flags since we now have a confirmed order
+      state.pendingCreate = false;
+      state.pendingUpdate = false;
+      return; // Order is active, no further action needed
+    } 
+    
+    // Handle non-active statuses
+    if (NON_ACTIVE_STATUSES.has(status)) {
+      // CRITICAL: Handle REJ status even if order wasn't previously linked (newly created orders)
+      if (status === 'REJ' && isStopLimit) {
+        // Check if this order matches our tracked order (by orderId or by symbol if we're waiting for it)
+        const isOurOrder = previousOrderId === orderId || 
+                          (state.stageIndex >= 0 && !state.orderId && state.pendingCreate) ||
+                          (state.orderId === orderId);
+        
+        if (isOurOrder) {
+          console.log(`❌ StopLimitService: StopLimit order ${orderId} for ${symbol} was REJECTED. Resetting state to allow retry.`);
+          
+          // Update state to reflect rejection
+          state.orderStatus = 'REJ';
+          state.pendingCreate = false;
+          state.pendingUpdate = false;
+          
+          // For initial orders (stageIndex 0), reset to allow retry
+          // For stage updates (stageIndex > 0), keep orderId but revert stage
+          if (state.stageIndex === 0) {
+            // Initial order rejected - reset state to allow retry
+            state.orderId = null;
+            state.stageIndex = -1; // Reset to allow retry creation
+            console.log(`🔄 StopLimitService: Initial order rejected for ${symbol}, reset state to allow retry`);
+          } else {
+            // Stage update rejected - keep orderId but revert stage
+            state.orderId = orderId;
+            state.stageIndex = Math.max(0, state.stageIndex - 1);
+            console.log(`🔄 StopLimitService: Stage update rejected for ${symbol}, reverted to stage ${state.stageIndex}`);
+          }
+          
+          state.updatedAt = Date.now();
+          
+          // Try to sync prices from the rejected order if available
+          const actualStopPrice = this.parseNumber(order.StopPrice || leg.StopPrice);
+          const actualLimitPrice = this.parseNumber(order.LimitPrice || leg.LimitPrice);
+          const cachedOrder = this.ordersCache.get(orderId);
+          if (cachedOrder) {
+            const cachedLeg = cachedOrder.Legs?.find(l => 
+              (l.Symbol || '').toUpperCase() === symbol && 
+              (l.BuyOrSell || '').toUpperCase() === 'SELL'
+            );
+            if (cachedLeg) {
+              const cachedStop = this.parseNumber(cachedOrder.StopPrice || cachedLeg.StopPrice);
+              const cachedLimit = this.parseNumber(cachedOrder.LimitPrice || cachedLeg.LimitPrice);
+              if (cachedStop !== null && cachedLimit !== null) {
+                state.lastStopPrice = this.roundPrice(cachedStop);
+                state.lastLimitPrice = this.roundPrice(cachedLimit);
+              }
+            }
+          } else if (actualStopPrice !== null && actualLimitPrice !== null) {
+            state.lastStopPrice = this.roundPrice(actualStopPrice);
+            state.lastLimitPrice = this.roundPrice(actualLimitPrice);
+          }
+          
+          // Don't return - continue to check for fallback orders or retry logic
+        }
+      }
+      
+      // For Market SELL orders, check if filled even if not previously linked
+      if (isMarketSell && (status === 'FLL' || status === 'FIL')) {
+        if (state) {
+          // Position is tracked, calculate P&L
+          console.log(`✅ StopLimitService: Market SELL order ${orderId} for ${symbol} filled (status ${status}) – calculating P&L and marking as sold.`);
+          
+          // Calculate P&L from the filled order
+          const sellPrice = this.parseNumber(order.FilledPrice || leg.FilledPrice || order.Price || leg.Price);
+          const quantity = state.quantity || this.parseNumber(leg.ExecQuantity || leg.QuantityRemaining || order.Quantity);
+          const avgPrice = state.avgPrice;
+          
+          if (sellPrice && avgPrice && quantity) {
+            const pnlPerShare = this.roundPrice(sellPrice - avgPrice);
+            const totalPnL = this.roundPrice(pnlPerShare * quantity);
+            
+            // Store sold position with P&L information
+            this.soldPositions.set(symbol, {
+              symbol,
+              positionId: state.positionId,
+              accountId: state.accountId,
+              groupKey: state.groupKey,
+              avgPrice,
+              quantity,
+              sellPrice,
+              pnlPerShare,
+              totalPnL,
+              orderId,
+              soldAt: Date.now(),
+              createdAt: state.createdAt,
+              stageIndex: state.stageIndex,
+              lastStopPrice: state.lastStopPrice,
+              lastLimitPrice: state.lastLimitPrice
+            });
+            
+            console.log(`💰 StopLimitService: ${symbol} SOLD (Market) - Avg: $${avgPrice.toFixed(2)}, Sell: $${sellPrice.toFixed(2)}, Qty: ${quantity}, P&L/Share: $${pnlPerShare.toFixed(2)}, Total P&L: $${totalPnL.toFixed(2)}`);
+          }
+          
+          // Verify position is actually closed before cleanup
+          if (!this.hasActivePosition(symbol)) {
+            this.cleanupPosition(symbol);
+          }
+        }
+        return;
+      }
+      
+      // CRITICAL: For StopLimit orders, check if filled even if not previously linked
+      // This handles cases where the order was filled but state wasn't updated yet
+      if (isStopLimit && (status === 'FLL' || status === 'FIL')) {
+        // If we're tracking this position, handle the filled order regardless of previous linking
+        // This ensures we catch filled orders even if they weren't linked to state yet
+        const isOurOrder = previousOrderId === orderId || 
+                          state.orderId === orderId ||
+                          (state.stageIndex >= 0); // We're tracking this position, so any StopLimit SELL order for it is ours
+        
+        if (isOurOrder && state) {
+          console.log(`✅ StopLimitService: StopLimit order ${orderId} for ${symbol} filled (status ${status}) – calculating P&L and marking as sold.`);
+          
+          // Update state to reflect filled status
+          state.orderId = orderId;
+          state.orderStatus = status;
+          state.pendingCreate = false;
+          state.pendingUpdate = false;
+          
+          // Calculate P&L from the filled order
+          // For StopLimit orders, prefer FilledPrice then LimitPrice
+          const sellPrice = this.parseNumber(
+            order.FilledPrice || 
+            leg.FilledPrice || 
+            order.LimitPrice || 
+            leg.LimitPrice ||
+            order.Price || 
+            leg.Price
+          );
+          const quantity = state.quantity || this.parseNumber(leg.ExecQuantity || leg.QuantityRemaining || order.Quantity);
+          const avgPrice = state.avgPrice;
+          
+          if (sellPrice && avgPrice && quantity) {
+            const pnlPerShare = this.roundPrice(sellPrice - avgPrice);
+            const totalPnL = this.roundPrice(pnlPerShare * quantity);
+            
+            // Store sold position with P&L information
+            this.soldPositions.set(symbol, {
+              symbol,
+              positionId: state.positionId,
+              accountId: state.accountId,
+              groupKey: state.groupKey,
+              avgPrice,
+              quantity,
+              sellPrice,
+              pnlPerShare,
+              totalPnL,
+              orderId,
+              soldAt: Date.now(),
+              createdAt: state.createdAt,
+              stageIndex: state.stageIndex,
+              lastStopPrice: state.lastStopPrice,
+              lastLimitPrice: state.lastLimitPrice
+            });
+            
+            console.log(`💰 StopLimitService: ${symbol} SOLD (StopLimit) - Avg: $${avgPrice.toFixed(2)}, Sell: $${sellPrice.toFixed(2)}, Qty: ${quantity}, P&L/Share: $${pnlPerShare.toFixed(2)}, Total P&L: $${totalPnL.toFixed(2)}`);
+          } else {
+            console.warn(`⚠️ StopLimitService: Could not calculate P&L for ${symbol} - sellPrice: ${sellPrice}, avgPrice: ${avgPrice}, quantity: ${quantity}`);
+          }
+          
+          // Verify position is actually closed before cleanup
+          if (!this.hasActivePosition(symbol)) {
+            this.cleanupPosition(symbol);
+          } else {
+            console.log(`⚠️ StopLimitService: StopLimit order ${orderId} filled but position ${symbol} still active - may be partial fill, keeping tracking`);
+          }
+          return;
+        }
+      }
+      
+      if (previousOrderId === orderId) {
+        console.log(`ℹ️ StopLimitService: ${isStopLimit ? 'StopLimit' : 'Market'} order ${orderId} for ${symbol} is no longer active (status ${status})`);
         state.orderId = null;
         state.orderStatus = status;
         state.updatedAt = Date.now();
@@ -230,10 +475,58 @@ class StopLimitService {
         state.pendingUpdate = false;
 
         if (status === 'FLL' || status === 'FIL') {
-          console.log(`✅ StopLimitService: Position ${symbol} filled (order status ${status}) – ending tracking.`);
-          this.cleanupPosition(symbol);
+          console.log(`✅ StopLimitService: StopLimit order ${orderId} for ${symbol} filled (status ${status}) – calculating P&L and marking as sold.`);
+          
+          // Calculate P&L from the filled order
+          // For Market orders, use FilledPrice or Price; for StopLimit, prefer FilledPrice then LimitPrice
+          const sellPrice = this.parseNumber(
+            order.FilledPrice || 
+            leg.FilledPrice || 
+            (isStopLimit ? (order.LimitPrice || leg.LimitPrice) : null) ||
+            order.Price || 
+            leg.Price
+          );
+          const quantity = state.quantity || this.parseNumber(leg.ExecQuantity || leg.QuantityRemaining || order.Quantity);
+          const avgPrice = state.avgPrice;
+          
+          if (sellPrice && avgPrice && quantity) {
+            const pnlPerShare = this.roundPrice(sellPrice - avgPrice);
+            const totalPnL = this.roundPrice(pnlPerShare * quantity);
+            
+            // Store sold position with P&L information
+            this.soldPositions.set(symbol, {
+              symbol,
+              positionId: state.positionId,
+              accountId: state.accountId,
+              groupKey: state.groupKey,
+              avgPrice,
+              quantity,
+              sellPrice,
+              pnlPerShare,
+              totalPnL,
+              orderId,
+              soldAt: Date.now(),
+              createdAt: state.createdAt,
+              stageIndex: state.stageIndex,
+              lastStopPrice: state.lastStopPrice,
+              lastLimitPrice: state.lastLimitPrice
+            });
+            
+            console.log(`💰 StopLimitService: ${symbol} SOLD - Avg: $${avgPrice.toFixed(2)}, Sell: $${sellPrice.toFixed(2)}, Qty: ${quantity}, P&L/Share: $${pnlPerShare.toFixed(2)}, Total P&L: $${totalPnL.toFixed(2)}`);
+          } else {
+            console.warn(`⚠️ StopLimitService: Could not calculate P&L for ${symbol} - sellPrice: ${sellPrice}, avgPrice: ${avgPrice}, quantity: ${quantity}`);
+          }
+          
+          // Verify position is actually closed before cleanup
+          if (!this.hasActivePosition(symbol)) {
+            this.cleanupPosition(symbol);
+          } else {
+            console.log(`⚠️ StopLimitService: Order ${orderId} filled but position ${symbol} still active - may be partial fill, keeping tracking`);
+          }
           return;
-        } else if (status === 'OUT' || status === 'REJ') {
+        } else if (status === 'OUT') {
+          // OUT status handling (order expired)
+          
           const fallback = this.findLatestRelevantOrder(symbol);
           if (!fallback) {
             console.log(`ℹ️ StopLimitService: No follow-up order found for ${symbol} after ${status}; keeping position tracked.`);
@@ -243,7 +536,39 @@ class StopLimitService {
               console.log(`ℹ️ StopLimitService: Found fallback order ${fallback.orderId} with status ${fallbackStatus} for ${symbol}; re-linking.`);
               this.updateStateFromOrder(state, fallback.orderId, fallback.order, fallback.leg, fallbackStatus);
             } else if (fallbackStatus === 'FLL' || fallbackStatus === 'FIL') {
-              console.log(`✅ StopLimitService: Fallback order ${fallback.orderId} is filled; cleaning up position ${symbol}.`);
+              console.log(`✅ StopLimitService: Fallback order ${fallback.orderId} is filled; calculating P&L and marking as sold.`);
+              
+              // Calculate P&L from the fallback order
+              const sellPrice = this.parseNumber(fallback.order.FilledPrice || fallback.leg.FilledPrice || fallback.order.LimitPrice || fallback.leg.LimitPrice);
+              const quantity = state.quantity || this.parseNumber(fallback.leg.ExecQuantity || fallback.leg.QuantityRemaining || fallback.order.Quantity);
+              const avgPrice = state.avgPrice;
+              
+              if (sellPrice && avgPrice && quantity) {
+                const pnlPerShare = this.roundPrice(sellPrice - avgPrice);
+                const totalPnL = this.roundPrice(pnlPerShare * quantity);
+                
+                // Store sold position with P&L information
+                this.soldPositions.set(symbol, {
+                  symbol,
+                  positionId: state.positionId,
+                  accountId: state.accountId,
+                  groupKey: state.groupKey,
+                  avgPrice,
+                  quantity,
+                  sellPrice,
+                  pnlPerShare,
+                  totalPnL,
+                  orderId: fallback.orderId,
+                  soldAt: Date.now(),
+                  createdAt: state.createdAt,
+                  stageIndex: state.stageIndex,
+                  lastStopPrice: state.lastStopPrice,
+                  lastLimitPrice: state.lastLimitPrice
+                });
+                
+                console.log(`💰 StopLimitService: ${symbol} SOLD (fallback) - Avg: $${avgPrice.toFixed(2)}, Sell: $${sellPrice.toFixed(2)}, Qty: ${quantity}, P&L/Share: $${pnlPerShare.toFixed(2)}, Total P&L: $${totalPnL.toFixed(2)}`);
+              }
+              
               this.cleanupPosition(symbol);
             }
           }
@@ -254,11 +579,21 @@ class StopLimitService {
             // Do nothing else when automation is disabled; cleanup will happen via cache refresh.
           } else if (!this.hasActivePosition(symbol)) {
             this.cleanupPosition(symbol);
-          } else if (!state.orderId && !state.pendingCreate && !state.pendingUpdate) {
-            try {
-              await this.ensureInitialOrder(state);
-            } catch (err) {
-              console.error(`❌ StopLimitService: Failed to ensure StopLimit after ${status} for ${symbol}:`, err);
+          } else {
+            // Retry logic: if order was rejected or we don't have an active order, try to create/ensure one
+            const orderStatusUpper = (state.orderStatus || '').toUpperCase();
+            const shouldRetry = 
+              orderStatusUpper === 'REJ' || // Order was rejected
+              (!state.orderId && !state.pendingCreate && !state.pendingUpdate); // No order and not pending
+            
+            if (shouldRetry) {
+              try {
+                // Small delay before retry to avoid rapid retries
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                await this.ensureInitialOrder(state);
+              } catch (err) {
+                console.error(`❌ StopLimitService: Failed to ensure StopLimit after ${status} for ${symbol}:`, err);
+              }
             }
           }
         }
@@ -272,6 +607,7 @@ class StopLimitService {
       this.trackedPositions.delete(symbol);
     }
     this.clearOrderWaiters(symbol);
+    // Note: soldPositions are kept for display purposes, not cleaned up
   }
 
   pruneInactiveSymbols(activeSymbols) {
@@ -293,13 +629,20 @@ class StopLimitService {
     this.analysisChangedAt = Date.now();
 
     if (!normalized) {
+      // When disabling, stop all pending operations
       for (const state of this.trackedPositions.values()) {
         state.pendingCreate = false;
         state.pendingUpdate = false;
       }
+      // Aggressively clean up inactive positions when disabling
+      this.refreshTrackedPositionsFromCaches();
+    } else {
+      // When enabling, clean up any inactive positions before starting
+      // This ensures we don't re-add closed positions
+      this.refreshTrackedPositionsFromCaches();
     }
 
-    console.log(`⚙️ StopLimitService: Automation ${normalized ? 'enabled' : 'disabled'}`);
+    console.log(`⚙️ StopLimitService: Automation ${normalized ? 'enabled' : 'disabled'} (tracked positions: ${this.trackedPositions.size})`);
     return this.analysisEnabled;
   }
 
@@ -355,58 +698,182 @@ class StopLimitService {
   }
 
   refreshTrackedPositionsFromCaches() {
+    // Get current active symbols from positions cache
     const activeSymbols = this.getActivePositionSymbols();
+    
+    // Cleanup positions that are no longer in active symbols
     if (activeSymbols) {
       for (const symbol of Array.from(this.trackedPositions.keys())) {
         if (!activeSymbols.has(symbol)) {
+          console.log(`🧹 StopLimitService: Removing ${symbol} - not in active positions cache`);
           this.cleanupPosition(symbol);
         }
       }
     }
 
-    for (const state of Array.from(this.trackedPositions.values())) {
+    // Validate each remaining tracked position individually
+    // This ensures we catch positions that might have closed but weren't removed from cache yet
+    for (const [symbol, state] of Array.from(this.trackedPositions.entries())) {
+      // Verify position is still active
+      if (!this.hasActivePosition(symbol)) {
+        console.log(`🧹 StopLimitService: Removing ${symbol} during refresh - position no longer active`);
+        this.cleanupPosition(symbol);
+        continue;
+      }
+
+      // Verify position exists in cache with valid quantity
+      if (this.positionsCache && typeof this.positionsCache.get === 'function') {
+        const position = this.positionsCache.get(symbol);
+        if (!position) {
+          console.log(`🧹 StopLimitService: Removing ${symbol} during refresh - not in positionsCache`);
+          this.cleanupPosition(symbol);
+          continue;
+        }
+
+        const quantity = this.parseNumber(position?.Quantity);
+        if (!quantity || quantity <= 0) {
+          console.log(`🧹 StopLimitService: Removing ${symbol} during refresh - quantity is ${quantity}`);
+          this.cleanupPosition(symbol);
+          continue;
+        }
+
+        const longShort = (position?.LongShort || '').toUpperCase();
+        if (longShort && longShort !== 'LONG') {
+          console.log(`🧹 StopLimitService: Removing ${symbol} during refresh - not LONG (${longShort})`);
+          this.cleanupPosition(symbol);
+          continue;
+        }
+      }
+
+      // Position is valid, realign with orders
       this.realignStateWithOrders(state);
     }
+  }
+
+  /**
+   * Comprehensive periodic validation - ensures all tracked positions have orders properly linked.
+   * This is a critical safety check that should be called regularly.
+   */
+  validateAllTrackedPositions() {
+    if (!this.analysisEnabled) {
+      // Still cleanup inactive positions even when disabled
+      this.refreshTrackedPositionsFromCaches();
+      return;
+    }
+
+    console.log(`🔍 StopLimitService: Starting comprehensive validation of all tracked positions (${this.trackedPositions.size} positions)...`);
+    
+    let validated = 0;
+    let linked = 0;
+    let issues = 0;
+    let cleaned = 0;
+
+    // First pass: Cleanup inactive positions
+    const symbolsToCleanup = [];
+    for (const [symbol, state] of this.trackedPositions.entries()) {
+      if (!this.hasActivePosition(symbol)) {
+        symbolsToCleanup.push(symbol);
+        continue;
+      }
+    }
+    
+    for (const symbol of symbolsToCleanup) {
+      console.log(`🧹 StopLimitService: VALIDATION CLEANUP - Removing inactive position ${symbol}`);
+      this.cleanupPosition(symbol);
+      cleaned++;
+    }
+
+    // Second pass: Validate orders for remaining positions
+    for (const [symbol, state] of this.trackedPositions.entries()) {
+      validated++;
+      
+      // Double-check position is still active (might have closed during validation)
+      if (!this.hasActivePosition(symbol)) {
+        console.log(`🧹 StopLimitService: VALIDATION CLEANUP - Removing ${symbol} (closed during validation)`);
+        this.cleanupPosition(symbol);
+        cleaned++;
+        continue;
+      }
+      
+      // Skip if we have a valid order linked
+      if (state.orderId && state.orderStatus) {
+        const cachedOrder = this.ordersCache.get(state.orderId);
+        if (cachedOrder) {
+          const status = (cachedOrder.Status || '').toUpperCase();
+          if (ACTIVE_ORDER_STATUSES.has(status) || this.isQueuedStatus(status) || status === 'ACK') {
+            // Order is valid, continue
+            continue;
+          }
+        }
+      }
+
+      // Order might be missing or invalid - validate
+      const validation = this.validateExistingStopLimitOrder(symbol);
+      
+      if (validation.hasOrder) {
+        // Found an order that should be linked
+        if (!state.orderId || state.orderId !== validation.orderId) {
+          console.log(`🔧 StopLimitService: VALIDATION FIX - Linking order ${validation.orderId} to ${symbol} (was: ${state.orderId || 'none'})`);
+          this.updateStateFromOrder(state, validation.orderId, validation.order, validation.leg, validation.status);
+          linked++;
+        }
+      } else if (state.stageIndex >= 0) {
+        // We think we created an order but can't find it
+        issues++;
+        console.warn(`⚠️ StopLimitService: VALIDATION ISSUE - ${symbol} has stageIndex=${state.stageIndex} but no order found in cache. State: orderId=${state.orderId || 'none'}, status=${state.orderStatus || 'none'}, pendingCreate=${state.pendingCreate}`);
+        
+        // If it's been more than 30 seconds since creation attempt, something might be wrong
+        if (state.lastOrderCreateAttempt && (Date.now() - state.lastOrderCreateAttempt) > 30000) {
+          console.warn(`⚠️ StopLimitService: ${symbol} order creation was ${Math.round((Date.now() - state.lastOrderCreateAttempt) / 1000)}s ago but order not found. May need manual intervention.`);
+        }
+      }
+    }
+
+    console.log(`✅ StopLimitService: Validation complete - ${validated} positions checked, ${linked} orders linked, ${cleaned} positions cleaned up, ${issues} potential issues`);
   }
 
   realignStateWithOrders(state) {
     if (!state) return;
 
-    const active = this.findActiveStopLimitOrder(state.symbol);
-    if (active) {
-      const status = active.order?.Status || active.order?.status || null;
-      const statusUpper = (status || '').toUpperCase();
+    // Use comprehensive validation instead of just findActiveStopLimitOrder
+    // This ensures we catch orders with any valid status, not just "active" ones
+    const validation = this.validateExistingStopLimitOrder(state.symbol);
+    
+    if (validation.hasOrder) {
+      const statusUpper = validation.status || '';
       const currentStatusUpper = (state.orderStatus || '').toUpperCase();
+      
+      // Always update if we don't have an orderId, or if orderId/status doesn't match
+      // This ensures orders are immediately linked when found
       if (
-        state.orderId !== active.orderId ||
+        !state.orderId ||
+        state.orderId !== validation.orderId ||
         currentStatusUpper !== statusUpper
       ) {
-        this.updateStateFromOrder(state, active.orderId, active.order, active.leg, status);
+        this.updateStateFromOrder(state, validation.orderId, validation.order, validation.leg, validation.status);
+        console.log(`🔗 StopLimitService: Realigned ${state.symbol} with order ${validation.orderId} (status: ${statusUpper}, source: ${validation.source})`);
+      }
+      
+      // Clear pending flags since we have a confirmed order
+      if (validation.status && (ACTIVE_ORDER_STATUSES.has(validation.status) || this.isQueuedStatus(validation.status) || validation.status === 'ACK')) {
+        state.pendingCreate = false;
       }
       return;
     }
 
-    const fallback = this.findLatestRelevantOrder(state.symbol);
-    if (fallback) {
-      const statusUpper = (fallback.status || '').toUpperCase();
-      if (
-        state.orderId !== fallback.orderId ||
-        (state.orderStatus || '').toUpperCase() !== statusUpper
-      ) {
-        this.updateStateFromOrder(state, fallback.orderId, fallback.order, fallback.leg, fallback.status);
-      }
-
-      if ((statusUpper === 'FIL' || statusUpper === 'FLL') && !this.hasActivePosition(state.symbol)) {
-        this.cleanupPosition(state.symbol);
-      }
-      return;
-    }
-
-    if (state.orderId || state.orderStatus) {
+    // No order found - only clear if we haven't created one recently
+    // If stageIndex >= 0, we created an order and are waiting for websocket
+    const recentlyCreated = state.lastOrderCreateAttempt && (Date.now() - state.lastOrderCreateAttempt) < 30000; // 30 seconds
+    
+    if ((state.orderId || state.orderStatus) && state.stageIndex < 0 && !recentlyCreated) {
+      // No order found and we haven't created one - clear the state
       state.orderId = null;
       state.orderStatus = null;
       state.pendingUpdate = false;
       state.updatedAt = Date.now();
+    } else if (state.stageIndex >= 0 && !state.orderId) {
+      // We created an order but don't have orderId yet - keep waiting
+      console.log(`⏳ StopLimitService: ${state.symbol} has stageIndex=${state.stageIndex} but no orderId yet - waiting for websocket update (${recentlyCreated ? 'recently created' : 'may need validation'})`);
     }
   }
 
@@ -469,35 +936,49 @@ class StopLimitService {
     if (state.lastOrderCreateAttempt && (now - state.lastOrderCreateAttempt) < 5000) {
       const secondsSince = ((now - state.lastOrderCreateAttempt) / 1000).toFixed(1);
       console.log(`⏸️ StopLimitService: Recent order creation attempt for ${state.symbol} ${secondsSince}s ago, preventing duplicate (orderId: ${state.orderId || 'none'}, stageIndex: ${state.stageIndex})`);
+      // Even if we're preventing duplicate creation, try to realign with existing orders
+      this.realignStateWithOrders(state);
       return;
     }
 
-    let existingOrder = this.findActiveStopLimitOrder(state.symbol);
-    if (!existingOrder) {
-      const fallback = this.findLatestRelevantOrder(state.symbol);
-      if (fallback) {
-        const status = (fallback.status || '').toUpperCase();
-        if (status === 'ACK' || this.isQueuedStatus(status)) {
-          existingOrder = fallback;
-        } else if (status === 'FLL' || status === 'FIL') {
-          console.log(`✅ StopLimitService: Latest order for ${state.symbol} already filled (status ${status}), skipping tracking.`);
-          this.cleanupPosition(state.symbol);
-          return;
-        }
-      }
-    }
-
-    if (existingOrder) {
-      this.updateStateFromOrder(state, existingOrder.orderId, existingOrder.order, existingOrder.leg, existingOrder.order?.Status);
-      console.log(`ℹ️ StopLimitService: Existing StopLimit order found for ${state.symbol} (status ${state.orderStatus}) - skipping creation`);
+    // CRITICAL SAFETY CHECK: Before creating, comprehensively validate if order exists
+    // This is a multi-layer defense to prevent duplicate order creation
+    console.log(`🔒 StopLimitService: Performing comprehensive order validation for ${state.symbol} before creation...`);
+    
+    // Step 1: Realign state with orders cache
+    this.realignStateWithOrders(state);
+    
+    // Step 2: Check if we already have an order linked in state
+    if (state.orderId || state.stageIndex >= 0) {
+      console.log(`✅ StopLimitService: Order already exists in state for ${state.symbol} (orderId: ${state.orderId || 'none'}, stageIndex: ${state.stageIndex}), skipping creation`);
       return;
     }
 
-    // If stageIndex >= 0, we've already created an initial order - don't create again
+    // Step 3: Comprehensive validation - check all possible sources
+    const validation = this.validateExistingStopLimitOrder(state.symbol);
+    console.log(`🔍 StopLimitService: Order validation for ${state.symbol}:`, {
+      hasOrder: validation.hasOrder,
+      orderId: validation.orderId,
+      status: validation.status,
+      source: validation.source,
+      checks: validation.checks
+    });
+
+    if (validation.hasOrder) {
+      // Order exists! Link it immediately and skip creation
+      this.updateStateFromOrder(state, validation.orderId, validation.order, validation.leg, validation.status);
+      console.log(`🛡️ StopLimitService: SAFETY CHECK PASSED - Existing StopLimit order ${validation.orderId} found for ${state.symbol} (status: ${validation.status}, source: ${validation.source}). SKIPPING CREATION to prevent duplicate.`);
+      return;
+    }
+
+    // Step 4: Final check - if stageIndex >= 0, we've already created an order
     if (state.stageIndex >= 0) {
       console.log(`⏸️ StopLimitService: StageIndex >= 0 for ${state.symbol} (stageIndex=${state.stageIndex}, orderId=${state.orderId || 'none'}), skipping creation`);
       return;
     }
+
+    // Step 5: All checks passed - safe to create
+    console.log(`✅ StopLimitService: All validation checks passed for ${state.symbol}. No existing order found. Proceeding with creation.`);
 
     // Set flags BEFORE async operations to prevent race conditions
     state.pendingCreate = true;
@@ -548,12 +1029,26 @@ class StopLimitService {
           state.orderId = response.orderId;
           console.log(`✅ StopLimitService: Initial StopLimit order created for ${state.symbol} (order_id=${response.orderId}, stop=${stopPrice}, limit=${limitPrice})`);
         } else {
-          console.warn(`⚠️ StopLimitService: Initial StopLimit created for ${state.symbol} but no order_id returned in response. StageIndex set to 0 to prevent duplicates. Will wait for websocket update. Response: ${JSON.stringify(response.responseData || {}).substring(0, 200)}`);
-          // Don't set orderId to null - leave it as is, websocket will update it
-          // But stageIndex = 0 will prevent duplicate creation
+          console.warn(`⚠️ StopLimitService: Initial StopLimit created for ${state.symbol} but no order_id returned in response. StageIndex set to 0 to prevent duplicates. Will search for order in cache. Response: ${JSON.stringify(response.responseData || {}).substring(0, 200)}`);
+          // Try to find the order in cache by matching stop/limit prices
+          // Wait a moment for websocket to receive the order
+          await new Promise(resolve => setTimeout(resolve, 500));
+          const foundOrder = this.findActiveStopLimitOrder(state.symbol);
+          if (foundOrder) {
+            const foundStop = this.parseNumber(foundOrder.order?.StopPrice || foundOrder.leg?.StopPrice);
+            const foundLimit = this.parseNumber(foundOrder.order?.LimitPrice || foundOrder.leg?.LimitPrice);
+            // Match by prices to ensure it's the order we just created
+            if (this.isApproximatelyEqual(foundStop, stopPrice) && this.isApproximatelyEqual(foundLimit, limitPrice)) {
+              this.updateStateFromOrder(state, foundOrder.orderId, foundOrder.order, foundOrder.leg, foundOrder.order?.Status);
+              console.log(`✅ StopLimitService: Found and linked newly created order ${foundOrder.orderId} for ${state.symbol} by price matching`);
+            }
+          }
         }
         state.updatedAt = Date.now();
         console.log(`🔒 StopLimitService: Order creation complete for ${state.symbol}. State locked: stageIndex=${state.stageIndex}, orderId=${state.orderId || 'pending'}, lastOrderCreateAttempt=${state.lastOrderCreateAttempt ? new Date(state.lastOrderCreateAttempt).toISOString() : 'none'}`);
+        
+        // Try to realign state with orders cache to ensure we have the latest order info
+        this.realignStateWithOrders(state);
       } else {
         console.error(`❌ StopLimitService: Failed to create StopLimit for ${state.symbol}: ${response.error || response.notifyStatus}`);
         // Reset stageIndex on failure so we can retry
@@ -592,13 +1087,32 @@ class StopLimitService {
       return;
     }
 
-    // Evaluate stages sequentially
+    // Find the highest stage that should be active based on unrealized P&L
+    let targetStageIndex = 0; // Start with initial stage (stageIndex 0)
+    
+    // Check each stage to find the highest one that the unrealizedQty qualifies for
     for (let index = 0; index < config.stages.length; index += 1) {
-      const stageNumber = index + 1;
       const stage = config.stages[index];
-      if (unrealizedQty >= stage.trigger && state.stageIndex < stageNumber) {
-        await this.updateStopLimitStage(state, stage.stopOffset, stage.label, stageNumber);
+      if (unrealizedQty >= stage.trigger) {
+        targetStageIndex = index + 1; // stageNumber = index + 1
+      } else {
+        // Stages are in ascending order, so we can break once we find one that doesn't qualify
+        break;
       }
+    }
+
+    // Only update if we need to advance to a higher stage
+    if (targetStageIndex > state.stageIndex) {
+      const targetStage = config.stages[targetStageIndex - 1];
+      console.log(`📊 StopLimitService: ${state.symbol} unrealizedQty=${unrealizedQty.toFixed(2)} qualifies for stage ${targetStageIndex} (${targetStage.label}, trigger=${targetStage.trigger}), current stageIndex=${state.stageIndex}`);
+      await this.updateStopLimitStage(state, targetStage.stopOffset, targetStage.label, targetStageIndex);
+    } else if (targetStageIndex < state.stageIndex) {
+      // If unrealizedQty has dropped below the current stage, we should stay at the current stage
+      // (don't downgrade stages - once we've reached a stage, we stay there)
+      console.log(`📊 StopLimitService: ${state.symbol} unrealizedQty=${unrealizedQty.toFixed(2)} is below current stage ${state.stageIndex}, but keeping current stage (no downgrade)`);
+    } else {
+      // Already at the correct stage
+      console.log(`📊 StopLimitService: ${state.symbol} unrealizedQty=${unrealizedQty.toFixed(2)} matches current stage ${state.stageIndex} (${config.stages[state.stageIndex - 1]?.label || 'Initial'})`);
     }
   }
 
@@ -622,9 +1136,30 @@ class StopLimitService {
       return;
     }
 
-    const { stopPrice, limitPrice } = offsets;
+    let { stopPrice, limitPrice } = offsets;
     if (this.isApproximatelyEqual(stopPrice, state.lastStopPrice) && this.isApproximatelyEqual(limitPrice, state.lastLimitPrice)) {
       return;
+    }
+
+    // Validate prices before attempting update
+    if (stopPrice <= 0 || limitPrice <= 0) {
+      console.error(`❌ StopLimitService: Invalid prices for ${state.symbol} stage ${stageNumber} - stop ${stopPrice}, limit ${limitPrice}`);
+      return;
+    }
+
+    // Validate price relationship: for SELL StopLimit orders, stopPrice should be >= limitPrice
+    // (calculation ensures this via limitOffset, but double-check for safety)
+    if (stopPrice < limitPrice) {
+      console.error(`❌ StopLimitService: Invalid price relationship for ${state.symbol} SELL order - stop ${stopPrice} < limit ${limitPrice}. Recalculating...`);
+      // Recalculate to ensure correct relationship
+      const recalculated = this.calculateStopAndLimit(state.avgPrice, stopOffset);
+      if (!recalculated || recalculated.stopPrice < recalculated.limitPrice) {
+        console.error(`❌ StopLimitService: Cannot fix price relationship for ${state.symbol}, aborting update`);
+        return;
+      }
+      // Use recalculated prices
+      stopPrice = recalculated.stopPrice;
+      limitPrice = recalculated.limitPrice;
     }
 
     const existing = state.orderId ? { orderId: state.orderId } : this.findActiveStopLimitOrder(state.symbol);
@@ -634,22 +1169,123 @@ class StopLimitService {
       return;
     }
 
+    // Verify order is in a modifiable state before attempting update
+    const cachedOrder = this.ordersCache.get(orderId);
+    if (cachedOrder) {
+      const orderStatus = (cachedOrder.Status || '').toUpperCase();
+      if (!ACTIVE_ORDER_STATUSES.has(orderStatus) && !this.isQueuedStatus(orderStatus) && orderStatus !== 'ACK') {
+        console.warn(`⚠️ StopLimitService: Order ${orderId} for ${state.symbol} is not in modifiable state (${orderStatus}), cannot update. Will try cancel-and-recreate.`);
+        // Order is not modifiable - try cancel-and-recreate strategy
+        await this.recreateOrderWithNewPrices(state, stopPrice, limitPrice, stageNumber, label);
+        return;
+      }
+    }
+
+    // Store previous prices before attempting update (for rollback on failure)
+    const previousStopPrice = state.lastStopPrice;
+    const previousLimitPrice = state.lastLimitPrice;
+    const previousStageIndex = state.stageIndex;
+
     state.pendingUpdate = true;
     try {
-      console.log(`🔄 StopLimitService: Updating StopLimit for ${state.symbol} to stage ${stageNumber} (${label}) - stop ${stopPrice}, limit ${limitPrice}`);
+      console.log(`🔄 StopLimitService: Updating StopLimit for ${state.symbol} to stage ${stageNumber} (${label}) - stop ${stopPrice}, limit ${limitPrice} (previous: stop ${previousStopPrice}, limit ${previousLimitPrice})`);
       const result = await this.putOrder(orderId, stopPrice, limitPrice);
       if (result.success) {
         state.stageIndex = stageNumber;
         state.lastStopPrice = stopPrice;
         state.lastLimitPrice = limitPrice;
         state.updatedAt = Date.now();
+        console.log(`✅ StopLimitService: Successfully updated order ${orderId} for ${state.symbol} to stage ${stageNumber}`);
       } else {
-        console.error(`❌ StopLimitService: Failed to update order ${orderId} for ${state.symbol}: ${result.error || result.notifyStatus}`);
+        // Update failed - try cancel-and-recreate strategy
+        console.error(`❌ StopLimitService: Failed to update order ${orderId} for ${state.symbol}: ${result.error || result.notifyStatus}. Attempting cancel-and-recreate.`);
+        
+        // Revert state first
+        state.lastStopPrice = previousStopPrice;
+        state.lastLimitPrice = previousLimitPrice;
+        state.stageIndex = previousStageIndex;
+        state.updatedAt = Date.now();
+        
+        // Try cancel-and-recreate strategy
+        await this.recreateOrderWithNewPrices(state, stopPrice, limitPrice, stageNumber, label);
       }
     } catch (err) {
       console.error(`❌ StopLimitService: Error updating StopLimit for ${state.symbol}:`, err);
+      // Revert to previous prices on error
+      state.lastStopPrice = previousStopPrice;
+      state.lastLimitPrice = previousLimitPrice;
+      state.stageIndex = previousStageIndex;
+      state.updatedAt = Date.now();
+      
+      // Try cancel-and-recreate as fallback
+      try {
+        await this.recreateOrderWithNewPrices(state, stopPrice, limitPrice, stageNumber, label);
+      } catch (recreateErr) {
+        console.error(`❌ StopLimitService: Cancel-and-recreate also failed for ${state.symbol}:`, recreateErr);
+      }
     } finally {
       state.pendingUpdate = false;
+    }
+  }
+
+  async recreateOrderWithNewPrices(state, stopPrice, limitPrice, stageNumber, label) {
+    console.log(`🔄 StopLimitService: Attempting cancel-and-recreate for ${state.symbol} to stage ${stageNumber} (${label})`);
+    
+    // Delete the existing order first
+    if (state.orderId) {
+      try {
+        await this.deleteOrder(state.orderId);
+        console.log(`🗑️ StopLimitService: Deleted existing order ${state.orderId} for ${state.symbol} before recreating`);
+        // Wait a moment for deletion to propagate
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } catch (err) {
+        console.error(`❌ StopLimitService: Error deleting order ${state.orderId} for ${state.symbol}:`, err);
+        // Continue anyway - might already be deleted
+      }
+    }
+
+    // Reset state to allow creation
+    const previousOrderId = state.orderId;
+    state.orderId = null;
+    state.orderStatus = null;
+    state.pendingCreate = false;
+    state.pendingUpdate = false;
+
+    // Create new order with new prices
+    const config = this.groupConfigs[state.groupKey];
+    if (!config) {
+      console.error(`❌ StopLimitService: No config found for group ${state.groupKey}`);
+      state.orderId = previousOrderId; // Restore on failure
+      return;
+    }
+
+    const body = {
+      symbol: state.symbol,
+      side: 'SELL',
+      order_type: 'StopLimit',
+      quantity: Math.max(1, Math.round(state.quantity)),
+      stop_price: stopPrice,
+      limit_price: limitPrice
+    };
+
+    console.log(`📤 StopLimitService: Creating new StopLimit order for ${state.symbol} (stage ${stageNumber}) - stop ${stopPrice}, limit ${limitPrice}`);
+    const response = await this.postOrder(body);
+    
+    if (response.success) {
+      state.stageIndex = stageNumber;
+      state.lastStopPrice = stopPrice;
+      state.lastLimitPrice = limitPrice;
+      if (response.orderId) {
+        state.orderId = response.orderId;
+        console.log(`✅ StopLimitService: Successfully recreated order ${response.orderId} for ${state.symbol} at stage ${stageNumber}`);
+      } else {
+        console.warn(`⚠️ StopLimitService: Order recreated for ${state.symbol} but no order_id returned. StageIndex set to ${stageNumber}.`);
+      }
+      state.updatedAt = Date.now();
+    } else {
+      console.error(`❌ StopLimitService: Failed to recreate order for ${state.symbol}: ${response.error || response.notifyStatus}`);
+      // Restore previous orderId on failure
+      state.orderId = previousOrderId;
     }
   }
 
@@ -753,6 +1389,79 @@ class StopLimitService {
       }
     }
     return null;
+  }
+
+  /**
+   * Comprehensive validation to check if a StopLimit order exists for a symbol.
+   * This is a critical safety check before creating new orders.
+   * Checks multiple sources and statuses to be absolutely certain.
+   */
+  validateExistingStopLimitOrder(symbol) {
+    const normalized = symbol.toUpperCase();
+    const results = {
+      hasOrder: false,
+      orderId: null,
+      order: null,
+      leg: null,
+      status: null,
+      source: null,
+      checks: []
+    };
+
+    // Check 1: Active StopLimit orders in cache
+    const active = this.findActiveStopLimitOrder(normalized);
+    if (active) {
+      results.hasOrder = true;
+      results.orderId = active.orderId;
+      results.order = active.order;
+      results.leg = active.leg;
+      results.status = (active.order?.Status || '').toUpperCase();
+      results.source = 'active-cache';
+      results.checks.push(`Found active StopLimit order ${active.orderId} with status ${results.status}`);
+      return results;
+    }
+
+    // Check 2: Any StopLimit order in cache (including queued/acknowledged)
+    for (const [orderId, order] of this.ordersCache.entries()) {
+      if (!order || !order.Legs) continue;
+      if ((order.OrderType || '').toUpperCase() !== 'STOPLIMIT') continue;
+      
+      for (const leg of order.Legs) {
+        if ((leg.Symbol || '').toUpperCase() === normalized && (leg.BuyOrSell || '').toUpperCase() === 'SELL') {
+          const status = (order.Status || '').toUpperCase();
+          // Accept any status that's not definitively cancelled/filled
+          if (status !== 'CAN' && status !== 'FIL' && status !== 'FLL' && status !== 'EXP') {
+            results.hasOrder = true;
+            results.orderId = orderId;
+            results.order = order;
+            results.leg = leg;
+            results.status = status;
+            results.source = 'any-cache';
+            results.checks.push(`Found StopLimit order ${orderId} with status ${status} (not cancelled/filled)`);
+            return results;
+          }
+        }
+      }
+    }
+
+    // Check 3: Latest relevant order (fallback)
+    const fallback = this.findLatestRelevantOrder(normalized);
+    if (fallback) {
+      const status = (fallback.status || '').toUpperCase();
+      if (status === 'ACK' || this.isQueuedStatus(status) || ACTIVE_ORDER_STATUSES.has(status)) {
+        results.hasOrder = true;
+        results.orderId = fallback.orderId;
+        results.order = fallback.order;
+        results.leg = fallback.leg;
+        results.status = status;
+        results.source = 'fallback';
+        results.checks.push(`Found relevant order ${fallback.orderId} with status ${status} via fallback`);
+        return results;
+      }
+    }
+
+    results.checks.push('No existing StopLimit order found in cache');
+    return results;
   }
 
   findLatestRelevantOrder(symbol) {
@@ -1006,16 +1715,73 @@ class StopLimitService {
   }
 
   getSnapshot() {
+    // CRITICAL: Always validate before returning snapshot to ensure accuracy
     this.refreshTrackedPositionsFromCaches();
+    
+    // Aggressive cleanup pass - remove any positions that are no longer active
+    const symbolsToCleanup = [];
+    for (const state of this.trackedPositions.values()) {
+      // First check: Is position still active in cache?
+      if (!this.hasActivePosition(state.symbol)) {
+        console.log(`🧹 StopLimitService: Removing ${state.symbol} from snapshot - position no longer active`);
+        symbolsToCleanup.push(state.symbol);
+        continue;
+      }
 
+      // Second check: Verify position exists in positionsCache with valid quantity
+      if (this.positionsCache && typeof this.positionsCache.get === 'function') {
+        const position = this.positionsCache.get(state.symbol);
+        if (!position) {
+          console.log(`🧹 StopLimitService: Removing ${state.symbol} from snapshot - not in positionsCache`);
+          symbolsToCleanup.push(state.symbol);
+          continue;
+        }
+        
+        const quantity = this.parseNumber(position?.Quantity);
+        if (!quantity || quantity <= 0) {
+          console.log(`🧹 StopLimitService: Removing ${state.symbol} from snapshot - quantity is ${quantity}`);
+          symbolsToCleanup.push(state.symbol);
+          continue;
+        }
+      }
+
+      // Quick validation pass - check for any missing order links
+      // If we have stageIndex >= 0 but no orderId, try to find and link the order
+      if (state.stageIndex >= 0 && !state.orderId && !state.pendingCreate) {
+        const validation = this.validateExistingStopLimitOrder(state.symbol);
+        if (validation.hasOrder) {
+          console.log(`🔧 StopLimitService: Quick validation - Linking order ${validation.orderId} to ${state.symbol} in snapshot`);
+          this.updateStateFromOrder(state, validation.orderId, validation.order, validation.leg, validation.status);
+        }
+      }
+    }
+
+    // Cleanup inactive positions
+    for (const symbol of symbolsToCleanup) {
+      this.cleanupPosition(symbol);
+    }
+
+    // Build snapshot for active positions
     const rows = [];
     for (const state of this.trackedPositions.values()) {
+      // Final check before adding to snapshot
       if (!this.hasActivePosition(state.symbol)) {
         continue;
       }
       rows.push(this.toSnapshot(state));
     }
-    return rows.sort((a, b) => a.symbol.localeCompare(b.symbol));
+    
+    // Add sold positions to snapshot
+    for (const soldState of this.soldPositions.values()) {
+      rows.push(this.toSoldSnapshot(soldState));
+    }
+    
+    return rows.sort((a, b) => {
+      // Sort sold positions to the end
+      if (a.status === 'sold' && b.status !== 'sold') return 1;
+      if (a.status !== 'sold' && b.status === 'sold') return -1;
+      return a.symbol.localeCompare(b.symbol);
+    });
   }
 
   toSnapshot(state) {
@@ -1052,6 +1818,46 @@ class StopLimitService {
       autoSellExecuted: state.autoSellExecuted,
       createdAt: state.createdAt || null,
       updatedAt: state.updatedAt || null
+    };
+  }
+
+  toSoldSnapshot(soldState) {
+    const config = this.groupConfigs[soldState.groupKey] || null;
+    const stageDetails = soldState.stageIndex >= 0 
+      ? this.getStageDetails({ stageIndex: soldState.stageIndex }, config)
+      : { label: 'N/A', description: 'N/A' };
+
+    return {
+      symbol: soldState.symbol,
+      groupKey: soldState.groupKey,
+      groupLabel: config?.label || 'Unknown',
+      avgPrice: soldState.avgPrice,
+      quantity: soldState.quantity,
+      stageIndex: soldState.stageIndex,
+      stageLabel: stageDetails.label,
+      stageDescription: stageDetails.description,
+      nextTrigger: null,
+      nextStageLabel: null,
+      nextStageDescription: null,
+      stopPrice: soldState.lastStopPrice,
+      limitPrice: soldState.lastLimitPrice,
+      orderId: soldState.orderId,
+      orderStatus: 'FLL',
+      unrealizedQty: null,
+      autoSellTrigger: null,
+      progress: null,
+      status: 'sold',
+      statusLabel: 'SOLD',
+      pendingCreate: false,
+      pendingUpdate: false,
+      autoSellExecuted: false,
+      createdAt: soldState.createdAt || null,
+      updatedAt: soldState.soldAt || null,
+      // Sold position specific fields
+      sellPrice: soldState.sellPrice,
+      pnlPerShare: soldState.pnlPerShare,
+      totalPnL: soldState.totalPnL,
+      soldAt: soldState.soldAt
     };
   }
 
@@ -1110,19 +1916,47 @@ class StopLimitService {
 
     const orderStatus = (state.orderStatus || '').toUpperCase();
     if (state.autoSellExecuted) return 'auto-sell-executed';
-    if (state.pendingCreate) return 'creating-order';
+    
+    // CRITICAL: Check for rejected orders first - they should show as rejected, not active
+    if (orderStatus === 'REJ') {
+      return 'order-rejected';
+    }
+    
+    // If stageIndex >= 0, we've created an order - don't show "creating" even if pendingCreate is true
+    // (pendingCreate might be true during the async operation, but order is already created)
+    if (state.pendingCreate && state.stageIndex < 0) {
+      return 'creating-order';
+    }
     if (state.pendingUpdate) return 'updating-order';
-    if (!state.orderId) {
-      return state.stageIndex <= 0 ? 'awaiting-stoplimit' : 'awaiting-ack';
+    
+    // If we have an orderId or stageIndex >= 0, check the order status
+    if (state.orderId || state.stageIndex >= 0) {
+      if (orderStatus === 'DON' || orderStatus === 'QUE' || orderStatus === 'QUEUED') {
+        return 'queued';
+      }
+      // If we have stageIndex >= 0 but no orderId yet, we're waiting for websocket to link it
+      if (!state.orderId && state.stageIndex >= 0) {
+        return 'awaiting-ack';
+      }
+      // Only return 'active' if order status is actually active
+      if (ACTIVE_ORDER_STATUSES.has(orderStatus) || this.isQueuedStatus(orderStatus) || orderStatus === 'ACK') {
+        return 'active';
+      }
+      // If order status is non-active but not REJ (already handled), show as inactive
+      if (NON_ACTIVE_STATUSES.has(orderStatus)) {
+        return 'order-inactive';
+      }
+      return 'active';
     }
-    if (orderStatus === 'DON' || orderStatus === 'QUE' || orderStatus === 'QUEUED') {
-      return 'queued';
-    }
-    return 'active';
+    
+    // No order yet
+    return state.stageIndex <= 0 ? 'awaiting-stoplimit' : 'awaiting-ack';
   }
 
   getStatusLabel(status) {
     switch (status) {
+      case 'sold':
+        return 'SOLD';
       case 'auto-sell-executed':
         return 'Auto Sell Executed';
       case 'creating-order':
@@ -1137,6 +1971,10 @@ class StopLimitService {
         return 'Awaiting Confirmation';
       case 'analysis-disabled':
         return 'Automation Disabled';
+      case 'order-rejected':
+        return 'Order Rejected';
+      case 'order-inactive':
+        return 'Order Inactive';
       case 'active':
       default:
         return 'Active';

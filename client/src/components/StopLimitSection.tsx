@@ -27,6 +27,11 @@ interface StopLimitSnapshot {
   autoSellExecuted: boolean;
   createdAt: number | null;
   updatedAt: number | null;
+  // Sold position fields
+  sellPrice?: number;
+  pnlPerShare?: number;
+  totalPnL?: number;
+  soldAt?: number;
 }
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
@@ -39,7 +44,8 @@ const statusStyles: Record<string, string> = {
   'awaiting-stoplimit': 'bg-[#332f1f] text-[#fde68a] border border-[#fde68a]/30',
   'awaiting-ack': 'bg-[#2f1f33] text-[#e879f9] border border-[#e879f9]/30',
   'auto-sell-executed': 'bg-[#3a1e1e] text-[#f87171] border border-[#f87171]/30',
-  'analysis-disabled': 'bg-[#3a1e1e] text-[#f87171] border border-[#f87171]/40'
+  'analysis-disabled': 'bg-[#3a1e1e] text-[#f87171] border border-[#f87171]/40',
+  sold: 'bg-[#1e3a2e] text-[#4ade80] border border-[#4ade80]/50'
 };
 
 const statusDot: Record<string, string> = {
@@ -50,7 +56,8 @@ const statusDot: Record<string, string> = {
   'awaiting-stoplimit': 'bg-[#fde68a]',
   'awaiting-ack': 'bg-[#e879f9]',
   'auto-sell-executed': 'bg-[#f87171]',
-  'analysis-disabled': 'bg-[#f87171]'
+  'analysis-disabled': 'bg-[#f87171]',
+  sold: 'bg-[#4ade80]'
 };
 
 const StopLimitSection: React.FC = () => {
@@ -391,28 +398,68 @@ const StopLimitSection: React.FC = () => {
                           )}
                         </div>
                         <div className="col-span-1 text-right">
-                          <div className={`font-mono font-semibold ${row.unrealizedQty !== null && row.unrealizedQty >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
-                            {row.unrealizedQty !== null ? formatNumber(row.unrealizedQty, 2) : 'N/A'}
-                          </div>
-                          <div className="text-[10px] text-[#eae9e9]/50">
-                            Target {row.autoSellTrigger !== null ? formatNumber(row.autoSellTrigger, 2) : 'N/A'}
-                          </div>
-                          <div className="text-[10px] text-[#eae9e9]/45">
-                            Qty {row.quantity ? row.quantity.toLocaleString() : 'N/A'}
-                          </div>
+                          {row.status === 'sold' && row.totalPnL !== undefined ? (
+                            <>
+                              <div className={`font-mono font-semibold text-lg ${row.totalPnL >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
+                                {formatCurrency(row.totalPnL)}
+                              </div>
+                              <div className={`text-[10px] font-medium ${row.pnlPerShare !== undefined && row.pnlPerShare >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
+                                {row.pnlPerShare !== undefined ? `${row.pnlPerShare >= 0 ? '+' : ''}${formatCurrency(row.pnlPerShare)}/share` : 'N/A'}
+                              </div>
+                              <div className="text-[10px] text-[#eae9e9]/50">
+                                Sold at {row.sellPrice !== undefined ? formatCurrency(row.sellPrice) : 'N/A'}
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div className={`font-mono font-semibold ${row.unrealizedQty !== null && row.unrealizedQty >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
+                                {row.unrealizedQty !== null ? formatNumber(row.unrealizedQty, 2) : 'N/A'}
+                              </div>
+                              <div className="text-[10px] text-[#eae9e9]/50">
+                                Target {row.autoSellTrigger !== null ? formatNumber(row.autoSellTrigger, 2) : 'N/A'}
+                              </div>
+                              <div className="text-[10px] text-[#eae9e9]/45">
+                                Qty {row.quantity ? row.quantity.toLocaleString() : 'N/A'}
+                              </div>
+                            </>
+                          )}
                         </div>
                         <div className="col-span-2">
-                          <div className="flex items-center space-x-2">
-                            <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Stop</span>
-                            <span className="font-mono text-sm text-[#eae9e9]">{formatCurrency(row.stopPrice)}</span>
-                          </div>
-                          <div className="flex items-center space-x-2">
-                            <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Limit</span>
-                            <span className="font-mono text-sm text-[#eae9e9]">{formatCurrency(row.limitPrice)}</span>
-                          </div>
+                          {row.status === 'sold' ? (
+                            <>
+                              <div className="flex items-center space-x-2">
+                                <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Buy Avg</span>
+                                <span className="font-mono text-sm text-[#eae9e9]">{formatCurrency(row.avgPrice)}</span>
+                              </div>
+                              <div className="flex items-center space-x-2">
+                                <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Sell Price</span>
+                                <span className="font-mono text-sm text-[#4ade80]">{row.sellPrice !== undefined ? formatCurrency(row.sellPrice) : 'N/A'}</span>
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div className="flex items-center space-x-2">
+                                <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Stop</span>
+                                <span className="font-mono text-sm text-[#eae9e9]">{formatCurrency(row.stopPrice)}</span>
+                              </div>
+                              <div className="flex items-center space-x-2">
+                                <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Limit</span>
+                                <span className="font-mono text-sm text-[#eae9e9]">{formatCurrency(row.limitPrice)}</span>
+                              </div>
+                            </>
+                          )}
                         </div>
                         <div className="col-span-2">
-                          {row.progress !== null ? (
+                          {row.status === 'sold' ? (
+                            <div className="space-y-1">
+                              <div className="text-[10px] text-[#eae9e9]/50">
+                                Sold {row.soldAt ? formatRelativeTime(row.soldAt) : 'N/A'}
+                              </div>
+                              <div className="text-[10px] text-[#eae9e9]/50">
+                                Qty: {row.quantity ? row.quantity.toLocaleString() : 'N/A'}
+                              </div>
+                            </div>
+                          ) : row.progress !== null ? (
                             <div className="space-y-1">
                               <div className="w-full h-2 bg-[#2a2820] rounded-full overflow-hidden">
                                 <div

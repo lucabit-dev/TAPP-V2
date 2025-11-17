@@ -2504,24 +2504,8 @@ async function sendBuyOrder(symbol, configId = null, groupKey = null) {
     
     const isSuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
     
-    // If buy order was successful, queue stop-loss order creation (wait for position to be filled)
+    // Stop-loss orders are now handled by StopLimitService automatically
     let stopLossResult = null;
-    if (isSuccess) {
-      // Queue stop-loss order instead of creating immediately
-      // The stop-loss will be created once the buy order is filled and position exists
-      queueStopLossOrder(symbol, currentPrice, quantity, (result) => {
-        stopLossResult = result;
-      });
-      // Return a placeholder result indicating stop-loss is queued
-      stopLossResult = {
-        success: true,
-        notifyStatus: 'QUEUED',
-        responseData: { message: 'Stop-loss order queued, waiting for position to be filled' },
-        errorMessage: null,
-        stopLossPrice: null,
-        queued: true
-      };
-    }
     
     return {
       success: isSuccess,
@@ -2546,8 +2530,7 @@ async function sendBuyOrder(symbol, configId = null, groupKey = null) {
   }
 }
 
-// Queue for pending stop-loss orders that need to be created after buy orders are filled
-const pendingStopLossQueue = new Map(); // Map<symbol, { stockPrice, quantity, createdAt, attempts }>
+// Stop-loss orders are now handled by StopLimitService automatically - no queue needed
 
 const ACTIVE_ORDER_STATUS_SET = new Set(['ACK', 'DON', 'REC', 'QUE', 'QUEUED']);
 function isActiveOrderStatus(status) {
@@ -2570,23 +2553,57 @@ async function syncStopLimitWithPositionsCache() {
   if (isStopLimitSyncRunning) return;
 
   if (!stopLimitService.isAnalysisEnabled()) {
+    // When disabled, aggressively clean up tracked positions
     stopLimitService.refreshTrackedPositionsFromCaches();
     return;
   }
 
-  const positions = Array.from(positionsCache.values());
-  const activeSymbols = new Set(positionsCache.keys());
+  // CRITICAL: Filter to only ACTIVE positions before processing
+  // This prevents re-adding closed positions that might still be in cache
+  const activePositions = [];
+  const activeSymbols = new Set();
+  
+  for (const position of positionsCache.values()) {
+    const symbol = (position?.Symbol || '').toString().trim().toUpperCase();
+    if (!symbol) continue;
 
-  if (positions.length === 0) {
-    stopLimitService.pruneInactiveSymbols(activeSymbols);
+    // Validate position is actually active
+    const quantity = parseFloat(position?.Quantity || '0');
+    if (!quantity || quantity <= 0) {
+      // Position is closed, skip it
+      continue;
+    }
+
+    const longShort = (position?.LongShort || '').toUpperCase();
+    if (longShort && longShort !== 'LONG') {
+      // Not a long position, skip it
+      continue;
+    }
+
+    // Position is active, include it
+    activePositions.push(position);
+    activeSymbols.add(symbol);
+  }
+
+  // Clean up tracked positions that are no longer active
+  stopLimitService.pruneInactiveSymbols(activeSymbols);
+
+  if (activePositions.length === 0) {
     return;
   }
 
   isStopLimitSyncRunning = true;
   try {
-    for (const position of positions) {
+    for (const position of activePositions) {
       const symbol = (position?.Symbol || '').toString().trim().toUpperCase();
       if (!symbol) continue;
+
+      // Double-check position is still active before processing
+      // This handles race conditions where position closes between filter and process
+      const quantity = parseFloat(position?.Quantity || '0');
+      if (!quantity || quantity <= 0) {
+        continue;
+      }
 
       if (!stopLimitService.isTrackingSymbol(symbol)) {
         console.log(`🆕 StopLimitService: Detected active position ${symbol}; ensuring StopLimit automation is initialized.`);
@@ -2598,8 +2615,6 @@ async function syncStopLimitWithPositionsCache() {
         console.error(`❌ StopLimitService: Failed to sync position ${symbol}:`, err?.message || err);
       }
     }
-
-    stopLimitService.pruneInactiveSymbols(activeSymbols);
   } catch (err) {
     console.error('❌ StopLimitService: Unexpected error during position sync:', err?.message || err);
   } finally {
@@ -2623,11 +2638,27 @@ function ensurePositionsWebSocketHealthy() {
   }
 }
 
+let lastValidationTime = 0;
+const VALIDATION_INTERVAL_MS = 30000; // Validate every 30 seconds
+
 function runStopLimitMonitoring() {
   ensurePositionsWebSocketHealthy();
   syncStopLimitWithPositionsCache().catch((err) => {
     console.error('❌ StopLimitService: Unhandled error in position sync interval:', err?.message || err);
   });
+  
+  // Periodic comprehensive validation - critical safety check
+  const now = Date.now();
+  if (now - lastValidationTime >= VALIDATION_INTERVAL_MS) {
+    lastValidationTime = now;
+    if (stopLimitService && typeof stopLimitService.validateAllTrackedPositions === 'function') {
+      try {
+        stopLimitService.validateAllTrackedPositions();
+      } catch (err) {
+        console.error('❌ StopLimitService: Error during periodic validation:', err?.message || err);
+      }
+    }
+  }
 }
 
 setInterval(runStopLimitMonitoring, STOPLIMIT_POSITION_SYNC_INTERVAL_MS);
@@ -2942,264 +2973,7 @@ function checkPositionExists(symbol) {
   return false;
 }
 
-// Process pending stop-loss orders - check if positions exist and create stop-loss orders
-async function processPendingStopLossOrders() {
-  if (pendingStopLossQueue.size === 0) return;
-  
-  const now = Date.now();
-  const MAX_WAIT_TIME = 5 * 60 * 1000; // 5 minutes max wait
-  const MAX_ATTEMPTS = 60; // Max 60 attempts (5 minutes / 5 seconds)
-  const POLL_INTERVAL_MS = 5000; // Poll every 5 seconds (cache updates in real-time via WebSocket)
-  
-  const symbolsToProcess = Array.from(pendingStopLossQueue.keys());
-  
-  for (const symbol of symbolsToProcess) {
-    const pending = pendingStopLossQueue.get(symbol);
-    if (!pending) continue;
-    
-    const elapsed = now - pending.createdAt;
-    const attempts = pending.attempts || 0;
-    
-    // Skip if too many attempts or too much time has passed
-    if (attempts >= MAX_ATTEMPTS || elapsed > MAX_WAIT_TIME) {
-      console.warn(`⏱️ Stop-loss queue timeout for ${symbol} after ${attempts} attempts (${Math.round(elapsed/1000)}s)`);
-      pendingStopLossQueue.delete(symbol);
-      continue;
-    }
-    
-    // Only check every POLL_INTERVAL_MS
-    if (now - pending.lastCheck < POLL_INTERVAL_MS) {
-      continue;
-    }
-    
-    pending.lastCheck = now;
-    pending.attempts = attempts + 1;
-    
-    // Check if position exists (synchronous check using cache)
-    const positionExists = checkPositionExists(symbol);
-    
-    if (positionExists) {
-      console.log(`✅ Position detected for ${symbol}, creating stop-loss order...`);
-      
-      // Create stop-loss order
-      const stopLossResult = await createStopLossOrder(symbol, pending.stockPrice, pending.quantity);
-      
-      // Update buy entry in buy list with stop-loss result
-      const buyEntry = buyList.find(entry => entry.ticker === symbol);
-      if (buyEntry && buyEntry.stopLoss && buyEntry.stopLoss.queued) {
-        buyEntry.stopLoss = stopLossResult;
-        // Broadcast update to clients
-        broadcastToClients({ 
-          type: 'BUY_LIST_UPDATE', 
-          data: { list: buyList },
-          timestamp: new Date().toISOString()
-        });
-        console.log(`📝 Updated buy entry for ${symbol} with stop-loss result`);
-      }
-      
-      // Remove from queue
-      pendingStopLossQueue.delete(symbol);
-      
-      // Broadcast update if there's a callback
-      if (pending.onComplete) {
-        pending.onComplete(stopLossResult);
-      }
-      
-      console.log(`✅ Stop-loss order ${stopLossResult.success ? 'created' : 'failed'} for ${symbol}`);
-    } else {
-      // Position not found yet, will check again next cycle
-      if (attempts % 6 === 0) { // Log every 6th attempt (every ~30 seconds) to avoid spam
-        console.log(`⏳ Waiting for buy order to fill for ${symbol} (attempt ${attempts}/${MAX_ATTEMPTS}, cache has ${positionsCache.size} positions)...`);
-      }
-    }
-  }
-}
-
-// Start polling interval for pending stop-loss orders
-const STOP_LOSS_POLL_INTERVAL_MS = 5000; // Check every 5 seconds (cache updates in real-time)
-setInterval(processPendingStopLossOrders, STOP_LOSS_POLL_INTERVAL_MS);
-
-// Helper function to queue stop-loss order creation (waits for position to exist)
-function queueStopLossOrder(symbol, stockPrice, quantity, onComplete = null) {
-  const normalizedSymbol = symbol.toUpperCase();
-  pendingStopLossQueue.set(normalizedSymbol, {
-    symbol: normalizedSymbol,
-    stockPrice,
-    quantity,
-    createdAt: Date.now(),
-    lastCheck: 0,
-    attempts: 0,
-    onComplete
-  });
-  console.log(`📋 Queued stop-loss order for ${symbol} (waiting for position to be filled)...`);
-}
-
-// Helper function to create stop-loss sell order
-// Returns { success: boolean, notifyStatus: string, responseData: any, errorMessage: string | null, stopLossPrice: number | null }
-async function createStopLossOrder(symbol, stockPrice, quantity) {
-  try {
-    // Calculate stop-loss price based on stock price ranges
-    // If price is 0-5: limit_price = stockPrice - 0.20
-    // If price is 5-10: limit_price = stockPrice - 0.35
-    // If price is 10-12: limit_price = stockPrice - 0.45
-    let stopLossPrice;
-    let stopLossOffset;
-    
-    if (stockPrice > 0 && stockPrice <= 5) {
-      stopLossOffset = 0.20;
-      stopLossPrice = stockPrice - stopLossOffset;
-    } else if (stockPrice > 5 && stockPrice <= 10) {
-      stopLossOffset = 0.35;
-      stopLossPrice = stockPrice - stopLossOffset;
-    } else if (stockPrice > 10 && stockPrice <= 12) {
-      stopLossOffset = 0.45;
-      stopLossPrice = stockPrice - stopLossOffset;
-    } else {
-      // Price outside supported range - skip stop-loss
-      console.warn(`⚠️ Skipping stop-loss for ${symbol}: price ${stockPrice} is outside supported range (0-12)`);
-      return {
-        success: false,
-        notifyStatus: `ERROR: Price ${stockPrice} outside supported range (0-12)`,
-        responseData: null,
-        errorMessage: `Price ${stockPrice} is outside supported range (0-12)`,
-        stopLossPrice: null
-      };
-    }
-    
-    // Ensure stop-loss price is positive
-    if (stopLossPrice <= 0) {
-      console.warn(`⚠️ Skipping stop-loss for ${symbol}: calculated stop-loss price ${stopLossPrice} is not positive`);
-      return {
-        success: false,
-        notifyStatus: `ERROR: Stop-loss price ${stopLossPrice} is not positive`,
-        responseData: null,
-        errorMessage: `Stop-loss price ${stopLossPrice} is not positive`,
-        stopLossPrice: null
-      };
-    }
-    
-    // Build stop-loss order body - using StopLimit for proper stop-loss functionality
-    // StopLimit orders need both stop_price (trigger) and limit_price (execution)
-    const limitOffset = stopLimitService?.limitOffset ?? 0.05;
-    const limitPrice = Math.round((stopLossPrice - limitOffset) * 100) / 100;
-    if (limitPrice <= 0) {
-      console.warn(`⚠️ Skipping stop-loss for ${symbol}: calculated limit price ${limitPrice} is not positive`);
-      return {
-        success: false,
-        notifyStatus: `ERROR: Limit price ${limitPrice} is not positive`,
-        responseData: null,
-        errorMessage: `Limit price ${limitPrice} is not positive`,
-        stopLossPrice: null
-      };
-    }
-
-    const stopLossOrderBody = {
-      symbol: symbol,
-      side: 'SELL',
-      order_type: 'StopLimit',
-      quantity: quantity,
-      limit_price: limitPrice,
-      stop_price: stopLossPrice // Trigger when price drops to this level
-    };
-    
-    console.log(`🛡️ Creating stop-loss order for ${symbol}: ${quantity} shares at STOP ${stopLossPrice} / LIMIT ${limitPrice} (offset: -${stopLossOffset.toFixed(2)}, limit gap: ${limitOffset.toFixed(2)})`);
-    
-    // Send stop-loss order to external service using POST /order
-    let notifyStatus = '';
-    let responseData = null;
-    let errorMessage = null;
-    
-    try {
-      const resp = await fetch('https://sections-bot.inbitme.com/order', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        body: JSON.stringify(stopLossOrderBody)
-      });
-      
-      notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
-      
-      // Try to get response body
-      let responseText = '';
-      try {
-        responseText = await resp.text();
-        if (responseText) {
-          try {
-            responseData = JSON.parse(responseText);
-          } catch {
-            responseData = responseText;
-          }
-        }
-      } catch (textErr) {
-        console.error(`⚠️ Could not read stop-loss response body:`, textErr.message);
-      }
-      
-      if (resp.ok) {
-        console.log(`✅ Stop-loss order created for ${symbol}: ${notifyStatus}`, responseData ? `Response: ${JSON.stringify(responseData)}` : '');
-      } else {
-        errorMessage = `HTTP ${notifyStatus}`;
-        if (responseData) {
-          if (typeof responseData === 'object') {
-            errorMessage = responseData.message || responseData.error || responseData.detail || JSON.stringify(responseData);
-          } else {
-            errorMessage = String(responseData);
-          }
-        }
-        console.error(`❌ Error creating stop-loss for ${symbol}:`, {
-          status: notifyStatus,
-          response: responseData,
-          body: responseText
-        });
-      }
-    } catch (err) {
-      notifyStatus = `ERROR: ${err.message}`;
-      errorMessage = err.message;
-      console.error(`❌ Network/Parse error creating stop-loss for ${symbol}:`, {
-        message: err.message,
-        stack: err.stack
-      });
-    }
-    
-    const isSuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
-    
-    // Extract order_id from response if available
-    let orderId = null;
-    if (isSuccess && responseData) {
-      if (typeof responseData === 'object') {
-        orderId = responseData.order_id || responseData.orderId || responseData.id || null;
-      }
-    }
-    
-    if (orderId) {
-      console.log(`📝 Stop-loss order_id saved for ${symbol}: ${orderId}`);
-    } else if (isSuccess) {
-      console.warn(`⚠️ Could not extract order_id from stop-loss response for ${symbol}. Response:`, JSON.stringify(responseData));
-    }
-    
-    return {
-      success: isSuccess,
-      notifyStatus,
-      responseData,
-      errorMessage: !isSuccess ? errorMessage : null,
-      stopLossPrice: stopLossPrice,
-      stopLossOffset: stopLossOffset,
-      limitOffset: limitOffset,
-      limitPrice: limitPrice,
-      orderId: orderId
-    };
-  } catch (e) {
-    console.error(`❌ Error in createStopLossOrder for ${symbol}:`, e);
-    return {
-      success: false,
-      notifyStatus: `ERROR: ${e.message}`,
-      responseData: null,
-      errorMessage: e.message,
-      stopLossPrice: null
-    };
-  }
-}
+// Stop-loss orders are now handled automatically by StopLimitService when positions are detected
 
 // Test external buy webhook endpoint (no buy list mutation)
 app.post('/api/buys/test', async (req, res) => {
@@ -3365,26 +3139,8 @@ app.post('/api/buys/test', async (req, res) => {
     
     const isBuySuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
     
-    // If buy order was successful, queue stop-loss sell order (wait for position to be filled)
+    // Stop-loss orders are now handled automatically by StopLimitService when positions are detected
     let stopLossResult = null;
-    if (isBuySuccess) {
-      // Queue stop-loss order instead of creating immediately
-      // The stop-loss will be created once the buy order is filled and position exists
-      queueStopLossOrder(symbol, currentPrice, quantity, (result) => {
-        stopLossResult = result;
-        // Update buy entry with stop-loss result if needed
-        // Note: This is async, so we'll update the entry when stop-loss is created
-      });
-      // Return a placeholder result indicating stop-loss is queued
-      stopLossResult = {
-        success: true,
-        notifyStatus: 'QUEUED',
-        responseData: { message: 'Stop-loss order queued, waiting for position to be filled' },
-        errorMessage: null,
-        stopLossPrice: null,
-        queued: true
-      };
-    }
     
     // Create buy entry and add to buy list
     const nowIso = new Date().toISOString();
@@ -4139,7 +3895,9 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
       });
     }
 
+    // Remove position from StopLimit tracking when manually sold
     if (isSuccess && stopLimitService && side === 'SELL') {
+      console.log(`🧹 StopLimitService: Removing ${symbol} from tracking (manually sold)`);
       stopLimitService.cleanupPosition(symbol);
     }
     
