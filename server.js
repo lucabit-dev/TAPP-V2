@@ -2479,18 +2479,12 @@ async function sendBuyOrder(symbol, configId = null, groupKey = null) {
       if (resp.ok) {
         console.log(`✅ Autobuy order sent for ${symbol}: ${notifyStatus}`, responseData ? `Response: ${JSON.stringify(responseData)}` : '');
       } else {
-        errorMessage = `HTTP ${notifyStatus}`;
-        if (responseData) {
-          if (typeof responseData === 'object') {
-            errorMessage = responseData.message || responseData.error || responseData.detail || JSON.stringify(responseData);
-          } else {
-            errorMessage = String(responseData);
-          }
-        }
+        errorMessage = extractErrorMessage(responseData, responseText, resp.status, resp.statusText);
         console.error(`❌ Error in autobuy for ${symbol}:`, {
           status: notifyStatus,
           response: responseData,
-          body: responseText
+          body: responseText,
+          extractedError: errorMessage
         });
       }
     } catch (err) {
@@ -2531,6 +2525,57 @@ async function sendBuyOrder(symbol, configId = null, groupKey = null) {
 }
 
 // Stop-loss orders are now handled by StopLimitService automatically - no queue needed
+
+// Helper function to extract meaningful error messages from API responses
+// Handles HTML error pages (like Cloudflare) and JSON error responses
+function extractErrorMessage(responseData, responseText, statusCode, statusText) {
+  // If responseData is an object, try to extract error message
+  if (responseData && typeof responseData === 'object') {
+    return responseData.message || responseData.error || responseData.detail || JSON.stringify(responseData);
+  }
+  
+  // If responseData is a string, check if it's HTML
+  if (responseData && typeof responseData === 'string') {
+    const trimmed = responseData.trim();
+    
+    // Check if it's HTML (starts with <!DOCTYPE or <html)
+    if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html') || trimmed.toLowerCase().includes('<html')) {
+      // Try to extract error information from HTML
+      // Look for common error page patterns
+      const titleMatch = trimmed.match(/<title[^>]*>([^<]+)<\/title>/i);
+      if (titleMatch) {
+        const title = titleMatch[1].trim();
+        // Extract error code if present (e.g., "500: Internal server error")
+        const errorMatch = title.match(/(\d{3}):\s*(.+)/i);
+        if (errorMatch) {
+          return `API Error ${errorMatch[1]}: ${errorMatch[2]}`;
+        }
+        // If title contains error info, use it
+        if (title.toLowerCase().includes('error')) {
+          return `API Error: ${title}`;
+        }
+      }
+      
+      // Look for error messages in common HTML error page structures
+      const h1Match = trimmed.match(/<h1[^>]*>([^<]+)<\/h1>/i);
+      if (h1Match) {
+        const h1 = h1Match[1].trim();
+        if (h1.toLowerCase().includes('error') || h1.toLowerCase().includes('server')) {
+          return `API Error: ${h1}`;
+        }
+      }
+      
+      // Fallback: return generic error with status code
+      return `API returned HTML error page (HTTP ${statusCode} ${statusText || ''})`;
+    }
+    
+    // Not HTML, return as-is (might be plain text error)
+    return trimmed;
+  }
+  
+  // Fallback to status code
+  return `HTTP ${statusCode} ${statusText || ''}`;
+}
 
 const ACTIVE_ORDER_STATUS_SET = new Set(['ACK', 'DON', 'REC', 'QUE', 'QUEUED']);
 function isActiveOrderStatus(status) {
@@ -3079,18 +3124,12 @@ app.post('/api/buys/test', async (req, res) => {
       if (resp.ok) {
         console.log(`✅ Buy order sent for ${symbol}: ${notifyStatus}`, responseData ? `Response: ${JSON.stringify(responseData)}` : '');
       } else {
-        errorMessage = `HTTP ${notifyStatus}`;
-        if (responseData) {
-          if (typeof responseData === 'object') {
-            errorMessage = responseData.message || responseData.error || responseData.detail || JSON.stringify(responseData);
-          } else {
-            errorMessage = String(responseData);
-          }
-        }
+        errorMessage = extractErrorMessage(responseData, responseText, resp.status, resp.statusText);
         console.error(`❌ Error buying ${symbol}:`, {
           status: notifyStatus,
           response: responseData,
-          body: responseText
+          body: responseText,
+          extractedError: errorMessage
         });
       }
     } catch (err) {
@@ -3294,18 +3333,12 @@ app.get('/api/buys/test', async (req, res) => {
       if (resp.ok) {
         console.log(`✅ Buy order sent for ${symbol}: ${notifyStatus}`, responseData ? `Response: ${JSON.stringify(responseData)}` : '');
       } else {
-        errorMessage = `HTTP ${notifyStatus}`;
-        if (responseData) {
-          if (typeof responseData === 'object') {
-            errorMessage = responseData.message || responseData.error || responseData.detail || JSON.stringify(responseData);
-          } else {
-            errorMessage = String(responseData);
-          }
-        }
+        errorMessage = extractErrorMessage(responseData, responseText, resp.status, resp.statusText);
         console.error(`❌ Error buying ${symbol}:`, {
           status: notifyStatus,
           response: responseData,
-          body: responseText
+          body: responseText,
+          extractedError: errorMessage
         });
       }
     } catch (err) {
@@ -3858,19 +3891,12 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
       if (resp.ok) {
         console.log(`✅ Sell order sent for ${symbol}: ${notifyStatus}`, responseData ? `Response: ${JSON.stringify(responseData)}` : '');
       } else {
-        errorMessage = `HTTP ${notifyStatus}`;
-        if (responseData) {
-          // If response is an object, try to extract error message
-          if (typeof responseData === 'object') {
-            errorMessage = responseData.message || responseData.error || responseData.detail || JSON.stringify(responseData);
-          } else {
-            errorMessage = String(responseData);
-          }
-        }
+        errorMessage = extractErrorMessage(responseData, responseText, resp.status, resp.statusText);
         console.error(`❌ Error selling ${symbol}:`, {
           status: notifyStatus,
           response: responseData,
-          body: responseText
+          body: responseText,
+          extractedError: errorMessage
         });
       }
     } catch (err) {
@@ -4032,17 +4058,11 @@ app.post('/api/sell_all', requireDbReady, requireAuth, async (req, res) => {
         // Success - API returns 200 with no content according to documentation
         console.log(`✅ Sell All executed successfully: ${notifyStatus}`);
       } else {
-        errorMessage = `HTTP ${notifyStatus}`;
-        if (responseData) {
-          if (typeof responseData === 'object') {
-            errorMessage = responseData.message || responseData.error || responseData.detail || JSON.stringify(responseData);
-          } else {
-            errorMessage = String(responseData);
-          }
-        }
+        errorMessage = extractErrorMessage(responseData, responseText || '', resp.status, resp.statusText);
         console.error(`❌ Error in Sell All:`, {
           status: notifyStatus,
-          response: responseData
+          response: responseData,
+          extractedError: errorMessage
         });
       }
     } catch (err) {

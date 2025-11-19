@@ -353,15 +353,55 @@ class StopLimitService {
       }
       
       // For Market SELL orders, check if filled even if not previously linked
+      // This handles both StopLimit-tracked positions and manually sold positions
       if (isMarketSell && (status === 'FLL' || status === 'FIL')) {
+        // Try to get position info from tracked state or from positions cache
+        let positionInfo = null;
+        let groupKey = null;
+        
         if (state) {
-          // Position is tracked, calculate P&L
-          console.log(`✅ StopLimitService: Market SELL order ${orderId} for ${symbol} filled (status ${status}) – calculating P&L and marking as sold.`);
-          
+          // Position was tracked by StopLimit
+          positionInfo = {
+            avgPrice: state.avgPrice,
+            quantity: state.quantity,
+            positionId: state.positionId,
+            accountId: state.accountId,
+            groupKey: state.groupKey,
+            createdAt: state.createdAt,
+            stageIndex: state.stageIndex,
+            lastStopPrice: state.lastStopPrice,
+            lastLimitPrice: state.lastLimitPrice
+          };
+          groupKey = state.groupKey;
+        } else if (this.positionsCache && typeof this.positionsCache.get === 'function') {
+          // Position wasn't tracked, but try to get info from cache (before it's removed)
+          const position = this.positionsCache.get(symbol);
+          if (position) {
+            const avgPrice = this.parseNumber(position.AveragePrice);
+            const quantity = this.parseNumber(position.Quantity);
+            if (avgPrice && avgPrice > 0 && quantity && quantity > 0) {
+              groupKey = this.resolveGroup(avgPrice);
+              positionInfo = {
+                avgPrice,
+                quantity,
+                positionId: position.PositionID || null,
+                accountId: position.AccountID || null,
+                groupKey: groupKey || null,
+                createdAt: Date.now(), // Approximate creation time
+                stageIndex: -1, // Manual sale, no stage
+                lastStopPrice: null,
+                lastLimitPrice: null
+              };
+              console.log(`📊 StopLimitService: Found position info for manual sale ${symbol} from cache`);
+            }
+          }
+        }
+        
+        if (positionInfo) {
           // Calculate P&L from the filled order
           const sellPrice = this.parseNumber(order.FilledPrice || leg.FilledPrice || order.Price || leg.Price);
-          const quantity = state.quantity || this.parseNumber(leg.ExecQuantity || leg.QuantityRemaining || order.Quantity);
-          const avgPrice = state.avgPrice;
+          const quantity = positionInfo.quantity || this.parseNumber(leg.ExecQuantity || leg.QuantityRemaining || order.Quantity);
+          const avgPrice = positionInfo.avgPrice;
           
           if (sellPrice && avgPrice && quantity) {
             const pnlPerShare = this.roundPrice(sellPrice - avgPrice);
@@ -370,9 +410,9 @@ class StopLimitService {
             // Store sold position with P&L information
             this.soldPositions.set(symbol, {
               symbol,
-              positionId: state.positionId,
-              accountId: state.accountId,
-              groupKey: state.groupKey,
+              positionId: positionInfo.positionId,
+              accountId: positionInfo.accountId,
+              groupKey: positionInfo.groupKey,
               avgPrice,
               quantity,
               sellPrice,
@@ -380,15 +420,23 @@ class StopLimitService {
               totalPnL,
               orderId,
               soldAt: Date.now(),
-              createdAt: state.createdAt,
-              stageIndex: state.stageIndex,
-              lastStopPrice: state.lastStopPrice,
-              lastLimitPrice: state.lastLimitPrice
+              createdAt: positionInfo.createdAt,
+              stageIndex: positionInfo.stageIndex,
+              lastStopPrice: positionInfo.lastStopPrice,
+              lastLimitPrice: positionInfo.lastLimitPrice
             });
             
-            console.log(`💰 StopLimitService: ${symbol} SOLD (Market) - Avg: $${avgPrice.toFixed(2)}, Sell: $${sellPrice.toFixed(2)}, Qty: ${quantity}, P&L/Share: $${pnlPerShare.toFixed(2)}, Total P&L: $${totalPnL.toFixed(2)}`);
+            const saleType = state ? 'Market (StopLimit-tracked)' : 'Manual';
+            console.log(`💰 StopLimitService: ${symbol} SOLD (${saleType}) - Avg: $${avgPrice.toFixed(2)}, Sell: $${sellPrice.toFixed(2)}, Qty: ${quantity}, P&L/Share: $${pnlPerShare.toFixed(2)}, Total P&L: $${totalPnL.toFixed(2)}`);
+          } else {
+            console.warn(`⚠️ StopLimitService: Could not calculate P&L for ${symbol} manual sale - sellPrice: ${sellPrice}, avgPrice: ${avgPrice}, quantity: ${quantity}`);
           }
-          
+        } else {
+          console.log(`ℹ️ StopLimitService: Market SELL order ${orderId} for ${symbol} filled, but no position info available to calculate P&L`);
+        }
+        
+        // Cleanup if position was tracked
+        if (state) {
           // Verify position is actually closed before cleanup
           if (!this.hasActivePosition(symbol)) {
             this.cleanupPosition(symbol);
@@ -680,19 +728,30 @@ class StopLimitService {
     if (!symbol) return false;
     const normalized = symbol.toUpperCase();
 
+    // CRITICAL: If positionsCache is not available, we cannot verify the position is active
+    // In this case, we should return false to ensure we don't keep tracking closed positions
     if (!this.positionsCache || typeof this.positionsCache.get !== 'function') {
-      // Assume active when no cache is available to avoid false negatives
-      return true;
+      console.warn(`⚠️ StopLimitService: positionsCache not available for ${normalized} - cannot verify if position is active`);
+      return false;
     }
 
     const position = this.positionsCache.get(normalized);
-    if (!position) return false;
+    if (!position) {
+      // Position not in cache means it's closed or never existed
+      return false;
+    }
 
     const quantity = this.parseNumber(position?.Quantity);
-    if (!quantity || quantity <= 0) return false;
+    if (!quantity || quantity <= 0) {
+      // Position exists in cache but quantity is 0 or invalid - position is closed
+      return false;
+    }
 
     const longShort = (position?.LongShort || '').toUpperCase();
-    if (longShort && longShort !== 'LONG') return false;
+    if (longShort && longShort !== 'LONG') {
+      // Position is not LONG - we only track LONG positions
+      return false;
+    }
 
     return true;
   }
@@ -1716,31 +1775,69 @@ class StopLimitService {
 
   getSnapshot() {
     // CRITICAL: Always validate before returning snapshot to ensure accuracy
+    // This ensures we're using the latest data from the positions WebSocket
     this.refreshTrackedPositionsFromCaches();
     
     // Aggressive cleanup pass - remove any positions that are no longer active
+    // This is the primary source of truth: positionsCache from WebSocket
     const symbolsToCleanup = [];
+    const activeSymbolsFromCache = new Set();
+    
+    // First, build a set of all active symbols from positionsCache (source of truth)
+    if (this.positionsCache && typeof this.positionsCache.values === 'function') {
+      for (const position of this.positionsCache.values()) {
+        const symbol = (position?.Symbol || '').toUpperCase();
+        if (!symbol) continue;
+        
+        const quantity = this.parseNumber(position?.Quantity);
+        if (!quantity || quantity <= 0) continue;
+        
+        const longShort = (position?.LongShort || '').toUpperCase();
+        if (longShort && longShort !== 'LONG') continue;
+        
+        // This is an active LONG position
+        activeSymbolsFromCache.add(symbol);
+      }
+    }
+    
+    // Now check all tracked positions against the active symbols set
     for (const state of this.trackedPositions.values()) {
-      // First check: Is position still active in cache?
-      if (!this.hasActivePosition(state.symbol)) {
-        console.log(`🧹 StopLimitService: Removing ${state.symbol} from snapshot - position no longer active`);
-        symbolsToCleanup.push(state.symbol);
+      const symbol = state.symbol;
+      
+      // Check 1: Is symbol in the active symbols set from cache?
+      if (!activeSymbolsFromCache.has(symbol)) {
+        console.log(`🧹 StopLimitService: Removing ${symbol} from snapshot - not in active positions cache`);
+        symbolsToCleanup.push(symbol);
+        continue;
+      }
+      
+      // Check 2: Double-check with hasActivePosition (validates quantity, longShort, etc.)
+      if (!this.hasActivePosition(symbol)) {
+        console.log(`🧹 StopLimitService: Removing ${symbol} from snapshot - hasActivePosition returned false`);
+        symbolsToCleanup.push(symbol);
         continue;
       }
 
-      // Second check: Verify position exists in positionsCache with valid quantity
+      // Check 3: Verify position exists in positionsCache with valid quantity
       if (this.positionsCache && typeof this.positionsCache.get === 'function') {
-        const position = this.positionsCache.get(state.symbol);
+        const position = this.positionsCache.get(symbol);
         if (!position) {
-          console.log(`🧹 StopLimitService: Removing ${state.symbol} from snapshot - not in positionsCache`);
-          symbolsToCleanup.push(state.symbol);
+          console.log(`🧹 StopLimitService: Removing ${symbol} from snapshot - not in positionsCache`);
+          symbolsToCleanup.push(symbol);
           continue;
         }
         
         const quantity = this.parseNumber(position?.Quantity);
         if (!quantity || quantity <= 0) {
-          console.log(`🧹 StopLimitService: Removing ${state.symbol} from snapshot - quantity is ${quantity}`);
-          symbolsToCleanup.push(state.symbol);
+          console.log(`🧹 StopLimitService: Removing ${symbol} from snapshot - quantity is ${quantity}`);
+          symbolsToCleanup.push(symbol);
+          continue;
+        }
+        
+        const longShort = (position?.LongShort || '').toUpperCase();
+        if (longShort && longShort !== 'LONG') {
+          console.log(`🧹 StopLimitService: Removing ${symbol} from snapshot - not LONG (${longShort})`);
+          symbolsToCleanup.push(symbol);
           continue;
         }
       }
@@ -1756,16 +1853,20 @@ class StopLimitService {
       }
     }
 
-    // Cleanup inactive positions
+    // Cleanup inactive positions immediately
     for (const symbol of symbolsToCleanup) {
+      console.log(`🗑️ StopLimitService: Cleaning up inactive position ${symbol} from trackedPositions`);
       this.cleanupPosition(symbol);
     }
 
-    // Build snapshot for active positions
+    // Build snapshot ONLY for positions that are confirmed active
     const rows = [];
     for (const state of this.trackedPositions.values()) {
-      // Final check before adding to snapshot
-      if (!this.hasActivePosition(state.symbol)) {
+      // Final triple-check before adding to snapshot
+      // Only include if symbol is in activeSymbolsFromCache AND hasActivePosition returns true
+      if (!activeSymbolsFromCache.has(state.symbol) || !this.hasActivePosition(state.symbol)) {
+        // Position is not active, skip it (should have been cleaned up above, but double-check)
+        console.log(`⚠️ StopLimitService: Skipping ${state.symbol} in snapshot - not confirmed active`);
         continue;
       }
       rows.push(this.toSnapshot(state));
