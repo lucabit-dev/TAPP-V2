@@ -407,9 +407,7 @@ class StopLimitService {
             const pnlPerShare = this.roundPrice(sellPrice - avgPrice);
             const totalPnL = this.roundPrice(pnlPerShare * quantity);
             
-            // Store sold position with P&L information
-            this.soldPositions.set(symbol, {
-              symbol,
+            const saleRecord = {
               positionId: positionInfo.positionId,
               accountId: positionInfo.accountId,
               groupKey: positionInfo.groupKey,
@@ -424,8 +422,9 @@ class StopLimitService {
               stageIndex: positionInfo.stageIndex,
               lastStopPrice: positionInfo.lastStopPrice,
               lastLimitPrice: positionInfo.lastLimitPrice
-            });
+            };
             
+            this.recordSoldPosition(symbol, saleRecord);
             const saleType = state ? 'Market (StopLimit-tracked)' : 'Manual';
             console.log(`💰 StopLimitService: ${symbol} SOLD (${saleType}) - Avg: $${avgPrice.toFixed(2)}, Sell: $${sellPrice.toFixed(2)}, Qty: ${quantity}, P&L/Share: $${pnlPerShare.toFixed(2)}, Total P&L: $${totalPnL.toFixed(2)}`);
           } else {
@@ -435,13 +434,8 @@ class StopLimitService {
           console.log(`ℹ️ StopLimitService: Market SELL order ${orderId} for ${symbol} filled, but no position info available to calculate P&L`);
         }
         
-        // Cleanup if position was tracked
-        if (state) {
-          // Verify position is actually closed before cleanup
-          if (!this.hasActivePosition(symbol)) {
-            this.cleanupPosition(symbol);
-          }
-        }
+        // Always schedule cleanup to prevent stale tracking
+        this.schedulePostSaleCleanup(symbol);
         return;
       }
       
@@ -480,9 +474,7 @@ class StopLimitService {
             const pnlPerShare = this.roundPrice(sellPrice - avgPrice);
             const totalPnL = this.roundPrice(pnlPerShare * quantity);
             
-            // Store sold position with P&L information
-            this.soldPositions.set(symbol, {
-              symbol,
+            const saleRecord = {
               positionId: state.positionId,
               accountId: state.accountId,
               groupKey: state.groupKey,
@@ -497,19 +489,15 @@ class StopLimitService {
               stageIndex: state.stageIndex,
               lastStopPrice: state.lastStopPrice,
               lastLimitPrice: state.lastLimitPrice
-            });
+            };
             
+            this.recordSoldPosition(symbol, saleRecord);
             console.log(`💰 StopLimitService: ${symbol} SOLD (StopLimit) - Avg: $${avgPrice.toFixed(2)}, Sell: $${sellPrice.toFixed(2)}, Qty: ${quantity}, P&L/Share: $${pnlPerShare.toFixed(2)}, Total P&L: $${totalPnL.toFixed(2)}`);
           } else {
             console.warn(`⚠️ StopLimitService: Could not calculate P&L for ${symbol} - sellPrice: ${sellPrice}, avgPrice: ${avgPrice}, quantity: ${quantity}`);
           }
           
-          // Verify position is actually closed before cleanup
-          if (!this.hasActivePosition(symbol)) {
-            this.cleanupPosition(symbol);
-          } else {
-            console.log(`⚠️ StopLimitService: StopLimit order ${orderId} filled but position ${symbol} still active - may be partial fill, keeping tracking`);
-          }
+          this.schedulePostSaleCleanup(symbol);
           return;
         }
       }
@@ -541,9 +529,7 @@ class StopLimitService {
             const pnlPerShare = this.roundPrice(sellPrice - avgPrice);
             const totalPnL = this.roundPrice(pnlPerShare * quantity);
             
-            // Store sold position with P&L information
-            this.soldPositions.set(symbol, {
-              symbol,
+            const saleRecord = {
               positionId: state.positionId,
               accountId: state.accountId,
               groupKey: state.groupKey,
@@ -558,19 +544,15 @@ class StopLimitService {
               stageIndex: state.stageIndex,
               lastStopPrice: state.lastStopPrice,
               lastLimitPrice: state.lastLimitPrice
-            });
+            };
             
+            this.recordSoldPosition(symbol, saleRecord);
             console.log(`💰 StopLimitService: ${symbol} SOLD - Avg: $${avgPrice.toFixed(2)}, Sell: $${sellPrice.toFixed(2)}, Qty: ${quantity}, P&L/Share: $${pnlPerShare.toFixed(2)}, Total P&L: $${totalPnL.toFixed(2)}`);
           } else {
             console.warn(`⚠️ StopLimitService: Could not calculate P&L for ${symbol} - sellPrice: ${sellPrice}, avgPrice: ${avgPrice}, quantity: ${quantity}`);
           }
           
-          // Verify position is actually closed before cleanup
-          if (!this.hasActivePosition(symbol)) {
-            this.cleanupPosition(symbol);
-          } else {
-            console.log(`⚠️ StopLimitService: Order ${orderId} filled but position ${symbol} still active - may be partial fill, keeping tracking`);
-          }
+          this.schedulePostSaleCleanup(symbol);
           return;
         } else if (status === 'OUT') {
           // OUT status handling (order expired)
@@ -595,9 +577,7 @@ class StopLimitService {
                 const pnlPerShare = this.roundPrice(sellPrice - avgPrice);
                 const totalPnL = this.roundPrice(pnlPerShare * quantity);
                 
-                // Store sold position with P&L information
-                this.soldPositions.set(symbol, {
-                  symbol,
+                const saleRecord = {
                   positionId: state.positionId,
                   accountId: state.accountId,
                   groupKey: state.groupKey,
@@ -612,12 +592,13 @@ class StopLimitService {
                   stageIndex: state.stageIndex,
                   lastStopPrice: state.lastStopPrice,
                   lastLimitPrice: state.lastLimitPrice
-                });
+                };
                 
+                this.recordSoldPosition(symbol, saleRecord);
                 console.log(`💰 StopLimitService: ${symbol} SOLD (fallback) - Avg: $${avgPrice.toFixed(2)}, Sell: $${sellPrice.toFixed(2)}, Qty: ${quantity}, P&L/Share: $${pnlPerShare.toFixed(2)}, Total P&L: $${totalPnL.toFixed(2)}`);
               }
               
-              this.cleanupPosition(symbol);
+              this.schedulePostSaleCleanup(symbol);
             }
           }
         }
@@ -656,6 +637,37 @@ class StopLimitService {
     }
     this.clearOrderWaiters(symbol);
     // Note: soldPositions are kept for display purposes, not cleaned up
+  }
+
+  recordSoldPosition(symbol, saleData = {}) {
+    if (!symbol) return;
+    const normalized = symbol.toUpperCase();
+    const record = {
+      symbol: normalized,
+      positionId: saleData.positionId || null,
+      accountId: saleData.accountId || null,
+      groupKey: saleData.groupKey || null,
+      avgPrice: saleData.avgPrice || null,
+      quantity: saleData.quantity || null,
+      sellPrice: saleData.sellPrice || null,
+      pnlPerShare: saleData.pnlPerShare || null,
+      totalPnL: saleData.totalPnL || null,
+      orderId: saleData.orderId || null,
+      soldAt: saleData.soldAt || Date.now(),
+      createdAt: saleData.createdAt || null,
+      stageIndex: typeof saleData.stageIndex === 'number' ? saleData.stageIndex : -1,
+      lastStopPrice: saleData.lastStopPrice ?? null,
+      lastLimitPrice: saleData.lastLimitPrice ?? null
+    };
+
+    this.soldPositions.set(normalized, record);
+  }
+
+  schedulePostSaleCleanup(symbol) {
+    if (!symbol) return;
+    this.cleanupPosition(symbol);
+    setTimeout(() => this.cleanupPosition(symbol), 750);
+    setTimeout(() => this.cleanupPosition(symbol), 2000);
   }
 
   pruneInactiveSymbols(activeSymbols) {
@@ -1960,6 +1972,112 @@ class StopLimitService {
       totalPnL: soldState.totalPnL,
       soldAt: soldState.soldAt
     };
+  }
+
+  getDiagnostics() {
+    const now = Date.now();
+    const positionsCacheSize = this.positionsCache && typeof this.positionsCache.size === 'number'
+      ? this.positionsCache.size
+      : (this.positionsCache && typeof this.positionsCache.keys === 'function'
+        ? Array.from(this.positionsCache.keys()).length
+        : 0);
+    const ordersCacheSize = this.ordersCache && typeof this.ordersCache.size === 'number'
+      ? this.ordersCache.size
+      : (this.ordersCache && typeof this.ordersCache.keys === 'function'
+        ? Array.from(this.ordersCache.keys()).length
+        : 0);
+
+    const diagnostics = {
+      timestamp: now,
+      trackedCount: this.trackedPositions.size,
+      soldCount: this.soldPositions.size,
+      positionsCacheSize,
+      ordersCacheSize,
+      trackedSymbols: [],
+      issues: []
+    };
+
+    for (const state of this.trackedPositions.values()) {
+      const { symbol } = state;
+      const position = this.positionsCache && typeof this.positionsCache.get === 'function'
+        ? this.positionsCache.get(symbol)
+        : null;
+      const order = state.orderId && this.ordersCache && typeof this.ordersCache.get === 'function'
+        ? this.ordersCache.get(state.orderId)
+        : null;
+      const positionQty = position ? this.parseNumber(position?.Quantity) : null;
+      const orderStatus = order?.Status || state.orderStatus || null;
+      const issues = [];
+
+      if (!position) {
+        issues.push('position-missing');
+      } else {
+        if (!positionQty || positionQty <= 0) {
+          issues.push('position-qty-zero');
+        }
+        const longShort = (position?.LongShort || '').toUpperCase();
+        if (longShort && longShort !== 'LONG') {
+          issues.push('position-not-long');
+        }
+      }
+
+      if (state.stageIndex >= 0 && !state.pendingCreate) {
+        if (!state.orderId) {
+          issues.push('order-id-missing');
+        } else if (!order) {
+          issues.push('order-missing-in-cache');
+        }
+      }
+
+      if (state.pendingCreate) {
+        issues.push('pending-create');
+      }
+
+      if (state.pendingUpdate) {
+        issues.push('pending-update');
+      }
+
+      if (state.autoSellExecuted) {
+        issues.push('auto-sell-executed');
+      }
+
+      const staleMs = state.updatedAt ? now - state.updatedAt : null;
+      if (staleMs !== null && staleMs > 60000) {
+        issues.push('state-stale-60s');
+      }
+
+      diagnostics.trackedSymbols.push({
+        symbol,
+        groupKey: state.groupKey,
+        stageIndex: state.stageIndex,
+        avgPrice: state.avgPrice,
+        quantity: state.quantity,
+        positionQty,
+        orderId: state.orderId || null,
+        orderStatus,
+        pendingCreate: state.pendingCreate,
+        pendingUpdate: state.pendingUpdate,
+        autoSellExecuted: state.autoSellExecuted,
+        lastUpdated: state.updatedAt || null,
+        issues
+      });
+
+      for (const issue of issues) {
+        diagnostics.issues.push({
+          symbol,
+          type: issue,
+          orderId: state.orderId || null
+        });
+      }
+    }
+
+    diagnostics.trackedSymbols.sort((a, b) => a.symbol.localeCompare(b.symbol));
+    diagnostics.issues.sort((a, b) => {
+      if (a.symbol === b.symbol) return a.type.localeCompare(b.type);
+      return a.symbol.localeCompare(b.symbol);
+    });
+
+    return diagnostics;
   }
 
   getStageDetails(state, config) {

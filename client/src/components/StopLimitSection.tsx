@@ -34,6 +34,53 @@ interface StopLimitSnapshot {
   soldAt?: number;
 }
 
+interface WebSocketDiagnostics {
+  connected: boolean;
+  readyState: string;
+  lastMessageAt: number | null;
+  lastConnectAttempt: number | null;
+  reconnectAttempts: number;
+  staleForMs: number | null;
+  lastError: string | null;
+}
+
+interface StopLimitTrackedSymbolDiagnostics {
+  symbol: string;
+  groupKey: string;
+  stageIndex: number;
+  avgPrice: number;
+  quantity: number;
+  positionQty: number | null;
+  orderId: string | null;
+  orderStatus: string | null;
+  pendingCreate: boolean;
+  pendingUpdate: boolean;
+  autoSellExecuted: boolean;
+  lastUpdated: number | null;
+  issues: string[];
+}
+
+interface StopLimitServiceDiagnostics {
+  timestamp: number;
+  trackedCount: number;
+  soldCount: number;
+  positionsCacheSize: number;
+  ordersCacheSize: number;
+  trackedSymbols: StopLimitTrackedSymbolDiagnostics[];
+  issues: { symbol: string; type: string; orderId: string | null }[];
+}
+
+interface StopLimitDiagnostics {
+  timestamp: number;
+  positionsWs: WebSocketDiagnostics | null;
+  ordersWs: WebSocketDiagnostics | null;
+  caches: {
+    positions: number;
+    orders: number;
+  };
+  service: StopLimitServiceDiagnostics | null;
+}
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 
 const statusStyles: Record<string, string> = {
@@ -68,6 +115,7 @@ const StopLimitSection: React.FC = () => {
   const [analysisEnabled, setAnalysisEnabled] = React.useState<boolean>(true);
   const [analysisChangedAt, setAnalysisChangedAt] = React.useState<number | null>(null);
   const [lastUpdated, setLastUpdated] = React.useState<number | null>(null);
+  const [diagnostics, setDiagnostics] = React.useState<StopLimitDiagnostics | null>(null);
   const [isTogglingAutomation, setIsTogglingAutomation] = React.useState<boolean>(false);
   const refreshIntervalRef = React.useRef<number | null>(null);
 
@@ -87,6 +135,7 @@ const StopLimitSection: React.FC = () => {
       setRows(Array.isArray(data.data) ? data.data : []);
       setAnalysisEnabled(data.analysisEnabled !== false);
       setAnalysisChangedAt(typeof data.analysisChangedAt === 'number' ? data.analysisChangedAt : null);
+      setDiagnostics(data.diagnostics || null);
       setError(null);
       setLastUpdated(Date.now());
     } catch (err: any) {
@@ -231,6 +280,34 @@ const StopLimitSection: React.FC = () => {
     }
   };
 
+  const renderWsCard = (title: string, wsDiag: WebSocketDiagnostics | null, cacheSize?: number) => {
+    const connected = !!wsDiag?.connected;
+    const statusClass = connected ? 'text-[#4ade80]' : 'text-[#f87171]';
+    const lastUpdateLabel = wsDiag?.lastMessageAt ? `${formatRelativeTime(wsDiag.lastMessageAt)} (${formatTimestamp(wsDiag.lastMessageAt)})` : 'N/A';
+    const staleSeconds = wsDiag?.staleForMs ? Math.round(wsDiag.staleForMs / 1000) : null;
+
+    return (
+      <div className="rounded-lg border border-[#2a2820]/60 bg-[#1b1910] p-3 space-y-1.5" key={title}>
+        <div className="text-[11px] uppercase tracking-wide text-[#eae9e9]/60">{title}</div>
+        <div className={`text-sm font-semibold ${statusClass}`}>
+          {connected ? 'Connected' : 'Disconnected'}
+          {wsDiag?.readyState ? ` (${wsDiag.readyState})` : ''}
+        </div>
+        <div className="text-[11px] text-[#eae9e9]/60">Last update: {lastUpdateLabel}</div>
+        <div className="text-[11px] text-[#eae9e9]/60">Reconnects: {wsDiag?.reconnectAttempts ?? 0}</div>
+        <div className="text-[11px] text-[#eae9e9]/60">Cache size: {cacheSize ?? 0}</div>
+        {staleSeconds !== null && staleSeconds > 15 && (
+          <div className="text-[11px] text-[#facc15]">Stale for {staleSeconds}s</div>
+        )}
+        {wsDiag?.lastError && (
+          <div className="text-[11px] text-[#fbbf24] truncate" title={wsDiag.lastError}>
+            Last error: {wsDiag.lastError}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const automationStatusClass = analysisEnabled ? 'text-[#4ade80]' : 'text-[#f87171]';
   const automationButtonClass = analysisEnabled
     ? 'bg-[#1e3a2e] text-[#4ade80] border border-[#4ade80]/30 hover:bg-[#1e3a2e]/80'
@@ -279,6 +356,38 @@ const StopLimitSection: React.FC = () => {
       {!analysisEnabled && (
         <div className="px-4 py-2 bg-[#3a1e1e] border-b border-[#f87171]/40 text-[#f87171] text-xs">
           StopLimit automation is disabled. Orders will not be created or updated automatically while AUTO is OFF.
+        </div>
+      )}
+
+      {diagnostics && (
+        <div className="px-4 py-3 border-b border-[#2a2820]/40 bg-[#15130d]">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {renderWsCard('Positions WebSocket', diagnostics.positionsWs, diagnostics.caches?.positions)}
+            {renderWsCard('Orders WebSocket', diagnostics.ordersWs, diagnostics.caches?.orders)}
+            <div className="rounded-lg border border-[#2a2820]/60 bg-[#1b1910] p-3 space-y-1.5">
+              <div className="text-[11px] uppercase tracking-wide text-[#eae9e9]/60">StopLimit Tracker</div>
+              <div className="text-sm font-semibold text-[#eae9e9]">
+                {diagnostics.service?.trackedCount ?? 0} tracked • {diagnostics.service?.soldCount ?? 0} sold
+              </div>
+              <div className="text-[11px] text-[#eae9e9]/60">
+                Issues detected: {diagnostics.service?.issues?.length ?? 0}
+              </div>
+              <div className="text-[11px] text-[#eae9e9]/60">
+                Cache sync: {diagnostics.service?.positionsCacheSize ?? 0} positions • {diagnostics.service?.ordersCacheSize ?? 0} orders
+              </div>
+              {diagnostics.service?.issues?.length ? (
+                <ul className="text-[11px] text-[#fbbf24] space-y-0.5 mt-1">
+                  {diagnostics.service.issues.slice(0, 3).map((issue, idx) => (
+                    <li key={`${issue.symbol}-${issue.type}-${idx}`}>
+                      {issue.symbol}: {issue.type.replace(/-/g, ' ')}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="text-[11px] text-[#4ade80] mt-1">No active issues detected</div>
+              )}
+            </div>
+          </div>
         </div>
       )}
 

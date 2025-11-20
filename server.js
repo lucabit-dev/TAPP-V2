@@ -1200,8 +1200,11 @@ async function analyzeConfigStocksInstantly(configId) {
         // Check for buy signal if conditions met
         if (buysEnabled && r.meetsTech && r.meetsMomentum && r.indicators) {
           const hist1m = r.indicators?.macd1m?.histogram;
-          if (typeof hist1m === 'number' && hist1m > 0) {
-            if (!hasBoughtToday(r.symbol)) {
+          if (typeof hist1m === 'number') {
+            const prevHist = lastMacd1mHistogramByTicker.get(r.symbol);
+            lastMacd1mHistogramByTicker.set(r.symbol, hist1m);
+            const crossedUp = typeof prevHist === 'number' ? (prevHist <= 0 && hist1m > 0) : false;
+            if (crossedUp && !hasBoughtToday(r.symbol)) {
               const nowIso = new Date().toISOString();
               
               // Use new buy order logic with LIMIT orders and quantity based on price
@@ -1231,6 +1234,8 @@ async function analyzeConfigStocksInstantly(configId) {
               lastBuyTsByTicker.set(r.symbol, nowIso);
               broadcastToClients({ type: 'BUY_SIGNAL', data: entry, timestamp: nowIso });
             }
+          } else if ((ticker === 'RR' || ticker === 'ACAD')) {
+            console.log(`  ⚠️ SKIPPED: MACD 1m histogram missing or invalid (${hist1m})`);
           }
         }
         
@@ -1350,10 +1355,18 @@ async function computeRawFiveTechChecks() {
         if (buysEnabled) {
           if (r.meetsTech && r.meetsMomentum && r.indicators) {
             const hist1m = r.indicators?.macd1m?.histogram;
-            
-            // Check if MACD 1m histogram is positive
-            if (typeof hist1m === 'number' && hist1m > 0) {
+            if (typeof hist1m === 'number') {
+              const prevHist = lastMacd1mHistogramByTicker.get(ticker);
+              lastMacd1mHistogramByTicker.set(ticker, hist1m);
+              const crossedUp = typeof prevHist === 'number' ? (prevHist <= 0 && hist1m > 0) : false;
+              
               // Check if already bought today
+              if (!crossedUp) {
+                if (ticker === 'RR' || ticker === 'ACAD') {
+                  console.log(`  ⚠️ SKIPPED: MACD 1m histogram did not cross up (prev=${prevHist}, current=${hist1m})`);
+                }
+                continue;
+              }
               if (hasBoughtToday && hasBoughtToday(ticker)) {
                 if (ticker === 'RR' || ticker === 'ACAD') {
                   console.log(`  ⚠️ SKIPPED: Already bought today`);
@@ -1367,7 +1380,7 @@ async function computeRawFiveTechChecks() {
               // Use new buy order logic with LIMIT orders and quantity based on price
               const buyResult = await sendBuyOrder(ticker, null, origin);
               
-              console.log(`🛒 BUY TRIGGERED: ${ticker} - MACD 1m histogram: ${hist1m.toFixed(4)}, Quantity: ${buyResult.quantity}, Limit Price: ${buyResult.limitPrice}`);
+              console.log(`🛒 BUY TRIGGERED: ${ticker} - MACD 1m histogram cross: ${hist1m.toFixed(4)}, Quantity: ${buyResult.quantity}, Limit Price: ${buyResult.limitPrice}`);
               if (buyResult.stopLoss) {
                 console.log(`🛡️ Stop-loss created for ${ticker}: ${buyResult.stopLoss.stopLossPrice} (offset: -${buyResult.stopLoss.stopLossOffset?.toFixed(2)})`);
               }
@@ -1390,10 +1403,8 @@ async function computeRawFiveTechChecks() {
               buyList.unshift(entry);
               lastBuyTsByTicker.set(ticker, nowIso);
               broadcastToClients({ type: 'BUY_SIGNAL', data: entry, timestamp: nowIso });
-            } else {
-              if (ticker === 'RR' || ticker === 'ACAD') {
-                console.log(`  ⚠️ SKIPPED: MACD 1m histogram not positive (${hist1m})`);
-              }
+            } else if (ticker === 'RR' || ticker === 'ACAD') {
+              console.log(`  ⚠️ SKIPPED: MACD 1m histogram missing or invalid (${hist1m})`);
             }
           } else {
             if (ticker === 'RR' || ticker === 'ACAD') {
@@ -2716,7 +2727,8 @@ app.get('/api/stoplimit/status', requireDbReady, requireAuth, (req, res) => {
       success: true,
       data: snapshot,
       analysisEnabled: stopLimitService.isAnalysisEnabled(),
-      analysisChangedAt: stopLimitService.getAnalysisChangedAt()
+      analysisChangedAt: stopLimitService.getAnalysisChangedAt(),
+      diagnostics: buildStopLimitDiagnostics()
     });
   } catch (e) {
     console.error('❌ Error retrieving StopLimit snapshot:', e);
@@ -2761,10 +2773,14 @@ let lastOrderUpdateTime = null;
 // Maintain WebSocket connection to positions to keep cache updated
 let positionsWs = null;
 let positionsWsReconnectTimer = null;
+let lastPositionsError = null;
 
 // Maintain WebSocket connection to orders to keep cache updated
 let ordersWs = null;
 let ordersWsReconnectTimer = null;
+let lastOrdersConnectAttempt = 0;
+let ordersReconnectAttempts = 0;
+let lastOrdersError = null;
 
 function connectPositionsWebSocket() {
   const apiKey = process.env.PNL_API_KEY;
@@ -2795,6 +2811,7 @@ function connectPositionsWebSocket() {
       console.log('✅ Positions WebSocket connected for stop-loss monitoring');
        lastPositionUpdateTime = Date.now();
        positionsReconnectAttempts = 0;
+       lastPositionsError = null;
       // Clear reconnect timer on successful connection
       if (positionsWsReconnectTimer) {
         clearTimeout(positionsWsReconnectTimer);
@@ -2859,12 +2876,16 @@ function connectPositionsWebSocket() {
     positionsWs.on('error', (error) => {
       console.error('❌ Positions WebSocket error:', error.message);
       lastPositionUpdateTime = null;
+      lastPositionsError = error?.message || 'Unknown error';
     });
     
     positionsWs.on('close', (code, reason) => {
       console.log(`🔌 Positions WebSocket closed (${code}): ${reason || 'No reason'}`);
       positionsWs = null;
       lastPositionUpdateTime = null;
+      if (reason) {
+        lastPositionsError = reason.toString();
+      }
       
       // Reconnect after delay (exponential backoff, max 30 seconds)
       positionsReconnectAttempts = Math.min(positionsReconnectAttempts + 1, 6);
@@ -2907,6 +2928,7 @@ function connectOrdersWebSocket() {
     ordersWs = null;
   }
   
+  lastOrdersConnectAttempt = Date.now();
   const wsUrl = `${wsBaseUrl}/ws/orders?api_key=${encodeURIComponent(apiKey)}`;
   console.log('🔌 Connecting to orders WebSocket for orders cache...');
   
@@ -2915,6 +2937,8 @@ function connectOrdersWebSocket() {
     
     ordersWs.on('open', () => {
       console.log('✅ Orders WebSocket connected for orders cache');
+      ordersReconnectAttempts = 0;
+      lastOrdersError = null;
       // Clear reconnect timer on successful connection
       if (ordersWsReconnectTimer) {
         clearTimeout(ordersWsReconnectTimer);
@@ -2972,14 +2996,19 @@ function connectOrdersWebSocket() {
     
     ordersWs.on('error', (error) => {
       console.error('❌ Orders WebSocket error:', error.message);
+      lastOrdersError = error?.message || 'Unknown error';
     });
     
     ordersWs.on('close', (code, reason) => {
       console.log(`🔌 Orders WebSocket closed (${code}): ${reason || 'No reason'}`);
       ordersWs = null;
+      if (reason) {
+        lastOrdersError = reason.toString();
+      }
       
       // Reconnect after delay (exponential backoff, max 30 seconds)
-      const delay = Math.min(30000, 1000 * Math.pow(2, Math.min(5, 0)));
+      ordersReconnectAttempts = Math.min(ordersReconnectAttempts + 1, 6);
+      const delay = Math.min(30000, 1000 * Math.pow(2, Math.max(0, ordersReconnectAttempts - 1)));
       ordersWsReconnectTimer = setTimeout(() => {
         console.log('🔄 Reconnecting orders WebSocket...');
         connectOrdersWebSocket();
@@ -2989,11 +3018,60 @@ function connectOrdersWebSocket() {
   } catch (err) {
     console.error('❌ Failed to create orders WebSocket:', err.message);
     ordersWs = null;
+    lastOrdersError = err?.message || 'Failed to connect';
+    ordersReconnectAttempts = Math.min(ordersReconnectAttempts + 1, 6);
     // Retry after delay
     ordersWsReconnectTimer = setTimeout(() => {
       connectOrdersWebSocket();
-    }, 5000);
+    }, Math.min(30000, 1000 * Math.pow(2, Math.max(0, ordersReconnectAttempts - 1))));
   }
+}
+
+function describeReadyState(state) {
+  switch (state) {
+    case WebSocket.CONNECTING:
+      return 'CONNECTING';
+    case WebSocket.OPEN:
+      return 'OPEN';
+    case WebSocket.CLOSING:
+      return 'CLOSING';
+    case WebSocket.CLOSED:
+      return 'CLOSED';
+    default:
+      return 'UNKNOWN';
+  }
+}
+
+function buildStopLimitDiagnostics() {
+  const now = Date.now();
+  const positionsConnected = !!(positionsWs && positionsWs.readyState === WebSocket.OPEN);
+  const ordersConnected = !!(ordersWs && ordersWs.readyState === WebSocket.OPEN);
+  return {
+    timestamp: now,
+    positionsWs: {
+      connected: positionsConnected,
+      readyState: positionsWs ? describeReadyState(positionsWs.readyState) : 'DISCONNECTED',
+      lastMessageAt: lastPositionUpdateTime,
+      lastConnectAttempt: lastPositionsConnectAttempt || null,
+      reconnectAttempts: positionsReconnectAttempts,
+      staleForMs: lastPositionUpdateTime ? now - lastPositionUpdateTime : null,
+      lastError: lastPositionsError
+    },
+    ordersWs: {
+      connected: ordersConnected,
+      readyState: ordersWs ? describeReadyState(ordersWs.readyState) : 'DISCONNECTED',
+      lastMessageAt: lastOrderUpdateTime,
+      lastConnectAttempt: lastOrdersConnectAttempt || null,
+      reconnectAttempts: ordersReconnectAttempts,
+      staleForMs: lastOrderUpdateTime ? now - lastOrderUpdateTime : null,
+      lastError: lastOrdersError
+    },
+    caches: {
+      positions: positionsCache.size,
+      orders: ordersCache.size
+    },
+    service: stopLimitService ? stopLimitService.getDiagnostics() : null
+  };
 }
 
 // Initialize positions WebSocket connection
