@@ -892,11 +892,15 @@ async function revalidateCurrentFloatLists() {
           const hist = item.indicators?.macd1m?.histogram;
           if (typeof hist !== 'number') continue;
           const prev = lastMacd1mHistogramByTicker.get(ticker);
+          // CRITICAL: Only trigger on negative-to-positive crossover (prev was negative/zero, hist is now positive)
+          // Do NOT update the map until after we've checked the crossover to avoid race conditions
+          const crossedUp = typeof prev === 'number' && prev <= 0 && hist > 0;
+          
+          // Only update map after checking crossover
           lastMacd1mHistogramByTicker.set(ticker, hist);
-          const isPositive = hist > 0;
-          const shouldTrigger = buysEnabled && (buyTriggerMode === 'cross'
-            ? (typeof prev === 'number' && prev <= 0 && isPositive)
-            : isPositive);
+          
+          // For RAW analysis, ALWAYS require negative-to-positive crossover (not just positive)
+          const shouldTrigger = buysEnabled && crossedUp;
           if (shouldTrigger) {
             // Avoid duplicate buys for the same symbol on the same day
             if (hasBoughtToday && hasBoughtToday(ticker)) {
@@ -904,6 +908,8 @@ async function revalidateCurrentFloatLists() {
             }
             
             const groupKey = floatService.getGroupInfoByConfig(configId)?.key || null;
+            
+            console.log(`✅ MACD CROSSOVER DETECTED (revalidateCurrentFloatLists): ${ticker} - Previous: ${prev?.toFixed(4)}, Current: ${hist.toFixed(4)} (negative→positive)`);
             
             // Use new buy order logic with LIMIT orders and quantity based on price
             const buyResult = await sendBuyOrder(ticker, configId, groupKey);
@@ -1202,10 +1208,25 @@ async function analyzeConfigStocksInstantly(configId) {
           const hist1m = r.indicators?.macd1m?.histogram;
           if (typeof hist1m === 'number') {
             const prevHist = lastMacd1mHistogramByTicker.get(r.symbol);
+            // CRITICAL: Only trigger on negative-to-positive crossover (prevHist was negative/zero, hist1m is now positive)
+            // Do NOT update the map until after we've checked the crossover to avoid race conditions
+            const crossedUp = typeof prevHist === 'number' && prevHist <= 0 && hist1m > 0;
+            
+            // SAFEGUARD: Explicitly prevent buying on positive-to-negative crossover (opposite direction)
+            const crossedDown = typeof prevHist === 'number' && prevHist > 0 && hist1m <= 0;
+            if (crossedDown) {
+              console.warn(`⚠️ SKIPPED BUY (wrong direction): ${r.symbol} - MACD 1m histogram crossed DOWN (prev=${prevHist?.toFixed(4)}, current=${hist1m.toFixed(4)}). Only buying on negative→positive crossover.`);
+              lastMacd1mHistogramByTicker.set(r.symbol, hist1m);
+              continue;
+            }
+            
+            // Only update map after checking crossover
             lastMacd1mHistogramByTicker.set(r.symbol, hist1m);
-            const crossedUp = typeof prevHist === 'number' ? (prevHist <= 0 && hist1m > 0) : false;
+            
             if (crossedUp && !hasBoughtToday(r.symbol)) {
               const nowIso = new Date().toISOString();
+              
+              console.log(`✅ MACD CROSSOVER DETECTED: ${r.symbol} - Previous: ${prevHist?.toFixed(4)}, Current: ${hist1m.toFixed(4)} (negative→positive)`);
               
               // Use new buy order logic with LIMIT orders and quantity based on price
               const buyResult = await sendBuyOrder(r.symbol, configId, origin);
@@ -1357,8 +1378,20 @@ async function computeRawFiveTechChecks() {
             const hist1m = r.indicators?.macd1m?.histogram;
             if (typeof hist1m === 'number') {
               const prevHist = lastMacd1mHistogramByTicker.get(ticker);
+              // CRITICAL: Only trigger on negative-to-positive crossover (prevHist was negative/zero, hist1m is now positive)
+              // Do NOT update the map until after we've checked the crossover to avoid race conditions
+              const crossedUp = typeof prevHist === 'number' && prevHist <= 0 && hist1m > 0;
+              
+              // SAFEGUARD: Explicitly prevent buying on positive-to-negative crossover (opposite direction)
+              const crossedDown = typeof prevHist === 'number' && prevHist > 0 && hist1m <= 0;
+              if (crossedDown) {
+                console.warn(`⚠️ SKIPPED BUY (wrong direction): ${ticker} - MACD 1m histogram crossed DOWN (prev=${prevHist?.toFixed(4)}, current=${hist1m.toFixed(4)}). Only buying on negative→positive crossover.`);
+                lastMacd1mHistogramByTicker.set(ticker, hist1m);
+                continue;
+              }
+              
+              // Only update map after checking crossover
               lastMacd1mHistogramByTicker.set(ticker, hist1m);
-              const crossedUp = typeof prevHist === 'number' ? (prevHist <= 0 && hist1m > 0) : false;
               
               // Check if already bought today
               if (!crossedUp) {
@@ -1376,6 +1409,8 @@ async function computeRawFiveTechChecks() {
               
               const nowIso = new Date().toISOString();
               const origin = symbolOriginMap.get(ticker) || '?';
+              
+              console.log(`✅ MACD CROSSOVER DETECTED: ${ticker} - Previous: ${prevHist?.toFixed(4)}, Current: ${hist1m.toFixed(4)} (negative→positive)`);
               
               // Use new buy order logic with LIMIT orders and quantity based on price
               const buyResult = await sendBuyOrder(ticker, null, origin);
@@ -1448,15 +1483,21 @@ async function scanBuySignalsForConfig(configId) {
       const hist = item.indicators?.macd1m?.histogram;
       if (typeof hist !== 'number') continue;
       const prev = lastMacd1mHistogramByTicker.get(ticker);
+      // CRITICAL: Only trigger on negative-to-positive crossover (prev was negative/zero, hist is now positive)
+      // Do NOT update the map until after we've checked the crossover to avoid race conditions
+      const crossedUp = typeof prev === 'number' && prev <= 0 && hist > 0;
+      
+      // Only update map after checking crossover
       lastMacd1mHistogramByTicker.set(ticker, hist);
-      const isPositive = hist > 0;
-      const shouldTrigger = buysEnabled && (buyTriggerMode === 'cross'
-        ? (typeof prev === 'number' && prev <= 0 && isPositive)
-        : isPositive);
+      
+      // For RAW analysis, ALWAYS require negative-to-positive crossover (not just positive)
+      const shouldTrigger = buysEnabled && crossedUp;
       if (!shouldTrigger) continue;
       if (hasBoughtToday && hasBoughtToday(ticker)) continue;
       
       const groupKey = floatService.getGroupInfoByConfig(configId)?.key || null;
+      
+      console.log(`✅ MACD CROSSOVER DETECTED (scanBuySignalsForConfig): ${ticker} - Previous: ${prev?.toFixed(4)}, Current: ${hist.toFixed(4)} (negative→positive)`);
       
       // Use new buy order logic with LIMIT orders and quantity based on price
       const buyResult = await sendBuyOrder(ticker, configId, groupKey);
