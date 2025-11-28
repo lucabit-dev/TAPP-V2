@@ -92,7 +92,7 @@ echo -e "${BLUE}🧹 Port cleanup completed!${NC}"
 echo "=================================================="
 
 # Wait a moment for cleanup to complete
-sleep 2
+sleep 3
 
 # Check final status
 echo -e "${YELLOW}📊 Final port status:${NC}"

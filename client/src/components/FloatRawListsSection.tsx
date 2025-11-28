@@ -45,9 +45,14 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
   const [buyingSymbols, setBuyingSymbols] = React.useState<Set<string>>(new Set());
   const [buyStatuses, setBuyStatuses] = React.useState<Record<string, 'success' | 'error' | null>>({});
   const [notifications, setNotifications] = React.useState<NotificationProps[]>([]);
+  const [isEnabled, setIsEnabled] = React.useState(false);
 
   // Build unified list whenever raw changes
   React.useEffect(() => {
+    if (!isEnabled) {
+      setUnified([]);
+      return;
+    }
     const originByConfig: Record<string, string> = Object.fromEntries(LISTS.map(l => [l.id, l.label]));
     const res: Array<ToplistRow & { origin: string }>= [];
     Object.keys(raw).forEach((configId) => {
@@ -58,10 +63,30 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
     // Stable sort by symbol
     res.sort((a, b) => (a.symbol || '').localeCompare(b.symbol || ''));
     setUnified(res);
-  }, [raw]);
+  }, [raw, isEnabled]);
 
   React.useEffect(() => {
+    // Only fetch and connect if enabled
+    if (!isEnabled) {
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      if (reconnectTimerRef.current) {
+        window.clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      if (updateTimerRef.current) {
+        window.clearTimeout(updateTimerRef.current);
+        updateTimerRef.current = null;
+      }
+      setConnectionStatus('disconnected');
+      setLoading(false);
+      return;
+    }
+
     const load = async () => {
+      setLoading(true);
       try {
         const [toplistRes, buysRes] = await Promise.all([
           fetch(`${API_BASE_URL}/toplist`),
@@ -183,7 +208,7 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
       }
       if (wsRef.current) wsRef.current.close();
     };
-  }, []);
+  }, [isEnabled]);
 
   const theme = 'bg-[#14130e] text-[#eae9e9] border-[#2a2820]';
   
@@ -626,7 +651,7 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
           <h2 className="text-sm font-bold text-[#eae9e9] tracking-wider uppercase mb-1.5">Listas FLOAT (RAW)</h2>
           <p className="text-[11px] text-[#eae9e9]/70 mt-0.5">
             Datos directos de ChartsWatcher
-            {techCountInView > 0 && (
+            {isEnabled && techCountInView > 0 && (
               <span className="ml-2 px-2 py-0.5 bg-[#fbbf24] text-[#14130e] rounded-sm text-[10px] font-bold shadow-[0_0_8px_rgba(251,191,36,0.3)]">
                 ⚡ {techCountInView} tech
               </span>
@@ -634,7 +659,7 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
             {(() => {
               // Count stocks that meet BOTH tech AND momentum (GREEN) in current view
               const ready = bothCountInView;
-              if (ready > 0) {
+              if (isEnabled && ready > 0) {
                 return (
                   <span className="ml-2 px-2 py-0.5 bg-[#22c55e] text-[#14130e] rounded-sm text-[10px] font-bold shadow-[0_0_8px_rgba(34,197,94,0.3)]">
                     ✓ {ready} ready
@@ -646,32 +671,55 @@ const FloatRawListsSection: React.FC<Props> = ({ onSymbolClick }) => {
           </p>
         </div>
         <div className="text-[11px] text-[#eae9e9]/80 flex items-center space-x-3">
-          <div className="flex items-center space-x-2">
-            <div className={`w-2.5 h-2.5 rounded-full ${connectionStatus === 'connected' ? 'bg-[#22c55e] shadow-[0_0_6px_rgba(34,197,94,0.5)]' : (connectionStatus === 'checking' ? 'bg-[#eae9e9] opacity-60' : 'bg-[#f87171] shadow-[0_0_6px_rgba(248,113,113,0.5)]')}`}></div>
-            <span className="font-medium">{connectionStatus === 'connected' ? 'En vivo' : (connectionStatus === 'checking' ? 'Checking' : 'Desconectado')}</span>
-          </div>
           <button
-            className={`ml-2 px-3 py-1 rounded-sm text-[11px] font-bold transition-all ${isTogglingBuys ? 'bg-[#2a2820] cursor-not-allowed opacity-50' : (buysEnabled ? 'bg-[#22c55e] text-[#14130e] hover:bg-[#16a34a] shadow-[0_0_8px_rgba(34,197,94,0.3)]' : 'bg-[#f87171] text-[#14130e] hover:bg-[#ef4444] shadow-[0_0_8px_rgba(248,113,113,0.3)]')}`}
-            onClick={toggleBuys}
-            disabled={isTogglingBuys}
-            title={buysEnabled ? 'Disable automatic buys' : 'Enable automatic buys'}
-          >{isTogglingBuys ? '...' : (buysEnabled ? 'Buys: ON' : 'Buys: OFF')}</button>
-          <button
-            className={`ml-2 px-3 py-1 rounded-sm text-[11px] font-bold transition-all ${isRestarting ? 'bg-[#2a2820] cursor-not-allowed opacity-50' : 'bg-[#eae9e9]/10 text-[#eae9e9] hover:bg-[#eae9e9]/20 border border-[#eae9e9]/20'}`}
-            onClick={handleRestart}
-            disabled={isRestarting}
-            title="Reiniciar conexión Toplist"
-          >{isRestarting ? 'Restarting…' : 'Restart'}</button>
-          {restartStatus === 'ok' && (
-            <span className="ml-2 text-[#22c55e] font-semibold">Reiniciado</span>
-          )}
-          {restartStatus === 'error' && (
-            <span className="ml-2 text-[#f87171] font-semibold">Error</span>
+            className={`px-3 py-1 rounded-sm text-[11px] font-bold transition-all ${
+              isEnabled 
+                ? 'bg-[#22c55e] text-[#14130e] hover:bg-[#16a34a] shadow-[0_0_8px_rgba(34,197,94,0.3)]' 
+                : 'bg-[#2a2820] text-[#eae9e9] hover:bg-[#3e3e42] border border-[#3e3e42]'
+            }`}
+            onClick={() => setIsEnabled(!isEnabled)}
+            title={isEnabled ? 'Disable Listas FLOAT' : 'Enable Listas FLOAT'}
+          >
+            {isEnabled ? 'ON' : 'OFF'}
+          </button>
+          
+          {isEnabled && (
+            <>
+              <div className="flex items-center space-x-2">
+                <div className={`w-2.5 h-2.5 rounded-full ${connectionStatus === 'connected' ? 'bg-[#22c55e] shadow-[0_0_6px_rgba(34,197,94,0.5)]' : (connectionStatus === 'checking' ? 'bg-[#eae9e9] opacity-60' : 'bg-[#f87171] shadow-[0_0_6px_rgba(248,113,113,0.5)]')}`}></div>
+                <span className="font-medium">{connectionStatus === 'connected' ? 'En vivo' : (connectionStatus === 'checking' ? 'Checking' : 'Desconectado')}</span>
+              </div>
+              <button
+                className={`ml-2 px-3 py-1 rounded-sm text-[11px] font-bold transition-all ${isTogglingBuys ? 'bg-[#2a2820] cursor-not-allowed opacity-50' : (buysEnabled ? 'bg-[#22c55e] text-[#14130e] hover:bg-[#16a34a] shadow-[0_0_8px_rgba(34,197,94,0.3)]' : 'bg-[#f87171] text-[#14130e] hover:bg-[#ef4444] shadow-[0_0_8px_rgba(248,113,113,0.3)]')}`}
+                onClick={toggleBuys}
+                disabled={isTogglingBuys}
+                title={buysEnabled ? 'Disable automatic buys' : 'Enable automatic buys'}
+              >{isTogglingBuys ? '...' : (buysEnabled ? 'Buys: ON' : 'Buys: OFF')}</button>
+              <button
+                className={`ml-2 px-3 py-1 rounded-sm text-[11px] font-bold transition-all ${isRestarting ? 'bg-[#2a2820] cursor-not-allowed opacity-50' : 'bg-[#eae9e9]/10 text-[#eae9e9] hover:bg-[#eae9e9]/20 border border-[#eae9e9]/20'}`}
+                onClick={handleRestart}
+                disabled={isRestarting}
+                title="Reiniciar conexión Toplist"
+              >{isRestarting ? 'Restarting…' : 'Restart'}</button>
+              {restartStatus === 'ok' && (
+                <span className="ml-2 text-[#22c55e] font-semibold">Reiniciado</span>
+              )}
+              {restartStatus === 'error' && (
+                <span className="ml-2 text-[#f87171] font-semibold">Error</span>
+              )}
+            </>
           )}
         </div>
       </div>
       <div className="flex-1 min-h-0 p-3 overflow-hidden">
-        {loading ? (
+        {!isEnabled ? (
+          <div className="h-full flex items-center justify-center">
+            <div className="text-center">
+              <div className="text-[#808080] text-sm mb-2 uppercase tracking-wider">Listas FLOAT Disabled</div>
+              <p className="text-[#eae9e9]/40 text-xs">Click ON to enable live data</p>
+            </div>
+          </div>
+        ) : loading ? (
           <div className="h-full flex items-center justify-center">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#eae9e9] opacity-60" />
           </div>

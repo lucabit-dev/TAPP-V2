@@ -11,7 +11,8 @@ class ToplistService {
       '68ecefcb420a933c6c60a997',
       '68ecefcd420a933c6c60aaaa',
       '68ecefce420a933c6c60aabb',
-      '68eceff9420a933c6c60b6eb'
+      '68eceff9420a933c6c60b6eb',
+      '692117e2b7bb6ba7a6ae6f6c' // MANUAL list
     ];
     this.ws = null;
     this.toplistByConfig = {};

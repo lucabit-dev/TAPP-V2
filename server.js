@@ -702,9 +702,12 @@ toplistService.onToplistUpdate(async (toplistUpdate) => {
   const groupInfo = floatService.getGroupInfoByConfig(configId);
   const thresholdsByGroup = floatService.getThresholds();
   const thresholds = groupInfo ? thresholdsByGroup[groupInfo.key] : null;
+  
+  const isManualConfig = configId === '692117e2b7bb6ba7a6ae6f6c';
 
   // Filter rows by ChartsWatcher metrics mapped to FLOAT config thresholds
   const filteredSymbols = rows.filter((row) => {
+    if (isManualConfig) return false; // Do not validate MANUAL list as FLOAT list
     if (!thresholds) return false;
     const columns = Array.isArray(row.columns) ? row.columns : [];
     const columnsByKey = new Map(columns.map(c => [c.key, c]));
@@ -1117,7 +1120,9 @@ async function analyzeConfigStocksInstantly(configId) {
     const groupInfo = floatService.getGroupInfoByConfig(configId);
     const origin = groupInfo?.key || '?';
     const thresholds = floatService.getThresholds()[origin];
-    if (!thresholds) return;
+    const isManualConfig = configId === '692117e2b7bb6ba7a6ae6f6c';
+    
+    if (!thresholds && !isManualConfig) return;
     
     console.log(`⚡ INSTANT ANALYSIS for config ${configId} (${origin}): ${rows.length} stocks`);
     
@@ -1191,7 +1196,8 @@ async function analyzeConfigStocksInstantly(configId) {
           data: {
             symbol: normalizedSymbol,
             meetsTech: r.meetsTech,
-            meetsMomentum: r.meetsMomentum
+            meetsMomentum: r.meetsMomentum,
+            indicators: r.indicators
           },
           timestamp: new Date().toISOString()
         });

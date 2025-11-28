@@ -4,16 +4,20 @@ import { Virtuoso } from 'react-virtuoso';
 import { formatTimestampRelative } from './utils/timeFormat';
 import './App.css';
 
+// Import FloatRawListsSection directly to avoid lazy loading issues
+import FloatRawListsSection from './components/FloatRawListsSection';
+// Import ManualSection directly
+import ManualSection from './components/ManualSection';
+
 // Lazy load all heavy components with code splitting
 const TradingDashboard = lazy(() => import('./components/TradingDashboard'));
 const FloatListsSection = lazy(() => import('./components/FloatListsSection'));
 const FloatConfigPanel = lazy(() => import('./components/FloatConfigPanel'));
 const BuyListSection = lazy(() => import('./components/BuyListSection'));
-const FloatRawListsSection = lazy(() => import('./components/FloatRawListsSection'));
+// const FloatRawListsSection = lazy(() => import('./components/FloatRawListsSection'));
 const PnLSection = lazy(() => import('./components/PnLSection'));
 const OrdersSection = lazy(() => import('./components/OrdersSection'));
 const StopLimitSection = lazy(() => import('./components/StopLimitSection'));
-const SoldSection = lazy(() => import('./components/SoldSection'));
 const Login = lazy(() => import('./components/Login'));
 
 // Loading fallback component - Minimalistic design
@@ -117,8 +121,10 @@ function App() {
   const [newValidAlertsCount, setNewValidAlertsCount] = useState(0);
   const [conditionStats, setConditionStats] = useState<any>(null);
   const [showStats, setShowStats] = useState(false);
-  const [selectedTab, setSelectedTab] = useState<'all' | 'valid' | 'filtered' | 'dashboard' | 'config-float' | 'listas-float-raw' | 'buy-list' | 'pnl' | 'orders' | 'stoplimit' | 'sold'>('listas-float-raw');
+  const [selectedTab, setSelectedTab] = useState<'all' | 'valid' | 'filtered' | 'dashboard' | 'config-float' | 'listas-float-raw' | 'manual' | 'buy-list' | 'pnl' | 'orders' | 'stoplimit'>('listas-float-raw');
   const [alertsCollapsed, setAlertsCollapsed] = useState(true); // Start collapsed
+  const [listsCollapsed, setListsCollapsed] = useState(false); // Start expanded by default for Lists
+  const [manualCollapsed, setManualCollapsed] = useState(false); // Start expanded by default for Manual
   const [manualSymbol, setManualSymbol] = useState('');
   const [manualAnalysis, setManualAnalysis] = useState<any>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -632,15 +638,65 @@ function App() {
 
                 {/* Lists group */}
                 <div className="flex items-center space-x-1">
-                  <span className="text-xs text-[#808080] mr-2">Lists</span>
-                  {[ 
+                  <button
+                    onClick={() => setListsCollapsed(!listsCollapsed)}
+                    className="flex items-center space-x-1 px-2 py-1 text-xs opacity-60 hover:opacity-100 transition-colors"
+                    title={listsCollapsed ? 'Expand Lists' : 'Collapse Lists'}
+                  >
+                    <span>Lists</span>
+                    <svg 
+                      className={`w-3 h-3 transition-transform ${listsCollapsed ? 'rotate-0' : 'rotate-180'}`} 
+                      fill="none" 
+                      stroke="currentColor" 
+                      viewBox="0 0 24 24"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+                  {!listsCollapsed && [ 
                     { key: 'listas-float-raw', label: 'Listas FLOAT (RAW)', count: 0 },
                     { key: 'config-float', label: 'Config FLOAT', count: 0 },
                     { key: 'buy-list', label: 'Buy List', count: 0 },
+                    { key: 'orders', label: 'Orders', count: 0 },
+                  ].map(tab => (
+                    <button
+                      key={tab.key}
+                      onClick={() => setSelectedTab(tab.key as any)}
+                      className={`relative px-4 py-2 text-sm font-medium transition-all duration-200 ${
+                        selectedTab === tab.key
+                          ? 'text-[#eae9e9]'
+                          : 'text-[#969696] hover:text-[#cccccc]'
+                      }`}
+                    >
+                      {selectedTab === tab.key && (
+                        <span className="absolute inset-0 bg-gradient-to-r from-[#22c55e]/20 to-[#14b8a6]/20 border-b-2 border-[#22c55e]"></span>
+                      )}
+                      <span className="relative z-10">{tab.label}</span>
+                    </button>
+                  ))}
+                </div>
+
+                {/* Manual group */}
+                <div className="flex items-center space-x-1">
+                  <button
+                    onClick={() => setManualCollapsed(!manualCollapsed)}
+                    className="flex items-center space-x-1 px-2 py-1 text-xs opacity-60 hover:opacity-100 transition-colors"
+                    title={manualCollapsed ? 'Expand Manual' : 'Collapse Manual'}
+                  >
+                    <span>Manual</span>
+                    <svg 
+                      className={`w-3 h-3 transition-transform ${manualCollapsed ? 'rotate-0' : 'rotate-180'}`} 
+                      fill="none" 
+                      stroke="currentColor" 
+                      viewBox="0 0 24 24"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+                  {!manualCollapsed && [ 
+                    { key: 'manual', label: 'MANUAL', count: 0 },
                     { key: 'pnl', label: 'P&L', count: 0 },
                     { key: 'stoplimit', label: 'Stop Limit', count: 0 },
-                    { key: 'orders', label: 'Orders', count: 0 },
-                    { key: 'sold', label: 'SOLD', count: 0 }
                   ].map(tab => (
                     <button
                       key={tab.key}
@@ -1050,11 +1106,11 @@ function App() {
               fetchStockInfo(sym);
             }} />
           )}
+          {selectedTab === 'manual' && <ManualSection />}
           {selectedTab === 'buy-list' && <BuyListSection />}
           {selectedTab === 'pnl' && <PnLSection />}
           {selectedTab === 'stoplimit' && <StopLimitSection />}
           {selectedTab === 'orders' && <OrdersSection />}
-          {selectedTab === 'sold' && <SoldSection />}
           {!['dashboard', 'config-float', 'listas-float-raw', 'buy-list', 'pnl', 'orders', 'stoplimit', 'sold'].includes(selectedTab) && (
             <div className="h-full flex">
             {/* Main Alerts Content */}

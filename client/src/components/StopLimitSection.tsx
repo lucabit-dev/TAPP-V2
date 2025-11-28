@@ -117,9 +117,11 @@ const StopLimitSection: React.FC = () => {
   const [lastUpdated, setLastUpdated] = React.useState<number | null>(null);
   const [diagnostics, setDiagnostics] = React.useState<StopLimitDiagnostics | null>(null);
   const [isTogglingAutomation, setIsTogglingAutomation] = React.useState<boolean>(false);
+  const [isEnabled, setIsEnabled] = React.useState<boolean>(false); // Default to disabled as per requirements
   const refreshIntervalRef = React.useRef<number | null>(null);
 
   const fetchStatus = React.useCallback(async () => {
+    if (!isEnabled) return;
     try {
       const response = await fetchWithAuth(`${API_BASE_URL}/stoplimit/status`);
       if (!response.ok) {
@@ -143,13 +145,27 @@ const StopLimitSection: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [fetchWithAuth]);
+  }, [fetchWithAuth, isEnabled]);
 
   React.useEffect(() => {
+    if (!isEnabled) {
+      setLoading(false);
+      setRows([]);
+      return;
+    }
+    setLoading(true);
     fetchStatus();
-  }, [fetchStatus]);
+  }, [fetchStatus, isEnabled]);
 
   React.useEffect(() => {
+    if (!isEnabled) {
+      if (refreshIntervalRef.current) {
+        clearInterval(refreshIntervalRef.current);
+        refreshIntervalRef.current = null;
+      }
+      return;
+    }
+
     if (refreshIntervalRef.current) {
       clearInterval(refreshIntervalRef.current);
     }
@@ -164,7 +180,7 @@ const StopLimitSection: React.FC = () => {
         refreshIntervalRef.current = null;
       }
     };
-  }, [fetchStatus]);
+  }, [fetchStatus, isEnabled]);
 
   const toggleAutomation = React.useCallback(async () => {
     if (isTogglingAutomation) return;
@@ -327,286 +343,313 @@ const StopLimitSection: React.FC = () => {
             </p>
           </div>
           <div className="flex flex-col items-start lg:items-end space-y-2">
-            <div className="text-[11px] text-[#eae9e9]/60">
-              Last update: {lastUpdated ? `${formatRelativeTime(lastUpdated)} (${formatTimestamp(lastUpdated)})` : 'N/A'}
-            </div>
-            <div className={`text-[11px] font-semibold ${automationStatusClass}`}>
-              Automation {analysisEnabled ? 'Enabled' : 'Disabled'}
-              {analysisChangedAt ? ` • ${formatRelativeTime(analysisChangedAt)} (${formatTimestamp(analysisChangedAt)})` : ''}
-            </div>
             <div className="flex items-center space-x-3">
               <button
-                onClick={() => fetchStatus()}
-                className="px-3 py-1.5 text-xs font-semibold rounded border border-[#2a2820] text-[#eae9e9]/80 hover:text-[#eae9e9] hover:border-[#eae9e9]/30 transition-colors"
+                className={`px-3 py-1 rounded-sm text-[11px] font-bold transition-all ${
+                  isEnabled 
+                    ? 'bg-[#22c55e] text-[#14130e] hover:bg-[#16a34a] shadow-[0_0_8px_rgba(34,197,94,0.3)]' 
+                    : 'bg-[#2a2820] text-[#eae9e9] hover:bg-[#3e3e42] border border-[#3e3e42]'
+                }`}
+                onClick={() => setIsEnabled(!isEnabled)}
+                title={isEnabled ? 'Disable StopLimit Monitor' : 'Enable StopLimit Monitor'}
               >
-                Refresh
+                {isEnabled ? 'ON' : 'OFF'}
               </button>
-              <button
-                onClick={toggleAutomation}
-                disabled={isTogglingAutomation}
-                className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors ${automationButtonClass} ${isTogglingAutomation ? 'opacity-60 cursor-not-allowed' : ''}`}
-              >
-                {automationButtonLabel}
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {!analysisEnabled && (
-        <div className="px-4 py-2 bg-[#3a1e1e] border-b border-[#f87171]/40 text-[#f87171] text-xs">
-          StopLimit automation is disabled. Orders will not be created or updated automatically while AUTO is OFF.
-        </div>
-      )}
-
-      {diagnostics && (
-        <div className="px-4 py-3 border-b border-[#2a2820]/40 bg-[#15130d]">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            {renderWsCard('Positions WebSocket', diagnostics.positionsWs, diagnostics.caches?.positions)}
-            {renderWsCard('Orders WebSocket', diagnostics.ordersWs, diagnostics.caches?.orders)}
-            <div className="rounded-lg border border-[#2a2820]/60 bg-[#1b1910] p-3 space-y-1.5">
-              <div className="text-[11px] uppercase tracking-wide text-[#eae9e9]/60">StopLimit Tracker</div>
-              <div className="text-sm font-semibold text-[#eae9e9]">
-                {diagnostics.service?.trackedCount ?? 0} tracked • {diagnostics.service?.soldCount ?? 0} sold
-              </div>
-              <div className="text-[11px] text-[#eae9e9]/60">
-                Issues detected: {diagnostics.service?.issues?.length ?? 0}
-              </div>
-              <div className="text-[11px] text-[#eae9e9]/60">
-                Cache sync: {diagnostics.service?.positionsCacheSize ?? 0} positions • {diagnostics.service?.ordersCacheSize ?? 0} orders
-              </div>
-              {diagnostics.service?.issues?.length ? (
-                <ul className="text-[11px] text-[#fbbf24] space-y-0.5 mt-1">
-                  {diagnostics.service.issues.slice(0, 3).map((issue, idx) => (
-                    <li key={`${issue.symbol}-${issue.type}-${idx}`}>
-                      {issue.symbol}: {issue.type.replace(/-/g, ' ')}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <div className="text-[11px] text-[#4ade80] mt-1">No active issues detected</div>
+              
+              {isEnabled && (
+                <>
+                  <div className="text-[11px] text-[#eae9e9]/60">
+                    Last update: {lastUpdated ? `${formatRelativeTime(lastUpdated)} (${formatTimestamp(lastUpdated)})` : 'N/A'}
+                  </div>
+                  <div className={`text-[11px] font-semibold ${automationStatusClass}`}>
+                    Automation {analysisEnabled ? 'Enabled' : 'Disabled'}
+                    {analysisChangedAt ? ` • ${formatRelativeTime(analysisChangedAt)} (${formatTimestamp(analysisChangedAt)})` : ''}
+                  </div>
+                  <button
+                    onClick={() => fetchStatus()}
+                    className="px-3 py-1.5 text-xs font-semibold rounded border border-[#2a2820] text-[#eae9e9]/80 hover:text-[#eae9e9] hover:border-[#eae9e9]/30 transition-colors"
+                  >
+                    Refresh
+                  </button>
+                  <button
+                    onClick={toggleAutomation}
+                    disabled={isTogglingAutomation}
+                    className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors ${automationButtonClass} ${isTogglingAutomation ? 'opacity-60 cursor-not-allowed' : ''}`}
+                  >
+                    {automationButtonLabel}
+                  </button>
+                </>
               )}
             </div>
           </div>
         </div>
-      )}
-
-      <div className="px-3 py-2 border-b border-[#2a2820]/40">
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
-          <SummaryCard
-            title="Tracked Positions"
-            value={summary.total}
-            subtitle={Object.entries(summary.groupCounts)
-              .map(([group, count]) => `${group}: ${count}`)
-              .join(' • ') || 'No positions tracked'}
-          />
-          <SummaryCard
-            title="Active Stops"
-            value={summary.active}
-            subtitle={analysisEnabled ? 'Stops currently enforced' : 'Automation paused'}
-          />
-          <SummaryCard
-            title="Pending Actions"
-            value={summary.pending}
-            subtitle={analysisEnabled ? 'Orders awaiting execution or update' : 'Automation paused'}
-          />
-          <SummaryCard
-            title="Auto-Sell Executed"
-            value={summary.autoSold}
-            subtitle="Positions exited automatically"
-          />
-        </div>
       </div>
 
-      {error && (
-        <div className="px-4 pt-3">
-          <div className="bg-[#3a1e1e] border border-[#f87171] text-[#f87171] text-xs rounded p-3">
-            {error}
+      {!isEnabled ? (
+        <div className="flex-1 flex items-center justify-center">
+          <div className="text-center">
+            <div className="text-[#808080] text-sm mb-2 uppercase tracking-wider">Stop Limit Monitor Disabled</div>
+            <p className="text-[#eae9e9]/40 text-xs">Click ON to enable monitoring</p>
           </div>
         </div>
-      )}
+      ) : (
+        <>
+          {!analysisEnabled && (
+            <div className="px-4 py-2 bg-[#3a1e1e] border-b border-[#f87171]/40 text-[#f87171] text-xs">
+              StopLimit automation is disabled. Orders will not be created or updated automatically while AUTO is OFF.
+            </div>
+          )}
 
-      <div className="flex-1 overflow-hidden">
-        {loading ? (
-          <div className="h-full flex items-center justify-center">
-            <div className="text-center">
-              <div className="w-12 h-12 bg-[#2a2820] rounded-lg flex items-center justify-center mx-auto mb-4">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#4ade80]"></div>
-              </div>
-              <h3 className="text-sm font-medium text-[#eae9e9] mb-1">Loading Stop Limit data...</h3>
-              <p className="text-xs text-[#eae9e9]/60">Fetching the latest automation status</p>
-            </div>
-          </div>
-        ) : rows.length === 0 ? (
-          <div className="h-full flex items-center justify-center">
-            <div className="text-center text-[#eae9e9]/70">
-              <div className="w-12 h-12 bg-[#2a2820] rounded-lg flex items-center justify-center mx-auto mb-4">
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 19V6a2 2 0 012-2h2a2 2 0 012 2v13m-4-5h6" />
-                </svg>
-              </div>
-              <h3 className="text-base font-semibold text-[#eae9e9]">No tracked positions yet</h3>
-              <p className="text-xs mt-1">StopLimit automation will appear once new positions are opened.</p>
-            </div>
-          </div>
-        ) : (
-          <div className="h-full flex flex-col">
-            <div className="bg-[#14130e] border-b border-[#2a2820]/40 px-4 py-2 sticky top-0 z-10">
-              <div className="grid grid-cols-12 gap-2 text-[10px] font-semibold text-[#eae9e9]/50 uppercase tracking-wider">
-                <div className="col-span-2">Symbol</div>
-                <div className="col-span-1 text-center">Group</div>
-                <div className="col-span-2">Stage</div>
-                <div className="col-span-1 text-right">Unrealized / Auto</div>
-                <div className="col-span-2">Stop / Limit</div>
-                <div className="col-span-2">Progress</div>
-                <div className="col-span-2">Order / Updated</div>
+          {diagnostics && (
+            <div className="px-4 py-3 border-b border-[#2a2820]/40 bg-[#15130d]">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {renderWsCard('Positions WebSocket', diagnostics.positionsWs, diagnostics.caches?.positions)}
+                {renderWsCard('Orders WebSocket', diagnostics.ordersWs, diagnostics.caches?.orders)}
+                <div className="rounded-lg border border-[#2a2820]/60 bg-[#1b1910] p-3 space-y-1.5">
+                  <div className="text-[11px] uppercase tracking-wide text-[#eae9e9]/60">StopLimit Tracker</div>
+                  <div className="text-sm font-semibold text-[#eae9e9]">
+                    {diagnostics.service?.trackedCount ?? 0} tracked • {diagnostics.service?.soldCount ?? 0} sold
+                  </div>
+                  <div className="text-[11px] text-[#eae9e9]/60">
+                    Issues detected: {diagnostics.service?.issues?.length ?? 0}
+                  </div>
+                  <div className="text-[11px] text-[#eae9e9]/60">
+                    Cache sync: {diagnostics.service?.positionsCacheSize ?? 0} positions • {diagnostics.service?.ordersCacheSize ?? 0} orders
+                  </div>
+                  {diagnostics.service?.issues?.length ? (
+                    <ul className="text-[11px] text-[#fbbf24] space-y-0.5 mt-1">
+                      {diagnostics.service.issues.slice(0, 3).map((issue, idx) => (
+                        <li key={`${issue.symbol}-${issue.type}-${idx}`}>
+                          {issue.symbol}: {issue.type.replace(/-/g, ' ')}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="text-[11px] text-[#4ade80] mt-1">No active issues detected</div>
+                  )}
+                </div>
               </div>
             </div>
-            <div className="flex-1 overflow-auto">
-              <div className="divide-y divide-[#2a2820]/50">
-                {rows.map((row) => {
-                  const orderStatusLabel = describeOrderStatus(row.orderStatus);
-                  const orderStatusClass =
-                    row.status === 'queued'
-                      ? 'text-[#fde68a]'
-                      : row.status === 'analysis-disabled'
-                        ? 'text-[#f87171]'
-                        : 'text-[#eae9e9]/50';
+          )}
 
-                  return (
-                    <div
-                      key={row.symbol}
-                      className="px-4 py-3 bg-[#14130e] hover:bg-[#1e1d17] transition-colors"
-                    >
-                      <div className="grid grid-cols-12 gap-2 items-center text-xs text-[#eae9e9]/80">
-                        <div className="col-span-2 flex items-center space-x-3">
-                          <div className={`w-2 h-2 rounded-full ${statusDot[row.status] || 'bg-[#808080]'}`}></div>
-                          <div>
-                            <div className="text-sm font-semibold text-[#eae9e9]">{row.symbol}</div>
-                            <div className="flex items-center space-x-2 mt-1">
-                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${statusStyles[row.status] || 'bg-[#2a2820] text-[#eae9e9]/80 border border-[#2a2820]'}`}>
-                                {row.statusLabel}
-                              </span>
-                              <span className="text-[10px] text-[#eae9e9]/50">
-                                Avg {formatCurrency(row.avgPrice)}
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-                        <div className="col-span-1 text-center">
-                          <div className="font-semibold text-[#eae9e9]">{row.groupLabel}</div>
-                          <div className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Group {row.groupKey}</div>
-                        </div>
-                        <div className="col-span-2">
-                          <div className="font-semibold text-[#eae9e9]">{row.stageLabel}</div>
-                          <div className="text-[10px] text-[#eae9e9]/60">{row.stageDescription}</div>
-                          {row.nextTrigger !== null && row.nextStageLabel && (
-                            <div className="text-[10px] text-[#eae9e9]/45 mt-1">
-                              Next: {row.nextStageLabel} at {formatOffset(row.nextTrigger)}
-                            </div>
-                          )}
-                        </div>
-                        <div className="col-span-1 text-right">
-                          {row.status === 'sold' && row.totalPnL !== undefined ? (
-                            <>
-                              <div className={`font-mono font-semibold text-lg ${row.totalPnL >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
-                                {formatCurrency(row.totalPnL)}
-                              </div>
-                              <div className={`text-[10px] font-medium ${row.pnlPerShare !== undefined && row.pnlPerShare >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
-                                {row.pnlPerShare !== undefined ? `${row.pnlPerShare >= 0 ? '+' : ''}${formatCurrency(row.pnlPerShare)}/share` : 'N/A'}
-                              </div>
-                              <div className="text-[10px] text-[#eae9e9]/50">
-                                Sold at {row.sellPrice !== undefined ? formatCurrency(row.sellPrice) : 'N/A'}
-                              </div>
-                            </>
-                          ) : (
-                            <>
-                              <div className={`font-mono font-semibold ${row.unrealizedQty !== null && row.unrealizedQty >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
-                                {row.unrealizedQty !== null ? formatNumber(row.unrealizedQty, 2) : 'N/A'}
-                              </div>
-                              <div className="text-[10px] text-[#eae9e9]/50">
-                                Target {row.autoSellTrigger !== null ? formatNumber(row.autoSellTrigger, 2) : 'N/A'}
-                              </div>
-                              <div className="text-[10px] text-[#eae9e9]/45">
-                                Qty {row.quantity ? row.quantity.toLocaleString() : 'N/A'}
-                              </div>
-                            </>
-                          )}
-                        </div>
-                        <div className="col-span-2">
-                          {row.status === 'sold' ? (
-                            <>
-                              <div className="flex items-center space-x-2">
-                                <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Buy Avg</span>
-                                <span className="font-mono text-sm text-[#eae9e9]">{formatCurrency(row.avgPrice)}</span>
-                              </div>
-                              <div className="flex items-center space-x-2">
-                                <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Sell Price</span>
-                                <span className="font-mono text-sm text-[#4ade80]">{row.sellPrice !== undefined ? formatCurrency(row.sellPrice) : 'N/A'}</span>
-                              </div>
-                            </>
-                          ) : (
-                            <>
-                              <div className="flex items-center space-x-2">
-                                <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Stop</span>
-                                <span className="font-mono text-sm text-[#eae9e9]">{formatCurrency(row.stopPrice)}</span>
-                              </div>
-                              <div className="flex items-center space-x-2">
-                                <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Limit</span>
-                                <span className="font-mono text-sm text-[#eae9e9]">{formatCurrency(row.limitPrice)}</span>
-                              </div>
-                            </>
-                          )}
-                        </div>
-                        <div className="col-span-2">
-                          {row.status === 'sold' ? (
-                            <div className="space-y-1">
-                              <div className="text-[10px] text-[#eae9e9]/50">
-                                Sold {row.soldAt ? formatRelativeTime(row.soldAt) : 'N/A'}
-                              </div>
-                              <div className="text-[10px] text-[#eae9e9]/50">
-                                Qty: {row.quantity ? row.quantity.toLocaleString() : 'N/A'}
-                              </div>
-                            </div>
-                          ) : row.progress !== null ? (
-                            <div className="space-y-1">
-                              <div className="w-full h-2 bg-[#2a2820] rounded-full overflow-hidden">
-                                <div
-                                  className={`h-full rounded-full transition-all duration-500 ${row.progress >= 0.75 ? 'bg-[#22c55e]' : row.progress >= 0.4 ? 'bg-[#38bdf8]' : 'bg-[#facc15]'}`}
-                                  style={{ width: `${Math.min(100, Math.max(0, row.progress * 100))}%` }}
-                                ></div>
-                              </div>
-                              <div className="flex items-center justify-between text-[10px] text-[#eae9e9]/60">
-                                <span>{(Math.min(100, Math.max(0, (row.progress || 0) * 100))).toFixed(0)}%</span>
-                                <span>Auto sell at {row.autoSellTrigger !== null ? formatNumber(row.autoSellTrigger, 2) : 'N/A'}</span>
-                              </div>
-                            </div>
-                          ) : (
-                            <span className="text-[10px] text-[#eae9e9]/50">Progress N/A</span>
-                          )}
-                        </div>
-                        <div className="col-span-2">
-                          <div className="font-mono text-xs text-[#eae9e9] truncate">
-                            {row.orderId || 'No order ID yet'}
-                          </div>
-                          {orderStatusLabel && (
-                            <div className={`text-[10px] font-medium ${orderStatusClass}`}>
-                              Order Status: {orderStatusLabel}
-                            </div>
-                          )}
-                          <div className="text-[10px] text-[#eae9e9]/50">
-                            Updated {formatRelativeTime(row.updatedAt)} · {formatTimestamp(row.updatedAt)}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+          <div className="px-3 py-2 border-b border-[#2a2820]/40">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+              <SummaryCard
+                title="Tracked Positions"
+                value={summary.total}
+                subtitle={Object.entries(summary.groupCounts)
+                  .map(([group, count]) => `${group}: ${count}`)
+                  .join(' • ') || 'No positions tracked'}
+              />
+              <SummaryCard
+                title="Active Stops"
+                value={summary.active}
+                subtitle={analysisEnabled ? 'Stops currently enforced' : 'Automation paused'}
+              />
+              <SummaryCard
+                title="Pending Actions"
+                value={summary.pending}
+                subtitle={analysisEnabled ? 'Orders awaiting execution or update' : 'Automation paused'}
+              />
+              <SummaryCard
+                title="Auto-Sell Executed"
+                value={summary.autoSold}
+                subtitle="Positions exited automatically"
+              />
             </div>
           </div>
-        )}
+
+          {error && (
+            <div className="px-4 pt-3">
+              <div className="bg-[#3a1e1e] border border-[#f87171] text-[#f87171] text-xs rounded p-3">
+                {error}
+              </div>
+            </div>
+          )}
+
+          <div className="flex-1 overflow-hidden">
+            {loading ? (
+              <div className="h-full flex items-center justify-center">
+                <div className="text-center">
+                  <div className="w-12 h-12 bg-[#2a2820] rounded-lg flex items-center justify-center mx-auto mb-4">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#4ade80]"></div>
+                  </div>
+                  <h3 className="text-sm font-medium text-[#eae9e9] mb-1">Loading Stop Limit data...</h3>
+                  <p className="text-xs text-[#eae9e9]/60">Fetching the latest automation status</p>
+                </div>
+              </div>
+            ) : rows.length === 0 ? (
+              <div className="h-full flex items-center justify-center">
+                <div className="text-center text-[#eae9e9]/70">
+                  <div className="w-12 h-12 bg-[#2a2820] rounded-lg flex items-center justify-center mx-auto mb-4">
+                    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 19V6a2 2 0 012-2h2a2 2 0 012 2v13m-4-5h6" />
+                    </svg>
+                  </div>
+                  <h3 className="text-base font-semibold text-[#eae9e9]">No tracked positions yet</h3>
+                  <p className="text-xs mt-1">StopLimit automation will appear once new positions are opened.</p>
+                </div>
+              </div>
+            ) : (
+              <div className="h-full flex flex-col">
+                <div className="bg-[#14130e] border-b border-[#2a2820]/40 px-4 py-2 sticky top-0 z-10">
+                  <div className="grid grid-cols-12 gap-2 text-[10px] font-semibold text-[#eae9e9]/50 uppercase tracking-wider">
+                    <div className="col-span-2">Symbol</div>
+                    <div className="col-span-1 text-center">Group</div>
+                    <div className="col-span-2">Stage</div>
+                    <div className="col-span-1 text-right">Unrealized / Auto</div>
+                    <div className="col-span-2">Stop / Limit</div>
+                    <div className="col-span-2">Progress</div>
+                    <div className="col-span-2">Order / Updated</div>
+                  </div>
+                </div>
+                <div className="flex-1 overflow-auto">
+                  <div className="divide-y divide-[#2a2820]/50">
+                    {rows.map((row) => {
+                      const orderStatusLabel = describeOrderStatus(row.orderStatus);
+                      const orderStatusClass =
+                        row.status === 'queued'
+                          ? 'text-[#fde68a]'
+                          : row.status === 'analysis-disabled'
+                            ? 'text-[#f87171]'
+                            : 'text-[#eae9e9]/50';
+
+                      return (
+                        <div
+                          key={row.symbol}
+                          className="px-4 py-3 bg-[#14130e] hover:bg-[#1e1d17] transition-colors"
+                        >
+                          <div className="grid grid-cols-12 gap-2 items-center text-xs text-[#eae9e9]/80">
+                            <div className="col-span-2 flex items-center space-x-3">
+                              <div className={`w-2 h-2 rounded-full ${statusDot[row.status] || 'bg-[#808080]'}`}></div>
+                              <div>
+                                <div className="text-sm font-semibold text-[#eae9e9]">{row.symbol}</div>
+                                <div className="flex items-center space-x-2 mt-1">
+                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${statusStyles[row.status] || 'bg-[#2a2820] text-[#eae9e9]/80 border border-[#2a2820]'}`}>
+                                    {row.statusLabel}
+                                  </span>
+                                  <span className="text-[10px] text-[#eae9e9]/50">
+                                    Avg {formatCurrency(row.avgPrice)}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                            <div className="col-span-1 text-center">
+                              <div className="font-semibold text-[#eae9e9]">{row.groupLabel}</div>
+                              <div className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Group {row.groupKey}</div>
+                            </div>
+                            <div className="col-span-2">
+                              <div className="font-semibold text-[#eae9e9]">{row.stageLabel}</div>
+                              <div className="text-[10px] text-[#eae9e9]/60">{row.stageDescription}</div>
+                              {row.nextTrigger !== null && row.nextStageLabel && (
+                                <div className="text-[10px] text-[#eae9e9]/45 mt-1">
+                                  Next: {row.nextStageLabel} at {formatOffset(row.nextTrigger)}
+                                </div>
+                              )}
+                            </div>
+                            <div className="col-span-1 text-right">
+                              {row.status === 'sold' && row.totalPnL !== undefined ? (
+                                <>
+                                  <div className={`font-mono font-semibold text-lg ${row.totalPnL >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
+                                    {formatCurrency(row.totalPnL)}
+                                  </div>
+                                  <div className={`text-[10px] font-medium ${row.pnlPerShare !== undefined && row.pnlPerShare >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
+                                    {row.pnlPerShare !== undefined ? `${row.pnlPerShare >= 0 ? '+' : ''}${formatCurrency(row.pnlPerShare)}/share` : 'N/A'}
+                                  </div>
+                                  <div className="text-[10px] text-[#eae9e9]/50">
+                                    Sold at {row.sellPrice !== undefined ? formatCurrency(row.sellPrice) : 'N/A'}
+                                  </div>
+                                </>
+                              ) : (
+                                <>
+                                  <div className={`font-mono font-semibold ${row.unrealizedQty !== null && row.unrealizedQty >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
+                                    {row.unrealizedQty !== null ? formatNumber(row.unrealizedQty, 2) : 'N/A'}
+                                  </div>
+                                  <div className="text-[10px] text-[#eae9e9]/50">
+                                    Target {row.autoSellTrigger !== null ? formatNumber(row.autoSellTrigger, 2) : 'N/A'}
+                                  </div>
+                                  <div className="text-[10px] text-[#eae9e9]/45">
+                                    Qty {row.quantity ? row.quantity.toLocaleString() : 'N/A'}
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                            <div className="col-span-2">
+                              {row.status === 'sold' ? (
+                                <>
+                                  <div className="flex items-center space-x-2">
+                                    <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Buy Avg</span>
+                                    <span className="font-mono text-sm text-[#eae9e9]">{formatCurrency(row.avgPrice)}</span>
+                                  </div>
+                                  <div className="flex items-center space-x-2">
+                                    <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Sell Price</span>
+                                    <span className="font-mono text-sm text-[#4ade80]">{row.sellPrice !== undefined ? formatCurrency(row.sellPrice) : 'N/A'}</span>
+                                  </div>
+                                </>
+                              ) : (
+                                <>
+                                  <div className="flex items-center space-x-2">
+                                    <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Stop</span>
+                                    <span className="font-mono text-sm text-[#eae9e9]">{formatCurrency(row.stopPrice)}</span>
+                                  </div>
+                                  <div className="flex items-center space-x-2">
+                                    <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Limit</span>
+                                    <span className="font-mono text-sm text-[#eae9e9]">{formatCurrency(row.limitPrice)}</span>
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                            <div className="col-span-2">
+                              {row.status === 'sold' ? (
+                                <div className="space-y-1">
+                                  <div className="text-[10px] text-[#eae9e9]/50">
+                                    Sold {row.soldAt ? formatRelativeTime(row.soldAt) : 'N/A'}
+                                  </div>
+                                  <div className="text-[10px] text-[#eae9e9]/50">
+                                    Qty: {row.quantity ? row.quantity.toLocaleString() : 'N/A'}
+                                  </div>
+                                </div>
+                              ) : row.progress !== null ? (
+                                <div className="space-y-1">
+                                  <div className="w-full h-2 bg-[#2a2820] rounded-full overflow-hidden">
+                                    <div
+                                      className={`h-full rounded-full transition-all duration-500 ${row.progress >= 0.75 ? 'bg-[#22c55e]' : row.progress >= 0.4 ? 'bg-[#38bdf8]' : 'bg-[#facc15]'}`}
+                                      style={{ width: `${Math.min(100, Math.max(0, row.progress * 100))}%` }}
+                                    ></div>
+                                  </div>
+                                  <div className="flex items-center justify-between text-[10px] text-[#eae9e9]/60">
+                                    <span>{(Math.min(100, Math.max(0, (row.progress || 0) * 100))).toFixed(0)}%</span>
+                                    <span>Auto sell at {row.autoSellTrigger !== null ? formatNumber(row.autoSellTrigger, 2) : 'N/A'}</span>
+                                  </div>
+                                </div>
+                              ) : (
+                                <span className="text-[10px] text-[#eae9e9]/50">Progress N/A</span>
+                              )}
+                            </div>
+                            <div className="col-span-2">
+                              <div className="font-mono text-xs text-[#eae9e9] truncate">
+                                {row.orderId || 'No order ID yet'}
+                              </div>
+                              {orderStatusLabel && (
+                                <div className={`text-[10px] font-medium ${orderStatusClass}`}>
+                                  Order Status: {orderStatusLabel}
+                                </div>
+                              )}
+                              <div className="text-[10px] text-[#eae9e9]/50">
+                                Updated {formatRelativeTime(row.updatedAt)} · {formatTimestamp(row.updatedAt)}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+            </div>
+          </div>
+          )}
       </div>
+        </>
+      )}
     </div>
   );
 };
@@ -628,4 +671,3 @@ const SummaryCard: React.FC<SummaryCardProps> = ({ title, value, subtitle }) => 
 );
 
 export default StopLimitSection;
-

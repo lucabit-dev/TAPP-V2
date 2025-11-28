@@ -67,6 +67,6 @@ export default defineConfig({
   // Optimize dependencies
   optimizeDeps: {
     include: ['react', 'react-dom'],
-    exclude: ['react-virtuoso'], // Let it be code-split
+    exclude: [], // Remove exclude to prevent lazy loading issues in dev
   },
 })
