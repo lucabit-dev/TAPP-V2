@@ -1,8 +1,7 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../auth/AuthContext';
 
 const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
-const MANUAL_CONFIG_ID = '692117e2b7bb6ba7a6ae6f6c';
 
 interface IndicatorData {
   ema1m18: number | null;
@@ -68,158 +67,16 @@ interface Props {
   viewMode?: 'qualified' | 'non-qualified';
 }
 
-const WEIGHTS = {
-  distVwap: 0.20,
-  change2m: 0.15,
-  change5m: 0.15,
-  trades1m: 0.08,
-  trades2m: 0.08,
-  vol1m: 0.08,
-  vol2m: 0.08,
-  changeOpen: 0.08,
-  cons1m: 0.05,
-  dailyVol: 0.05
-};
-
 const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
-  const [rawRows, setRawRows] = useState<any[]>([]);
-  const [techData, setTechData] = useState<Map<string, IndicatorData>>(new Map());
+  const [manualList, setManualList] = useState<{
+    qualified: ScoredStock[];
+    nonQualified: NonQualifiedStock[];
+    analyzing: AnalyzingStock[];
+  }>({ qualified: [], nonQualified: [], analyzing: [] });
+
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'connecting'>('disconnected');
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const wsRef = useRef<WebSocket | null>(null);
-
-  // Helper to extract value from row columns
-  const getColVal = (row: any, keys: string[]): number | null => {
-    if (!row.columns) return null;
-    const col = row.columns.find((c: any) => keys.includes(c.key));
-    if (!col) return null;
-    
-    // Handle K/M/B suffixes
-    const valStr = String(col.value).trim();
-    if (/[KMB]$/i.test(valStr)) {
-      const num = parseFloat(valStr.replace(/[^0-9.-]/g, ''));
-      if (isNaN(num)) return null;
-      if (/B$/i.test(valStr)) return num * 1_000_000_000;
-      if (/M$/i.test(valStr)) return num * 1_000_000;
-      if (/K$/i.test(valStr)) return num * 1_000;
-      return num;
-    }
-    
-    const val = parseFloat(valStr.replace(/[^0-9.-]/g, ''));
-    return isNaN(val) ? null : val;
-  };
-
-  // Computed scored stocks
-  const { qualified: scoredStocks, nonQualified, analyzing } = useMemo(() => {
-    const qualified: ScoredStock[] = [];
-    const nonQualified: NonQualifiedStock[] = [];
-    const analyzing: AnalyzingStock[] = [];
-
-    rawRows.forEach(row => {
-      const symbol = row.symbol || row.columns?.find((c: any) => c.key === 'SymbolColumn')?.value;
-      if (!symbol) return;
-      
-      // Extract factors first as we need them for both lists (for display or scoring)
-      const change2m = getColVal(row, ['PrzChangeFilterMIN2', 'ChangeMIN2', 'Change2MIN']) ?? 0;
-      const change5m = getColVal(row, ['PrzChangeFilterMIN5', 'ChangeMIN5', 'Change5MIN']) ?? 0;
-      const trades1m = getColVal(row, ['TradeCountFilterMIN1', 'TradeCountMIN1', 'TradesMIN1']) ?? 0;
-      const trades2m = getColVal(row, ['TradeCountFilterMIN2', 'TradeCountMIN2', 'TradesMIN2']) ?? 0;
-      const vol1m = getColVal(row, ['AbsVolumeFilterMIN1', 'VolumeMIN1']) ?? 0;
-      const vol2m = getColVal(row, ['AbsVolumeFilterMIN2', 'VolumeMIN2']) ?? 0;
-      const changeOpen = getColVal(row, ['ChangeFromOpenPRZ', 'ChangeFromOpen']) ?? 0;
-      const distVwap = getColVal(row, ['DistanceFromVWAPPRZ', 'DistanceFromVWAP']) ?? 0;
-      const cons1m = getColVal(row, ['ConsecutiveCandleFilterFM1', 'ConsecutiveCandle']) ?? 0;
-      const dailyVol = getColVal(row, ['AbsVolumeFilterDAY1', 'Volume', 'VolumeColumn']) ?? 0;
-      const price = getColVal(row, ['PriceNOOPTION', 'Price']) ?? 0;
-
-      const factors = { change2m, change5m, trades1m, trades2m, vol1m, vol2m, changeOpen, distVwap, cons1m, dailyVol };
-
-      const indicators = techData.get(symbol);
-      
-      if (!indicators) {
-        analyzing.push({ symbol, price, factors, rawRow: row });
-        return;
-      }
-
-      const reasons: string[] = [];
-      if ((indicators.macd5m?.histogram ?? -1) <= 0) reasons.push("Hist 5m <= 0");
-      if ((indicators.macd5m?.macd ?? -1) <= 0) reasons.push("MACD 5m <= 0");
-      if ((indicators.ema5m18 ?? 0) <= (indicators.ema5m200 ?? 999999)) reasons.push("EMA18 < EMA200");
-
-      if (reasons.length > 0) {
-        nonQualified.push({
-          symbol,
-          price,
-          reasons,
-          factors,
-          rawRow: row
-        });
-        return;
-      }
-
-      const meetsExtra = {
-        macd1mPos: (indicators.macd1m?.macd ?? -1) > 0,
-        closeOverEma1m: price > (indicators.ema1m18 ?? 999999)
-      };
-
-      qualified.push({
-        symbol,
-        price,
-        score: 0, // Computed later
-        factors,
-        indicators,
-        meetsExtra,
-        rawRow: row
-      });
-    });
-
-    if (qualified.length > 0) {
-      // Normalize and Score for qualified stocks
-      const factorsKey = [
-        'change2m', 'change5m', 'trades1m', 'trades2m', 
-        'vol1m', 'vol2m', 'changeOpen', 'distVwap', 
-        'cons1m', 'dailyVol'
-      ] as const;
-
-      const stats: Record<string, { min: number; max: number }> = {};
-      
-      factorsKey.forEach(key => {
-        const values = qualified.map(c => c.factors[key]);
-        stats[key] = { min: Math.min(...values), max: Math.max(...values) };
-      });
-
-      qualified.forEach(c => {
-        let totalScore = 0;
-        
-        factorsKey.forEach(key => {
-          const { min, max } = stats[key];
-          const val = c.factors[key];
-          let score = 0;
-          
-          if (max === min) {
-            score = 50;
-          } else {
-            if (key === 'distVwap') {
-              score = 100 * (max - val) / (max - min);
-            } else {
-              score = 100 * (val - min) / (max - min);
-            }
-          }
-          
-          totalScore += score * (WEIGHTS[key] || 0);
-        });
-        
-        c.score = totalScore;
-      });
-    }
-
-    return {
-      qualified: qualified.sort((a, b) => b.score - a.score).slice(0, 10),
-      nonQualified: nonQualified.sort((a, b) => a.symbol.localeCompare(b.symbol)),
-      analyzing: analyzing.sort((a, b) => a.symbol.localeCompare(b.symbol))
-    };
-
-  }, [rawRows, techData]);
 
   useEffect(() => {
     const connect = () => {
@@ -239,18 +96,13 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
         try {
           const msg = JSON.parse(e.data);
           
-          if (msg.type === 'TOPLIST_UPDATE' && msg.data?.config_id === MANUAL_CONFIG_ID) {
-            setRawRows(msg.data.rows || []);
-            setIsInitialLoad(false);
-          }
-          
-          if (msg.type === 'STOCK_TECH_UPDATE' && msg.data?.indicators) {
-            // Only store if we have indicators
-            setTechData(prev => {
-              const next = new Map(prev);
-              next.set(msg.data.symbol, msg.data.indicators);
-              return next;
+          if (msg.type === 'MANUAL_LIST_UPDATE') {
+            setManualList({
+              qualified: msg.data.qualified || [],
+              nonQualified: msg.data.nonQualified || [],
+              analyzing: msg.data.analyzing || []
             });
+            setIsInitialLoad(false);
           }
         } catch (err) {
           console.error(err);
@@ -266,6 +118,9 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
 
   const formatNumber = (num: number, decimals = 2) => num.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 
+  const { qualified: scoredStocks, nonQualified, analyzing } = manualList;
+  const poolSize = scoredStocks.length + nonQualified.length + analyzing.length;
+  
   const title = viewMode === 'qualified' ? 'MANUAL Live Ranking' : 'NON-QUALIFIED Stocks';
   
   // Initial Loading Screen
@@ -307,7 +162,7 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
             <span className="text-xs text-[#808080] uppercase">{connectionStatus}</span>
           </div>
           <div className="text-xs text-[#808080]">
-            Pool: {rawRows.length} | Qualified: {scoredStocks.length} | Non-Qualified: {nonQualified.length} | Analyzing: {analyzing.length}
+            Pool: {poolSize} | Qualified: {scoredStocks.length} | Non-Qualified: {nonQualified.length} | Analyzing: {analyzing.length}
           </div>
         </div>
       </div>

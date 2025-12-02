@@ -707,7 +707,10 @@ toplistService.onToplistUpdate(async (toplistUpdate) => {
 
   // Filter rows by ChartsWatcher metrics mapped to FLOAT config thresholds
   const filteredSymbols = rows.filter((row) => {
-    if (isManualConfig) return false; // Do not validate MANUAL list as FLOAT list
+    if (isManualConfig) {
+      scheduleManualUpdate(rows);
+      return false; // Do not validate MANUAL list as FLOAT list
+    }
     if (!thresholds) return false;
     const columns = Array.isArray(row.columns) ? row.columns : [];
     const columnsByKey = new Map(columns.map(c => [c.key, c]));
@@ -4661,8 +4664,247 @@ app.use((req, res) => {
 });
 
 // ============================================
+// Manual List Logic
+// ============================================
+const MANUAL_CONFIG_ID = '692117e2b7bb6ba7a6ae6f6c';
+const MANUAL_WEIGHTS = {
+  distVwap: 0.20,
+  change2m: 0.15,
+  change5m: 0.15,
+  trades1m: 0.08,
+  trades2m: 0.08,
+  vol1m: 0.08,
+  vol2m: 0.08,
+  changeOpen: 0.08,
+  cons1m: 0.05,
+  dailyVol: 0.05
+};
+
+let manualListRows = [];
+const manualListIndicators = new Map(); // symbol -> indicators
+let manualUpdateTimeout = null;
+
+function getManualColVal(row, keys) {
+  if (!row.columns) return 0;
+  const col = row.columns.find((c) => keys.includes(c.key));
+  if (!col) return 0;
+  
+  const valStr = String(col.value).trim();
+  if (/[KMB]$/i.test(valStr)) {
+    const num = parseFloat(valStr.replace(/[^0-9.-]/g, ''));
+    if (isNaN(num)) return 0;
+    if (/B$/i.test(valStr)) return num * 1_000_000_000;
+    if (/M$/i.test(valStr)) return num * 1_000_000;
+    if (/K$/i.test(valStr)) return num * 1_000;
+    return num;
+  }
+  
+  const val = parseFloat(valStr.replace(/[^0-9.-]/g, ''));
+  return isNaN(val) ? 0 : val;
+}
+
+function computeManualList() {
+  const qualified = [];
+  const nonQualified = [];
+  const analyzing = [];
+
+  manualListRows.forEach(row => {
+    const symbol = row.symbol || row.columns?.find((c) => c.key === 'SymbolColumn')?.value;
+    if (!symbol) return;
+
+    // Extract factors
+    const factors = {
+      change2m: getManualColVal(row, ['PrzChangeFilterMIN2', 'ChangeMIN2', 'Change2MIN']),
+      change5m: getManualColVal(row, ['PrzChangeFilterMIN5', 'ChangeMIN5', 'Change5MIN']),
+      trades1m: getManualColVal(row, ['TradeCountFilterMIN1', 'TradeCountMIN1', 'TradesMIN1']),
+      trades2m: getManualColVal(row, ['TradeCountFilterMIN2', 'TradeCountMIN2', 'TradesMIN2']),
+      vol1m: getManualColVal(row, ['AbsVolumeFilterMIN1', 'VolumeMIN1']),
+      vol2m: getManualColVal(row, ['AbsVolumeFilterMIN2', 'VolumeMIN2']),
+      changeOpen: getManualColVal(row, ['ChangeFromOpenPRZ', 'ChangeFromOpen']),
+      distVwap: getManualColVal(row, ['DistanceFromVWAPPRZ', 'DistanceFromVWAP']),
+      cons1m: getManualColVal(row, ['ConsecutiveCandleFilterFM1', 'ConsecutiveCandle']),
+      dailyVol: getManualColVal(row, ['AbsVolumeFilterDAY1', 'Volume', 'VolumeColumn']),
+    };
+    const price = getManualColVal(row, ['PriceNOOPTION', 'Price']);
+
+    const indicators = manualListIndicators.get(symbol);
+
+    if (!indicators) {
+      analyzing.push({ symbol, price, factors, rawRow: row });
+      return;
+    }
+
+    const reasons = [];
+    if ((indicators.macd5m?.histogram ?? -1) <= 0) reasons.push("Hist 5m <= 0");
+    if ((indicators.macd5m?.macd ?? -1) <= 0) reasons.push("MACD 5m <= 0");
+    if ((indicators.ema5m18 ?? 0) <= (indicators.ema5m200 ?? 999999)) reasons.push("EMA18 < EMA200");
+
+    if (reasons.length > 0) {
+      nonQualified.push({ symbol, price, reasons, factors, rawRow: row });
+      return;
+    }
+
+    const meetsExtra = {
+      macd1mPos: (indicators.macd1m?.macd ?? -1) > 0,
+      closeOverEma1m: price > (indicators.ema1m18 ?? 999999)
+    };
+
+    qualified.push({
+      symbol,
+      price,
+      score: 0,
+      factors,
+      indicators,
+      meetsExtra,
+      rawRow: row
+    });
+  });
+
+  // Score qualified
+  if (qualified.length > 0) {
+    const factorsKey = Object.keys(MANUAL_WEIGHTS);
+    const stats = {};
+    factorsKey.forEach(key => {
+      const values = qualified.map(c => c.factors[key]);
+      stats[key] = { min: Math.min(...values), max: Math.max(...values) };
+    });
+
+    qualified.forEach(c => {
+      let totalScore = 0;
+      factorsKey.forEach(key => {
+        const { min, max } = stats[key];
+        const val = c.factors[key];
+        let score = 0;
+        if (max === min) {
+          score = 50;
+        } else {
+          if (key === 'distVwap') {
+            score = 100 * (max - val) / (max - min);
+          } else {
+            score = 100 * (val - min) / (max - min);
+          }
+        }
+        totalScore += score * (MANUAL_WEIGHTS[key] || 0);
+      });
+      c.score = totalScore;
+    });
+  }
+
+  // Sort
+  qualified.sort((a, b) => b.score - a.score);
+  nonQualified.sort((a, b) => a.symbol.localeCompare(b.symbol));
+  analyzing.sort((a, b) => a.symbol.localeCompare(b.symbol));
+
+  return {
+    qualified: qualified.slice(0, 10), // Top 10
+    nonQualified,
+    analyzing
+  };
+}
+
+function broadcastManualUpdate() {
+  const data = computeManualList();
+  broadcastToClients({
+    type: 'MANUAL_LIST_UPDATE',
+    data: {
+        qualified: data.qualified,
+        nonQualified: data.nonQualified,
+        analyzing: data.analyzing,
+        timestamp: new Date().toISOString()
+    }
+  });
+}
+
+async function updateManualList(rows) {
+  manualListRows = rows;
+  const symbols = rows.map(r => r.symbol || (r.columns.find(c => c.key === 'SymbolColumn')?.value)).filter(Boolean);
+  
+  // Initial broadcast with new rows (analyzing state)
+  broadcastManualUpdate();
+
+  // Analyze symbols in batches
+  const BATCH_SIZE = 3;
+  for (let i = 0; i < symbols.length; i += BATCH_SIZE) {
+    const batch = symbols.slice(i, i + BATCH_SIZE);
+    await Promise.all(batch.map(async (sym) => {
+      try {
+        const analysis = await analyzeSymbol(sym);
+        if (analysis && analysis.indicators) {
+          manualListIndicators.set(sym, analysis.indicators);
+        }
+      } catch (e) {
+        console.error(`Error analyzing manual symbol ${sym}:`, e.message);
+      }
+    }));
+    broadcastManualUpdate();
+    // Small delay to be nice to API/CPU
+    await new Promise(r => setTimeout(r, 100));
+  }
+}
+
+function scheduleManualUpdate(rows) {
+    if (manualUpdateTimeout) clearTimeout(manualUpdateTimeout);
+    manualUpdateTimeout = setTimeout(() => {
+        updateManualList(rows).catch(console.error);
+    }, 500); // 500ms debounce
+}
+
+// ============================================
 // Start server
 // ============================================
+
+server.listen(PORT, () => {
+  console.log(`🚀 Trading Alerts API server running on port ${PORT}`);
+  console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
+  console.log(`📈 Alerts endpoint: http://localhost:${PORT}/api/alerts`);
+  console.log(`✅ Valid alerts: http://localhost:${PORT}/api/alerts/valid`);
+  console.log(`❌ Filtered alerts: http://localhost:${PORT}/api/alerts/filtered`);
+  console.log(`🔌 ChartsWatcher status: http://localhost:${PORT}/api/chartswatcher/status`);
+  console.log(`📋 Toplist endpoint: http://localhost:${PORT}/api/toplist`);
+  console.log(`📊 Toplist status: http://localhost:${PORT}/api/toplist/status`);
+  console.log(`🔍 Manual analysis: http://localhost:${PORT}/api/analyze/{SYMBOL}`);
+  console.log(`📊 Condition stats: http://localhost:${PORT}/api/statistics/conditions`);
+  console.log(`🌐 WebSocket server: ws://localhost:${PORT}`);
+  console.log(`\n🔬 MACD/EMA Verification:`);
+  console.log(`   Status: http://localhost:${PORT}/api/verification/status`);
+  console.log(`   Start: http://localhost:${PORT}/api/verification/start`);
+  console.log(`   Stop: http://localhost:${PORT}/api/verification/stop`);
+  console.log(`   Export: http://localhost:${PORT}/api/verification/export`);
+
+  // Auto-start verification monitoring (can be controlled via API)
+  if (process.env.ENABLE_VERIFICATION === 'true') {
+    startVerificationMonitoring();
+  }
+});
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+  console.log('\n🛑 Received SIGINT. Graceful shutdown...');
+  stopVerificationMonitoring();
+  chartsWatcherService.disconnect();
+  toplistService.disconnect();
+  if (wsHeartbeatInterval) { clearInterval(wsHeartbeatInterval); wsHeartbeatInterval = null; }
+  wss.close();
+  server.close(() => {
+    console.log('✅ Server closed');
+    process.exit(0);
+  });
+});
+
+process.on('SIGTERM', () => {
+  console.log('\n🛑 Received SIGTERM. Graceful shutdown...');
+  stopVerificationMonitoring();
+  chartsWatcherService.disconnect();
+  toplistService.disconnect();
+  if (wsHeartbeatInterval) { clearInterval(wsHeartbeatInterval); wsHeartbeatInterval = null; }
+  wss.close();
+  server.close(() => {
+    console.log('✅ Server closed');
+    process.exit(0);
+  });
+});
+
+module.exports = app;
 
 server.listen(PORT, () => {
   console.log(`🚀 Trading Alerts API server running on port ${PORT}`);
