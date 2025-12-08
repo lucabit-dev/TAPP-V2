@@ -2376,6 +2376,42 @@ app.post('/api/float/thresholds', (req, res) => {
   }
 });
 
+// Manual Weights Configuration
+app.get('/api/manual/weights', (req, res) => {
+  res.json({ success: true, data: MANUAL_WEIGHTS });
+});
+
+app.post('/api/manual/weights', (req, res) => {
+  const { weights } = req.body;
+  if (!weights) return res.status(400).json({ success: false, error: 'Missing weights' });
+
+  const sum = Object.values(weights).reduce((a, b) => a + Number(b), 0);
+  
+  let newWeights = {};
+  
+  if (sum > 1.1) {
+     if (Math.abs(sum - 100) > 0.1) {
+       return res.status(400).json({ success: false, error: `Total must be 100% (got ${sum.toFixed(1)}%)` });
+     }
+     for (const key in weights) {
+       newWeights[key] = Number(weights[key]) / 100;
+     }
+  } else {
+     if (Math.abs(sum - 1) > 0.001) {
+        return res.status(400).json({ success: false, error: `Total must be 1.0 (got ${sum.toFixed(3)})` });
+     }
+     for (const key in weights) {
+       newWeights[key] = Number(weights[key]);
+     }
+  }
+
+  MANUAL_WEIGHTS = { ...MANUAL_WEIGHTS, ...newWeights };
+  
+  broadcastManualUpdate();
+  
+  res.json({ success: true, data: MANUAL_WEIGHTS });
+});
+
 // Buy list endpoints
 app.get('/api/buys', (req, res) => {
   res.json({ success: true, data: buyList });
@@ -4667,7 +4703,7 @@ app.use((req, res) => {
 // Manual List Logic
 // ============================================
 const MANUAL_CONFIG_ID = '692117e2b7bb6ba7a6ae6f6c';
-const MANUAL_WEIGHTS = {
+let MANUAL_WEIGHTS = {
   distVwap: 0.20,
   change2m: 0.15,
   change5m: 0.15,

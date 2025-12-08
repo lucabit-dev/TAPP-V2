@@ -13,6 +13,7 @@ import ManualSection from './components/ManualSection';
 const TradingDashboard = lazy(() => import('./components/TradingDashboard'));
 const FloatListsSection = lazy(() => import('./components/FloatListsSection'));
 const FloatConfigPanel = lazy(() => import('./components/FloatConfigPanel'));
+const ManualConfigPanel = lazy(() => import('./components/ManualConfigPanel'));
 const BuyListSection = lazy(() => import('./components/BuyListSection'));
 // const FloatRawListsSection = lazy(() => import('./components/FloatRawListsSection'));
 const PnLSection = lazy(() => import('./components/PnLSection'));
@@ -121,7 +122,7 @@ function App() {
   const [newValidAlertsCount, setNewValidAlertsCount] = useState(0);
   const [conditionStats, setConditionStats] = useState<any>(null);
   const [showStats, setShowStats] = useState(false);
-  const [selectedTab, setSelectedTab] = useState<'all' | 'valid' | 'filtered' | 'dashboard' | 'config-float' | 'listas-float-raw' | 'manual' | 'manual-non-qualified' | 'buy-list' | 'pnl' | 'orders' | 'stoplimit'>('listas-float-raw');
+  const [selectedTab, setSelectedTab] = useState<'all' | 'valid' | 'filtered' | 'dashboard' | 'config-float' | 'listas-float-raw' | 'manual' | 'manual-config' | 'manual-non-qualified' | 'buy-list' | 'pnl' | 'orders' | 'stoplimit'>('listas-float-raw');
   const [alertsCollapsed, setAlertsCollapsed] = useState(true); // Start collapsed
   const [listsCollapsed, setListsCollapsed] = useState(false); // Start expanded by default for Lists
   const [manualCollapsed, setManualCollapsed] = useState(false); // Start expanded by default for Manual
@@ -695,6 +696,7 @@ function App() {
                   </button>
                   {!manualCollapsed && [ 
                     { key: 'manual', label: 'MANUAL', count: 0 },
+                    { key: 'manual-config', label: 'Config', count: 0 },
                     { key: 'manual-non-qualified', label: 'NON-QUALIFIED', count: 0 },
                     { key: 'pnl', label: 'P&L', count: 0 },
                     { key: 'stoplimit', label: 'Stop Limit', count: 0 },
@@ -1108,12 +1110,13 @@ function App() {
             }} />
           )}
           {selectedTab === 'manual' && <ManualSection viewMode="qualified" />}
+          {selectedTab === 'manual-config' && <ManualConfigPanel />}
           {selectedTab === 'manual-non-qualified' && <ManualSection viewMode="non-qualified" />}
           {selectedTab === 'buy-list' && <BuyListSection />}
           {selectedTab === 'pnl' && <PnLSection />}
           {selectedTab === 'stoplimit' && <StopLimitSection />}
           {selectedTab === 'orders' && <OrdersSection />}
-          {!['dashboard', 'config-float', 'listas-float-raw', 'buy-list', 'pnl', 'orders', 'stoplimit', 'sold', 'manual', 'manual-non-qualified'].includes(selectedTab) && (
+          {!['dashboard', 'config-float', 'listas-float-raw', 'buy-list', 'pnl', 'orders', 'stoplimit', 'sold', 'manual', 'manual-config', 'manual-non-qualified'].includes(selectedTab) && (
             <div className="h-full flex">
             {/* Main Alerts Content */}
             <div className="flex-1 flex flex-col">

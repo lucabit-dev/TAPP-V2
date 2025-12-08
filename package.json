@@ -17,16 +17,23 @@
     "check-env": "node scripts/check-env.js"
   },
   "dependencies": {
+    "@dx-private/dxchart5-react-mock-providers": "file:../dxchart.lib/dxchart5-react-mock-providers",
+    "@dx-private/dxchart5-react-widget": "file:../dxchart.lib/dxchart5-react-widget",
+    "@dx-private/dxstudies": "file:../dxchart.lib/dxstudies",
     "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
+    "date-fns": "^2.30.0",
     "dotenv": "^17.2.3",
     "express": "^4.18.2",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.19.2",
     "node-fetch": "^2.7.0",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1",
     "technicalindicators": "^3.1.0",
     "ws": "^8.18.3",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "yargs": "^17.7.2"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",

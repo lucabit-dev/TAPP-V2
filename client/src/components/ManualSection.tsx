@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../auth/AuthContext';
+import DXChartWidget from './DXChartWidget';
 
 const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
 
@@ -76,6 +77,7 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
 
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'connecting'>('disconnected');
   const [isInitialLoad, setIsInitialLoad] = useState(true);
+  const [selectedStock, setSelectedStock] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -146,7 +148,7 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
   }
 
   return (
-    <div className="h-full flex flex-col bg-[#14130e] text-[#eae9e9] p-4 overflow-hidden">
+    <div className="h-full flex flex-col bg-[#14130e] text-[#eae9e9] p-4 overflow-hidden relative">
       <div className="flex justify-between items-center mb-4 border-b border-[#2a2820] pb-4">
         <div>
           <h2 className="text-xl font-bold text-[#eae9e9]">{title}</h2>
@@ -179,6 +181,7 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                 <tr>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium">Rank</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium">Symbol</th>
+                  <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-center">Chart</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-right">Score</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-right">Price</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-center">MACD 1m+</th>
@@ -201,6 +204,14 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                   <tr key={stock.symbol} className="hover:bg-[#1e1d17] transition-colors border-b border-[#2a2820]/50 last:border-0">
                     <td className="p-3 font-bold text-[#eae9e9] w-12 text-center bg-[#1a1915]/50">{idx + 1}</td>
                     <td className="p-3 font-bold text-[#4ade80]">{stock.symbol}</td>
+                    <td className="p-3 text-center">
+                      <button 
+                        onClick={() => setSelectedStock(stock.symbol)}
+                        className="px-2 py-1 bg-[#2a2820] hover:bg-[#3a3830] text-[#eae9e9] text-xs rounded border border-[#404040] transition-colors"
+                      >
+                        Show
+                      </button>
+                    </td>
                     <td className="p-3 text-right font-mono font-bold text-[#facc15]">{stock.score.toFixed(1)}</td>
                     <td className="p-3 text-right font-mono">${formatNumber(stock.price)}</td>
                     
@@ -229,7 +240,7 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                 ))}
                 {scoredStocks.length === 0 && (
                   <tr>
-                    <td colSpan={16} className="p-8 text-center text-[#808080]">
+                    <td colSpan={17} className="p-8 text-center text-[#808080]">
                       {analyzing.length > 0 ? (
                         <div className="flex flex-col items-center justify-center py-4 space-y-3">
                           <div className="w-6 h-6 border-2 border-[#2a2820] border-t-[#4ade80] rounded-full animate-spin"></div>
@@ -259,6 +270,7 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
               <thead className="bg-[#1a1915]">
                 <tr>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium">Symbol</th>
+                  <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-center">Chart</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium">Disqualification Reasons</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-right">Price</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-right">2m %</th>
@@ -270,6 +282,14 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                 {nonQualified.map((stock) => (
                   <tr key={stock.symbol} className="hover:bg-[#1e1d17] transition-colors border-b border-[#2a2820]/50 last:border-0 opacity-75 hover:opacity-100">
                     <td className="p-3 font-bold text-[#f87171]">{stock.symbol}</td>
+                    <td className="p-3 text-center">
+                      <button 
+                        onClick={() => setSelectedStock(stock.symbol)}
+                        className="px-2 py-1 bg-[#2a2820] hover:bg-[#3a3830] text-[#eae9e9] text-xs rounded border border-[#404040] transition-colors"
+                      >
+                        Show
+                      </button>
+                    </td>
                     <td className="p-3">
                       <div className="flex flex-wrap gap-1">
                         {stock.reasons.map((reason, i) => (
@@ -287,7 +307,7 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                 ))}
                 {nonQualified.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="p-8 text-center text-[#808080]">
+                    <td colSpan={7} className="p-8 text-center text-[#808080]">
                       {analyzing.length > 0 ? (
                         <div className="flex flex-col items-center justify-center py-4 space-y-3">
                           <div className="w-6 h-6 border-2 border-[#2a2820] border-t-[#f87171] rounded-full animate-spin"></div>
@@ -304,6 +324,30 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
           </div>
         )}
       </div>
+
+      {/* CHART MODAL */}
+      {selectedStock && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="bg-[#1a1915] border border-[#2a2820] rounded-lg w-full max-w-6xl h-[80vh] flex flex-col shadow-2xl">
+            <div className="flex justify-between items-center p-3 border-b border-[#2a2820] bg-[#14130e]">
+              <h3 className="font-bold text-[#eae9e9] text-lg flex items-center">
+                <span className="text-[#eab308] mr-2">{selectedStock}</span> Chart
+              </h3>
+              <button 
+                onClick={() => setSelectedStock(null)}
+                className="p-1 hover:bg-[#2a2820] rounded text-[#808080] hover:text-[#eae9e9] transition-colors"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="flex-1 overflow-hidden relative p-1 bg-[#0f0e0a]">
+              <DXChartWidget symbol={selectedStock} />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
