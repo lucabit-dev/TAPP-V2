@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import DXChartWidget from './DXChartWidget';
+import StockChart from './StockChart';
 
 const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
 
@@ -201,42 +202,51 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
               </thead>
               <tbody>
                 {scoredStocks.map((stock, idx) => (
-                  <tr key={stock.symbol} className="hover:bg-[#1e1d17] transition-colors border-b border-[#2a2820]/50 last:border-0">
-                    <td className="p-3 font-bold text-[#eae9e9] w-12 text-center bg-[#1a1915]/50">{idx + 1}</td>
-                    <td className="p-3 font-bold text-[#4ade80]">{stock.symbol}</td>
-                    <td className="p-3 text-center">
-                      <button 
-                        onClick={() => setSelectedStock(stock.symbol)}
-                        className="px-2 py-1 bg-[#2a2820] hover:bg-[#3a3830] text-[#eae9e9] text-xs rounded border border-[#404040] transition-colors"
-                      >
-                        Show
-                      </button>
-                    </td>
-                    <td className="p-3 text-right font-mono font-bold text-[#facc15]">{stock.score.toFixed(1)}</td>
-                    <td className="p-3 text-right font-mono">${formatNumber(stock.price)}</td>
-                    
-                    <td className="p-3 text-center">
-                      <span className={`px-2 py-0.5 rounded ${stock.meetsExtra.macd1mPos ? 'bg-[#22c55e]/20 text-[#22c55e]' : 'bg-[#2a2820] text-[#808080]'}`}>
-                        {stock.meetsExtra.macd1mPos ? 'YES' : 'NO'}
-                      </span>
-                    </td>
-                    <td className="p-3 text-center">
-                      <span className={`px-2 py-0.5 rounded ${stock.meetsExtra.closeOverEma1m ? 'bg-[#22c55e]/20 text-[#22c55e]' : 'bg-[#2a2820] text-[#808080]'}`}>
-                        {stock.meetsExtra.closeOverEma1m ? 'YES' : 'NO'}
-                      </span>
-                    </td>
+                  <React.Fragment key={stock.symbol}>
+                    <tr className="hover:bg-[#1e1d17] transition-colors border-t border-[#2a2820]/50">
+                      <td className="p-3 font-bold text-[#eae9e9] w-12 text-center bg-[#1a1915]/50">{idx + 1}</td>
+                      <td className="p-3 font-bold text-[#4ade80]">{stock.symbol}</td>
+                      <td className="p-3 text-center">
+                        <button 
+                          onClick={() => setSelectedStock(stock.symbol)}
+                          className="px-2 py-1 bg-[#2a2820] hover:bg-[#3a3830] text-[#eae9e9] text-xs rounded border border-[#404040] transition-colors"
+                        >
+                          Show
+                        </button>
+                      </td>
+                      <td className="p-3 text-right font-mono font-bold text-[#facc15]">{stock.score.toFixed(1)}</td>
+                      <td className="p-3 text-right font-mono">${formatNumber(stock.price)}</td>
+                      
+                      <td className="p-3 text-center">
+                        <span className={`px-2 py-0.5 rounded ${stock.meetsExtra.macd1mPos ? 'bg-[#22c55e]/20 text-[#22c55e]' : 'bg-[#2a2820] text-[#808080]'}`}>
+                          {stock.meetsExtra.macd1mPos ? 'YES' : 'NO'}
+                        </span>
+                      </td>
+                      <td className="p-3 text-center">
+                        <span className={`px-2 py-0.5 rounded ${stock.meetsExtra.closeOverEma1m ? 'bg-[#22c55e]/20 text-[#22c55e]' : 'bg-[#2a2820] text-[#808080]'}`}>
+                          {stock.meetsExtra.closeOverEma1m ? 'YES' : 'NO'}
+                        </span>
+                      </td>
 
-                    <td className="p-3 text-right font-mono text-[#eae9e9]/80">{formatNumber(stock.factors.distVwap)}%</td>
-                    <td className="p-3 text-right font-mono text-[#eae9e9]/80">{formatNumber(stock.factors.change2m)}%</td>
-                    <td className="p-3 text-right font-mono text-[#eae9e9]/80">{formatNumber(stock.factors.change5m)}%</td>
-                    <td className="p-3 text-right font-mono text-[#eae9e9]/80">{Math.round(stock.factors.trades1m)}</td>
-                    <td className="p-3 text-right font-mono text-[#eae9e9]/80">{Math.round(stock.factors.trades2m)}</td>
-                    <td className="p-3 text-right font-mono text-[#eae9e9]/80">{formatNumber(stock.factors.vol1m / 1000, 0)}k</td>
-                    <td className="p-3 text-right font-mono text-[#eae9e9]/80">{formatNumber(stock.factors.vol2m / 1000, 0)}k</td>
-                    <td className="p-3 text-right font-mono text-[#eae9e9]/80">{formatNumber(stock.factors.changeOpen)}%</td>
-                    <td className="p-3 text-right font-mono text-[#eae9e9]/80">{stock.factors.cons1m}</td>
-                    <td className="p-3 text-right font-mono text-[#eae9e9]/80">{formatNumber(stock.factors.dailyVol / 1000000, 1)}M</td>
-                  </tr>
+                      <td className="p-3 text-right font-mono text-[#eae9e9]/80">{formatNumber(stock.factors.distVwap)}%</td>
+                      <td className="p-3 text-right font-mono text-[#eae9e9]/80">{formatNumber(stock.factors.change2m)}%</td>
+                      <td className="p-3 text-right font-mono text-[#eae9e9]/80">{formatNumber(stock.factors.change5m)}%</td>
+                      <td className="p-3 text-right font-mono text-[#eae9e9]/80">{Math.round(stock.factors.trades1m)}</td>
+                      <td className="p-3 text-right font-mono text-[#eae9e9]/80">{Math.round(stock.factors.trades2m)}</td>
+                      <td className="p-3 text-right font-mono text-[#eae9e9]/80">{formatNumber(stock.factors.vol1m / 1000, 0)}k</td>
+                      <td className="p-3 text-right font-mono text-[#eae9e9]/80">{formatNumber(stock.factors.vol2m / 1000, 0)}k</td>
+                      <td className="p-3 text-right font-mono text-[#eae9e9]/80">{formatNumber(stock.factors.changeOpen)}%</td>
+                      <td className="p-3 text-right font-mono text-[#eae9e9]/80">{stock.factors.cons1m}</td>
+                      <td className="p-3 text-right font-mono text-[#eae9e9]/80">{formatNumber(stock.factors.dailyVol / 1000000, 1)}M</td>
+                    </tr>
+                    <tr className="border-b border-[#2a2820]/50 bg-[#0f0e0a]/50">
+                      <td colSpan={17} className="p-2 pl-16">
+                        <div className="h-24 w-full border border-[#2a2820] rounded bg-[#14130e] p-1">
+                          <StockChart ticker={stock.symbol} height={90} />
+                        </div>
+                      </td>
+                    </tr>
+                  </React.Fragment>
                 ))}
                 {scoredStocks.length === 0 && (
                   <tr>

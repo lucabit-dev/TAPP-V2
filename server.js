@@ -4473,6 +4473,57 @@ app.get('/api/stock/:symbol', async (req, res) => {
   }
 });
 
+// Get historical 1-minute candles for a symbol
+app.get('/api/history/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const limit = parseInt(req.query.limit) || 60; // Default to last 60 candles (1 hour)
+    
+    // Calculate date range (last 24 hours to ensure we get enough data)
+    const to = new Date();
+    const from = new Date(to.getTime() - (24 * 60 * 60 * 1000));
+    
+    const fromStr = from.toISOString().split('T')[0];
+    const toStr = to.toISOString().split('T')[0];
+    
+    try {
+      // Use extended hours to show pre/post market if available
+      // Using fetchExtendedHoursCandles which handles the logic nicely
+      const result = await polygonService.fetchExtendedHoursCandles(symbol, 1, true, 2); // 2 days back to be safe
+      
+      let candles = result.candles || [];
+      
+      // If we have more than limit, take the last 'limit' candles
+      if (candles.length > limit) {
+        candles = candles.slice(-limit);
+      }
+      
+      res.json({
+        success: true,
+        data: candles
+      });
+    } catch (error) {
+      console.error(`[History API] Error fetching history for ${symbol}:`, error.message);
+      // Fallback to basic fetch if extended fails
+      try {
+        const candles = await polygonService.fetch1MinuteCandles(symbol, fromStr, toStr);
+        const limitedCandles = candles.slice(-limit);
+        res.json({
+          success: true,
+          data: limitedCandles
+        });
+      } catch (fallbackError) {
+        throw new Error(`Failed to fetch history: ${fallbackError.message}`);
+      }
+    }
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 // ============================================
 // MACD/EMA Verification System
 // ============================================
