@@ -5,34 +5,7 @@ interface DXChartWidgetProps {
   onClose?: () => void;
 }
 
-// Simple deterministic data generator
-const generateData = (symbol: string, count = 500) => {
-  const data = [];
-  const end = Date.now();
-  // Seed random based on symbol string
-  let seed = symbol.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
-  const rnd = () => {
-    const x = Math.sin(seed++) * 10000;
-    return x - Math.floor(x);
-  };
-
-  let price = 100 + (rnd() * 100); // Base price varies by symbol
-  
-  for (let i = count; i >= 0; i--) {
-    const time = end - (i * 60 * 1000); // 1m candles
-    const volatility = price * 0.005;
-    const open = price;
-    const change = (rnd() - 0.5) * volatility;
-    const close = price + change;
-    const high = Math.max(open, close) + rnd() * volatility * 0.5;
-    const low = Math.min(open, close) - rnd() * volatility * 0.5;
-    const volume = Math.floor(rnd() * 5000 + 100);
-    
-    data.push({ time, open, high, low, close, volume });
-    price = close;
-  }
-  return data;
-};
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 
 const DXChartWidget: React.FC<DXChartWidgetProps> = ({ symbol }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -41,7 +14,6 @@ const DXChartWidget: React.FC<DXChartWidgetProps> = ({ symbol }) => {
   useEffect(() => {
     let active = true;
     const subscriptions = new Map<string, any>();
-    const lastCandles = new Map<string, any>();
 
     const initWidget = async () => {
       if (!containerRef.current) return;
@@ -54,17 +26,29 @@ const DXChartWidget: React.FC<DXChartWidgetProps> = ({ symbol }) => {
 
       try {
         let DXChart = (window as any).DXChart;
-        let attempts = 0;
         
-        while (!DXChart && attempts < 50) {
-            if (attempts === 0) console.warn("DXChart global not found immediately. Polling...");
-            await new Promise(r => setTimeout(r, 100));
-            DXChart = (window as any).DXChart;
-            attempts++;
+        // Try to load script if not present
+        if (!DXChart) {
+           // Check if script is already added
+           if (!document.querySelector('script[src="/dxcharts/index.js"]')) {
+               const script = document.createElement('script');
+               script.src = '/dxcharts/index.js';
+               script.async = true;
+               document.body.appendChild(script);
+           }
+           
+           // Wait for it to load
+           let attempts = 0;
+           while (!DXChart && attempts < 50) {
+              if (attempts === 0) console.log("Waiting for DXChart script to load...");
+              await new Promise(r => setTimeout(r, 100));
+              DXChart = (window as any).DXChart;
+              attempts++;
+           }
         }
 
         if (!DXChart) {
-            console.error("DXChart global not found after 5 seconds.");
+            console.error("DXChart global not found after waiting.");
             return;
         }
 
@@ -76,51 +60,57 @@ const DXChartWidget: React.FC<DXChartWidgetProps> = ({ symbol }) => {
         }
         
         const chartDataProvider = {
-            requestHistoryData: (reqSymbol: string, aggregation: any, options: any) => {
-                const data = generateData(reqSymbol);
-                if (data.length > 0) {
-                    lastCandles.set(reqSymbol, data[data.length - 1]);
+            requestHistoryData: async (reqSymbol: string, aggregation: any, options: any) => {
+                // Use symbol from props if reqSymbol is suspicious, but reqSymbol should be correct.
+                // Log to debugging
+                console.log(`[DXChart] Requesting history for: ${reqSymbol} (Widget symbol: ${symbol})`);
+                
+                try {
+                    const res = await fetch(`${API_BASE_URL.replace(/\/$/, '')}/history/${reqSymbol}?limit=1000`);
+                    const result = await res.json();
+                    
+                    if (result.success && Array.isArray(result.data)) {
+                         // Transform data to DXChart format
+                         return result.data.map((candle: any) => ({
+                             time: new Date(candle.timestamp).getTime(),
+                             open: candle.open,
+                             high: candle.high,
+                             low: candle.low,
+                             close: candle.close,
+                             volume: candle.volume
+                         }));
+                    }
+                    return [];
+                } catch (err) {
+                    console.error("Error fetching history:", err);
+                    return [];
                 }
-                return Promise.resolve(data);
             },
             subscribeCandles: (subSymbol: string, aggregation: any, subscriptionId: string, callback: any) => {
-                const interval = setInterval(() => {
+                console.log(`[DXChart] Subscribing candles for: ${subSymbol}`);
+                // Poll for updates every 5 seconds (simulating real-time)
+                const interval = setInterval(async () => {
                     if (!active) return;
-                    
-                    let lastCandle = lastCandles.get(subSymbol);
-                    if (!lastCandle) return;
-
-                    const now = Date.now();
-                    // Assuming 1m aggregation for simplicity in this mock
-                    const candlePeriod = 60 * 1000; 
-                    const currentCandleStart = Math.floor(now / candlePeriod) * candlePeriod;
-                    
-                    let newCandle = { ...lastCandle };
-                    
-                    const volatility = lastCandle.close * 0.0005;
-                    const change = (Math.random() - 0.5) * volatility;
-                    
-                    if (lastCandle.time < currentCandleStart) {
-                        // Start new candle
-                        newCandle = {
-                            time: currentCandleStart,
-                            open: lastCandle.close,
-                            close: lastCandle.close + change,
-                            high: Math.max(lastCandle.close, lastCandle.close + change),
-                            low: Math.min(lastCandle.close, lastCandle.close + change),
-                            volume: Math.floor(Math.random() * 100)
-                        };
-                    } else {
-                        // Update existing candle
-                        newCandle.close += change;
-                        newCandle.high = Math.max(newCandle.high, newCandle.close);
-                        newCandle.low = Math.min(newCandle.low, newCandle.close);
-                        newCandle.volume += Math.floor(Math.random() * 10);
+                    try {
+                        const res = await fetch(`${API_BASE_URL.replace(/\/$/, '')}/history/${subSymbol}?limit=5`);
+                        const result = await res.json();
+                        
+                        if (result.success && Array.isArray(result.data) && result.data.length > 0) {
+                            const lastCandle = result.data[result.data.length - 1];
+                            const candle = {
+                                 time: new Date(lastCandle.timestamp).getTime(),
+                                 open: lastCandle.open,
+                                 high: lastCandle.high,
+                                 low: lastCandle.low,
+                                 close: lastCandle.close,
+                                 volume: lastCandle.volume
+                             };
+                             callback([candle]);
+                        }
+                    } catch (err) {
+                        console.error("Error polling candle:", err);
                     }
-                    
-                    lastCandles.set(subSymbol, newCandle);
-                    callback([newCandle]);
-                }, 1000); // Update every second
+                }, 5000);
                 
                 subscriptions.set(subscriptionId, interval);
             },
@@ -131,12 +121,8 @@ const DXChartWidget: React.FC<DXChartWidgetProps> = ({ symbol }) => {
                     subscriptions.delete(subscriptionId);
                 }
             },
-            subscribeServiceData: (symbol: string, callback: any) => {
-                // Optional: Send periodic updates if needed
-            },
-            unsubscribeServiceData: (symbol: string) => {
-                // Optional cleanup
-            }
+            subscribeServiceData: (symbol: string, callback: any) => {},
+            unsubscribeServiceData: (symbol: string) => {}
         };
 
         const providers = {
@@ -150,6 +136,10 @@ const DXChartWidget: React.FC<DXChartWidgetProps> = ({ symbol }) => {
           chartTheme: 'dark', 
           width: containerRef.current.clientWidth,
           height: containerRef.current.clientHeight,
+          // Minimalist config for small views (optional, DXChart usually handles this via config file but we pass basic override)
+          settings: {
+              // We might want to disable some UI elements if it's too small
+          }
         });
 
         if (active) {

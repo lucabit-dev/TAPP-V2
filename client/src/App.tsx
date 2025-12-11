@@ -122,7 +122,7 @@ function App() {
   const [newValidAlertsCount, setNewValidAlertsCount] = useState(0);
   const [conditionStats, setConditionStats] = useState<any>(null);
   const [showStats, setShowStats] = useState(false);
-  const [selectedTab, setSelectedTab] = useState<'all' | 'valid' | 'filtered' | 'dashboard' | 'config-float' | 'listas-float-raw' | 'manual' | 'manual-config' | 'manual-non-qualified' | 'buy-list' | 'pnl' | 'orders' | 'stoplimit'>('listas-float-raw');
+  const [selectedTab, setSelectedTab] = useState<'all' | 'valid' | 'filtered' | 'dashboard' | 'config-float' | 'listas-float-raw' | 'manual' | 'manual-config' | 'manual-non-qualified' | 'buy-list' | 'pnl' | 'orders' | 'stoplimit'>('manual');
   const [alertsCollapsed, setAlertsCollapsed] = useState(true); // Start collapsed
   const [listsCollapsed, setListsCollapsed] = useState(false); // Start expanded by default for Lists
   const [manualCollapsed, setManualCollapsed] = useState(false); // Start expanded by default for Manual
@@ -596,7 +596,7 @@ function App() {
                   <span>Logout</span>
                 </button>
                 {/* Alerts group - Collapsible */}
-                <div className="flex items-center space-x-1">
+                {/* <div className="flex items-center space-x-1">
                   <button
                     onClick={() => setAlertsCollapsed(!alertsCollapsed)}
                     className="flex items-center space-x-1 px-2 py-1 text-xs opacity-60 hover:opacity-100 transition-colors"
@@ -635,7 +635,7 @@ function App() {
                       </span>
                     </button>
                   ))}
-                </div>
+                </div> */}
 
                 {/* Lists group */}
                 <div className="flex items-center space-x-1">
@@ -656,7 +656,7 @@ function App() {
                   </button>
                   {!listsCollapsed && [ 
                     { key: 'listas-float-raw', label: 'Listas FLOAT (RAW)', count: 0 },
-                    { key: 'config-float', label: 'Config FLOAT', count: 0 },
+                    /* { key: 'config-float', label: 'Config FLOAT', count: 0 }, */
                     { key: 'buy-list', label: 'Buy List', count: 0 },
                     { key: 'orders', label: 'Orders', count: 0 },
                   ].map(tab => (

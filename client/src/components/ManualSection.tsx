@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../auth/AuthContext';
-import DXChartWidget from './DXChartWidget';
-import StockChart from './StockChart';
+import NotificationContainer from './NotificationContainer';
+import type { NotificationProps } from './Notification';
 
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
 
 interface IndicatorData {
@@ -70,6 +71,7 @@ interface Props {
 }
 
 const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
+  const { fetchWithAuth } = useAuth();
   const [manualList, setManualList] = useState<{
     qualified: ScoredStock[];
     nonQualified: NonQualifiedStock[];
@@ -78,8 +80,30 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
 
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'connecting'>('disconnected');
   const [isInitialLoad, setIsInitialLoad] = useState(true);
-  const [selectedStock, setSelectedStock] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+
+  // Buy functionality state
+  const [buysEnabled, setBuysEnabled] = useState(false);
+  const [isTogglingBuys, setIsTogglingBuys] = useState(false);
+  const [buyingSymbols, setBuyingSymbols] = useState<Set<string>>(new Set());
+  const [buyStatuses, setBuyStatuses] = useState<Record<string, 'success' | 'error' | null>>({});
+  const [sellingSymbols, setSellingSymbols] = useState<Set<string>>(new Set());
+  const [sellStatuses, setSellStatuses] = useState<Record<string, 'success' | 'error' | null>>({});
+  const [notifications, setNotifications] = useState<NotificationProps[]>([]);
+
+  useEffect(() => {
+    // Initial load of buys enabled status
+    const loadBuysStatus = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/buys/enabled`);
+        const data = await res.json();
+        if (data.success) setBuysEnabled(Boolean(data.data?.enabled));
+      } catch (e) {
+        console.error("Failed to load buys status", e);
+      }
+    };
+    loadBuysStatus();
+  }, []);
 
   useEffect(() => {
     const connect = () => {
@@ -121,6 +145,198 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
 
   const formatNumber = (num: number, decimals = 2) => num.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 
+  const addNotification = (message: string, type: 'success' | 'error' | 'warning' | 'info' = 'info', duration?: number) => {
+    const id = Date.now().toString() + Math.random().toString(36).substr(2, 9);
+    setNotifications(prev => [...prev, { id, message, type, duration, onClose: () => {} }]);
+  };
+
+  const removeNotification = (id: string) => {
+    setNotifications(prev => prev.filter(n => n.id !== id));
+  };
+
+  const toggleBuys = async () => {
+    if (isTogglingBuys) return;
+    setIsTogglingBuys(true);
+    try {
+      const resp = await fetch(`${API_BASE_URL}/buys/enabled`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !buysEnabled })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok && data?.success) {
+        setBuysEnabled(Boolean(data.data?.enabled));
+      }
+    } catch {
+    } finally {
+      setIsTogglingBuys(false);
+    }
+  };
+
+  const handleBuyClick = async (symbol: string | null | undefined) => {
+    if (!symbol) return;
+    
+    const cleanSymbol = String(symbol).trim().toUpperCase();
+    if (buyingSymbols.has(cleanSymbol)) return; // Prevent duplicate clicks
+    
+    setBuyingSymbols(prev => new Set(prev).add(cleanSymbol));
+    setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: null }));
+    
+    try {
+      const resp = await fetchWithAuth(`${API_BASE_URL}/buys/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: cleanSymbol })
+      });
+      
+      if (!resp.ok) {
+        // HTTP error (500, etc) - try to get error message
+        const errorData = await resp.json().catch(() => ({ error: `HTTP ${resp.status}: ${resp.statusText}` }));
+        const errorMsg = errorData.error || `HTTP ${resp.status}`;
+        addNotification(`Failed to buy ${cleanSymbol}: ${errorMsg}`, 'error');
+        setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'error' }));
+        setTimeout(() => {
+          setBuyStatuses(prev => {
+            const next = { ...prev };
+            delete next[cleanSymbol];
+            return next;
+          });
+        }, 3000);
+        return;
+      }
+      
+      const data = await resp.json().catch(() => ({}));
+      
+      if (data?.success) {
+        const quantity = data.data?.quantity || 'N/A';
+        const limitPrice = data.data?.limitPrice ? `$${parseFloat(data.data.limitPrice).toFixed(2)}` : 'N/A';
+        console.log(`✅ Buy signal sent for ${cleanSymbol}:`, data.data?.notifyStatus);
+        addNotification(`Buy order sent successfully for ${quantity} ${cleanSymbol} at ${limitPrice}`, 'success');
+        setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'success' }));
+        // Clear status after 3 seconds
+        setTimeout(() => {
+          setBuyStatuses(prev => {
+            const next = { ...prev };
+            delete next[cleanSymbol];
+            return next;
+          });
+        }, 3000);
+      } else {
+        const errorMsg = data.error || data.data?.notifyStatus || 'Unknown error';
+        console.error(`❌ Failed to send buy signal for ${cleanSymbol}:`, errorMsg);
+        addNotification(`Failed to buy ${cleanSymbol}: ${errorMsg}`, 'error');
+        setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'error' }));
+        setTimeout(() => {
+          setBuyStatuses(prev => {
+            const next = { ...prev };
+            delete next[cleanSymbol];
+            return next;
+          });
+        }, 3000);
+      }
+    } catch (error: any) {
+      const errorMsg = error.message || 'Unknown error';
+      console.error(`❌ Error sending buy signal for ${cleanSymbol}:`, error);
+      addNotification(`Error buying ${cleanSymbol}: ${errorMsg}`, 'error');
+      setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'error' }));
+      setTimeout(() => {
+        setBuyStatuses(prev => {
+          const next = { ...prev };
+          delete next[cleanSymbol];
+          return next;
+        });
+      }, 3000);
+    } finally {
+      setBuyingSymbols(prev => {
+        const next = new Set(prev);
+        next.delete(cleanSymbol);
+        return next;
+      });
+    }
+  };
+
+  const handleSellClick = async (symbol: string | null | undefined) => {
+    if (!symbol) return;
+    
+    const cleanSymbol = String(symbol).trim().toUpperCase();
+    if (sellingSymbols.has(cleanSymbol)) return; // Prevent duplicate clicks
+    
+    setSellingSymbols(prev => new Set(prev).add(cleanSymbol));
+    setSellStatuses(prev => ({ ...prev, [cleanSymbol]: null }));
+    
+    try {
+      const resp = await fetchWithAuth(`${API_BASE_URL}/sells/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: cleanSymbol })
+      });
+      
+      if (!resp.ok) {
+        // HTTP error (500, etc) - try to get error message
+        const errorData = await resp.json().catch(() => ({ error: `HTTP ${resp.status}: ${resp.statusText}` }));
+        const errorMsg = errorData.error || `HTTP ${resp.status}`;
+        addNotification(`Failed to sell ${cleanSymbol}: ${errorMsg}`, 'error');
+        setSellStatuses(prev => ({ ...prev, [cleanSymbol]: 'error' }));
+        setTimeout(() => {
+          setSellStatuses(prev => {
+            const next = { ...prev };
+            delete next[cleanSymbol];
+            return next;
+          });
+        }, 3000);
+        return;
+      }
+      
+      const data = await resp.json().catch(() => ({}));
+      
+      if (data?.success) {
+        const quantity = data.data?.quantity || 'N/A';
+        const limitPrice = data.data?.limitPrice ? `$${parseFloat(data.data.limitPrice).toFixed(2)}` : 'N/A';
+        console.log(`✅ Sell signal sent for ${cleanSymbol}:`, data.data?.notifyStatus);
+        addNotification(`Sell order sent successfully for ${quantity} ${cleanSymbol} at ${limitPrice}`, 'success');
+        setSellStatuses(prev => ({ ...prev, [cleanSymbol]: 'success' }));
+        // Clear status after 3 seconds
+        setTimeout(() => {
+          setSellStatuses(prev => {
+            const next = { ...prev };
+            delete next[cleanSymbol];
+            return next;
+          });
+        }, 3000);
+      } else {
+        const errorMsg = data.error || data.data?.notifyStatus || 'Unknown error';
+        console.error(`❌ Failed to send sell signal for ${cleanSymbol}:`, errorMsg);
+        addNotification(`Failed to sell ${cleanSymbol}: ${errorMsg}`, 'error');
+        setSellStatuses(prev => ({ ...prev, [cleanSymbol]: 'error' }));
+        setTimeout(() => {
+          setSellStatuses(prev => {
+            const next = { ...prev };
+            delete next[cleanSymbol];
+            return next;
+          });
+        }, 3000);
+      }
+    } catch (error: any) {
+      const errorMsg = error.message || 'Unknown error';
+      console.error(`❌ Error sending sell signal for ${cleanSymbol}:`, error);
+      addNotification(`Error selling ${cleanSymbol}: ${errorMsg}`, 'error');
+      setSellStatuses(prev => ({ ...prev, [cleanSymbol]: 'error' }));
+      setTimeout(() => {
+        setSellStatuses(prev => {
+          const next = { ...prev };
+          delete next[cleanSymbol];
+          return next;
+        });
+      }, 3000);
+    } finally {
+      setSellingSymbols(prev => {
+        const next = new Set(prev);
+        next.delete(cleanSymbol);
+        return next;
+      });
+    }
+  };
+
   const { qualified: scoredStocks, nonQualified, analyzing } = manualList;
   const poolSize = scoredStocks.length + nonQualified.length + analyzing.length;
   
@@ -150,6 +366,8 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
 
   return (
     <div className="h-full flex flex-col bg-[#14130e] text-[#eae9e9] p-4 overflow-hidden relative">
+      <NotificationContainer notifications={notifications} onRemove={removeNotification} />
+
       <div className="flex justify-between items-center mb-4 border-b border-[#2a2820] pb-4">
         <div>
           <h2 className="text-xl font-bold text-[#eae9e9]">{title}</h2>
@@ -160,6 +378,15 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
           </p>
         </div>
         <div className="flex items-center space-x-4">
+          {viewMode === 'qualified' && (
+            <button
+              className={`px-3 py-1 rounded-sm text-[11px] font-bold transition-all ${isTogglingBuys ? 'bg-[#2a2820] cursor-not-allowed opacity-50' : (buysEnabled ? 'bg-[#22c55e] text-[#14130e] hover:bg-[#16a34a] shadow-[0_0_8px_rgba(34,197,94,0.3)]' : 'bg-[#f87171] text-[#14130e] hover:bg-[#ef4444] shadow-[0_0_8px_rgba(248,113,113,0.3)]')}`}
+              onClick={toggleBuys}
+              disabled={isTogglingBuys}
+              title={buysEnabled ? 'Disable automatic buys' : 'Enable automatic buys'}
+            >{isTogglingBuys ? '...' : (buysEnabled ? 'Buys: ON' : 'Buys: OFF')}</button>
+          )}
+
           <div className="flex items-center space-x-2">
             <div className={`w-2 h-2 rounded-full ${connectionStatus === 'connected' ? 'bg-[#22c55e]' : 'bg-[#f87171]'}`}></div>
             <span className="text-xs text-[#808080] uppercase">{connectionStatus}</span>
@@ -182,7 +409,6 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                 <tr>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium">Rank</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium">Symbol</th>
-                  <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-center">Chart</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-right">Score</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-right">Price</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-center">MACD 1m+</th>
@@ -198,6 +424,7 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-right" title="Open Chg (8%)">Open %</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-right" title="Cons 1m (5%)">Cons</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-right" title="Daily Vol (5%)">Day Vol</th>
+                  <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-center">Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -206,14 +433,6 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                     <tr className="hover:bg-[#1e1d17] transition-colors border-t border-[#2a2820]/50">
                       <td className="p-3 font-bold text-[#eae9e9] w-12 text-center bg-[#1a1915]/50">{idx + 1}</td>
                       <td className="p-3 font-bold text-[#4ade80]">{stock.symbol}</td>
-                      <td className="p-3 text-center">
-                        <button 
-                          onClick={() => setSelectedStock(stock.symbol)}
-                          className="px-2 py-1 bg-[#2a2820] hover:bg-[#3a3830] text-[#eae9e9] text-xs rounded border border-[#404040] transition-colors"
-                        >
-                          Show
-                        </button>
-                      </td>
                       <td className="p-3 text-right font-mono font-bold text-[#facc15]">{stock.score.toFixed(1)}</td>
                       <td className="p-3 text-right font-mono">${formatNumber(stock.price)}</td>
                       
@@ -238,11 +457,97 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                       <td className="p-3 text-right font-mono text-[#eae9e9]/80">{formatNumber(stock.factors.changeOpen)}%</td>
                       <td className="p-3 text-right font-mono text-[#eae9e9]/80">{stock.factors.cons1m}</td>
                       <td className="p-3 text-right font-mono text-[#eae9e9]/80">{formatNumber(stock.factors.dailyVol / 1000000, 1)}M</td>
-                    </tr>
-                    <tr className="border-b border-[#2a2820]/50 bg-[#0f0e0a]/50">
-                      <td colSpan={17} className="p-2 pl-16">
-                        <div className="h-24 w-full border border-[#2a2820] rounded bg-[#14130e] p-1">
-                          <StockChart ticker={stock.symbol} height={90} />
+                      <td className="p-3 text-center">
+                        <div className="flex items-center justify-center space-x-1">
+                          {(() => {
+                            const symbolVal = stock.symbol;
+                            const cleanSymbol = String(symbolVal).trim().toUpperCase();
+                            const isBuying = buyingSymbols.has(cleanSymbol);
+                            const status = buyStatuses[cleanSymbol];
+                            const isDisabled = isBuying;
+                            
+                            let buttonClass = 'px-2 py-0.5 text-[11px] font-semibold rounded transition-colors';
+                            let buttonText = 'BUY';
+                            let buttonTitle = `Send buy signal for ${symbolVal}`;
+                            
+                            if (isBuying) {
+                              buttonClass += ' bg-[#2a2820] cursor-not-allowed opacity-50';
+                              buttonText = '...';
+                              buttonTitle = `Sending buy signal for ${symbolVal}...`;
+                            } else if (status === 'success') {
+                              buttonClass += ' bg-[#4ade80] text-[#14130e]';
+                              buttonText = '✓';
+                              buttonTitle = `Buy signal sent successfully for ${symbolVal}`;
+                            } else if (status === 'error') {
+                              buttonClass += ' bg-[#f87171] text-[#14130e]';
+                              buttonText = '✗';
+                              buttonTitle = `Failed to send buy signal for ${symbolVal}`;
+                            } else {
+                              // Default style for MANUAL section
+                              buttonClass += ' bg-[#4ade80] text-[#14130e] hover:bg-[#22c55e]';
+                            }
+                            
+                            return (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (!isDisabled) {
+                                    handleBuyClick(symbolVal);
+                                  }
+                                }}
+                                disabled={isDisabled}
+                                className={buttonClass}
+                                title={buttonTitle}
+                              >
+                                {buttonText}
+                              </button>
+                            );
+                          })()}
+                          
+                          {(() => {
+                            const symbolVal = stock.symbol;
+                            const cleanSymbol = String(symbolVal).trim().toUpperCase();
+                            const isSelling = sellingSymbols.has(cleanSymbol);
+                            const status = sellStatuses[cleanSymbol];
+                            const isDisabled = isSelling;
+                            
+                            let buttonClass = 'px-2 py-0.5 text-[11px] font-semibold rounded transition-colors';
+                            let buttonText = 'SELL';
+                            let buttonTitle = `Send sell signal for ${symbolVal}`;
+                            
+                            if (isSelling) {
+                              buttonClass += ' bg-[#2a2820] cursor-not-allowed opacity-50';
+                              buttonText = '...';
+                              buttonTitle = `Sending sell signal for ${symbolVal}...`;
+                            } else if (status === 'success') {
+                              buttonClass += ' bg-[#f87171] text-[#14130e]';
+                              buttonText = '✓';
+                              buttonTitle = `Sell signal sent successfully for ${symbolVal}`;
+                            } else if (status === 'error') {
+                              buttonClass += ' bg-[#f87171] text-[#14130e]';
+                              buttonText = '✗';
+                              buttonTitle = `Failed to send sell signal for ${symbolVal}`;
+                            } else {
+                              // Default style for SELL button
+                              buttonClass += ' bg-[#f87171] text-[#14130e] hover:bg-[#ef4444]';
+                            }
+                            
+                            return (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (!isDisabled) {
+                                    handleSellClick(symbolVal);
+                                  }
+                                }}
+                                disabled={isDisabled}
+                                className={buttonClass}
+                                title={buttonTitle}
+                              >
+                                {buttonText}
+                              </button>
+                            );
+                          })()}
                         </div>
                       </td>
                     </tr>
@@ -250,7 +555,7 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                 ))}
                 {scoredStocks.length === 0 && (
                   <tr>
-                    <td colSpan={17} className="p-8 text-center text-[#808080]">
+                    <td colSpan={18} className="p-8 text-center text-[#808080]">
                       {analyzing.length > 0 ? (
                         <div className="flex flex-col items-center justify-center py-4 space-y-3">
                           <div className="w-6 h-6 border-2 border-[#2a2820] border-t-[#4ade80] rounded-full animate-spin"></div>
@@ -280,7 +585,6 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
               <thead className="bg-[#1a1915]">
                 <tr>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium">Symbol</th>
-                  <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-center">Chart</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium">Disqualification Reasons</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-right">Price</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-right">2m %</th>
@@ -292,14 +596,6 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                 {nonQualified.map((stock) => (
                   <tr key={stock.symbol} className="hover:bg-[#1e1d17] transition-colors border-b border-[#2a2820]/50 last:border-0 opacity-75 hover:opacity-100">
                     <td className="p-3 font-bold text-[#f87171]">{stock.symbol}</td>
-                    <td className="p-3 text-center">
-                      <button 
-                        onClick={() => setSelectedStock(stock.symbol)}
-                        className="px-2 py-1 bg-[#2a2820] hover:bg-[#3a3830] text-[#eae9e9] text-xs rounded border border-[#404040] transition-colors"
-                      >
-                        Show
-                      </button>
-                    </td>
                     <td className="p-3">
                       <div className="flex flex-wrap gap-1">
                         {stock.reasons.map((reason, i) => (
@@ -317,7 +613,7 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                 ))}
                 {nonQualified.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="p-8 text-center text-[#808080]">
+                    <td colSpan={6} className="p-8 text-center text-[#808080]">
                       {analyzing.length > 0 ? (
                         <div className="flex flex-col items-center justify-center py-4 space-y-3">
                           <div className="w-6 h-6 border-2 border-[#2a2820] border-t-[#f87171] rounded-full animate-spin"></div>
@@ -334,30 +630,6 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
           </div>
         )}
       </div>
-
-      {/* CHART MODAL */}
-      {selectedStock && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-          <div className="bg-[#1a1915] border border-[#2a2820] rounded-lg w-full max-w-6xl h-[80vh] flex flex-col shadow-2xl">
-            <div className="flex justify-between items-center p-3 border-b border-[#2a2820] bg-[#14130e]">
-              <h3 className="font-bold text-[#eae9e9] text-lg flex items-center">
-                <span className="text-[#eab308] mr-2">{selectedStock}</span> Chart
-              </h3>
-              <button 
-                onClick={() => setSelectedStock(null)}
-                className="p-1 hover:bg-[#2a2820] rounded text-[#808080] hover:text-[#eae9e9] transition-colors"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            <div className="flex-1 overflow-hidden relative p-1 bg-[#0f0e0a]">
-              <DXChartWidget symbol={selectedStock} />
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

@@ -3222,10 +3222,21 @@ app.post('/api/buys/test', async (req, res) => {
       });
     }
     
+    // CRITICAL: Ensure only one active sell order exists for this position
+    // Cancel any existing sell orders (StopLimit or Limit) before placing the new one
+    console.log(`🧹 Manual Sell: Checking for existing sell orders for ${symbol}...`);
+    try {
+      if (stopLimitService) {
+        await stopLimitService.deleteExistingSellOrders(symbol);
+        // Small buffer to allow cancellation to propagate if needed
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    } catch (cleanupErr) {
+      console.warn(`⚠️ Manual Sell: Error cleaning up existing orders for ${symbol}:`, cleanupErr.message);
+      // Continue, but warn - better to try placing the sell than fail completely
+    }
+
     // Calculate quantity based on price ranges
-    // 2002 if price is between 0 and 5
-    // 1001 if price is between 5 and 10
-    // 757 if price is between 10 and 12
     let quantity;
     if (currentPrice > 0 && currentPrice <= 5) {
       quantity = 2002;
@@ -3397,6 +3408,147 @@ app.post('/api/buys/test', async (req, res) => {
     });
   } catch (e) {
     console.error(`❌ Error in manual buy for ${req.body?.symbol}:`, e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// Test external sell webhook endpoint
+app.post('/api/sells/test', async (req, res) => {
+  try {
+    const symbol = (req.body?.symbol || '').toString().trim().toUpperCase();
+    if (!symbol) {
+      return res.status(400).json({ success: false, error: 'Missing symbol' });
+    }
+    
+    console.log(`🛒 Manual sell signal for ${symbol}`);
+    
+    // Get current stock price using Polygon service
+    let currentPrice = null;
+    try {
+      currentPrice = await polygonService.getCurrentPrice(symbol);
+      if (!currentPrice || currentPrice <= 0) {
+        console.warn(`⚠️ Could not get valid price for ${symbol}, trying lastClose from analysis...`);
+        const analysis = await analyzeSymbol(symbol);
+        currentPrice = analysis?.lastClose || null;
+      }
+    } catch (priceErr) {
+      console.error(`Error getting price for ${symbol}:`, priceErr.message);
+      try {
+        const analysis = await analyzeSymbol(symbol);
+        currentPrice = analysis?.lastClose || null;
+      } catch (analyzeErr) {
+        console.error(`Error analyzing ${symbol} for price:`, analyzeErr.message);
+      }
+    }
+    
+    if (!currentPrice || currentPrice <= 0) {
+      return res.status(400).json({ 
+        success: false, 
+        error: `Could not determine current price for ${symbol}. Please try again.` 
+      });
+    }
+    
+    // Calculate quantity based on price ranges
+    let quantity;
+    if (currentPrice > 0 && currentPrice <= 5) {
+      quantity = 2002;
+    } else if (currentPrice > 5 && currentPrice <= 10) {
+      quantity = 1001;
+    } else if (currentPrice > 10 && currentPrice <= 12) {
+      quantity = 757;
+    } else {
+      return res.status(400).json({ 
+        success: false, 
+        error: `Price ${currentPrice} is outside supported range (0-12). Only prices between 0-12 are supported.` 
+      });
+    }
+    
+    const orderBody = {
+      symbol: symbol,
+      side: 'SELL',
+      order_type: 'Limit', 
+      quantity: quantity,
+      limit_price: currentPrice
+    };
+    
+    console.log(`📤 Sending sell order: ${quantity} ${symbol} at LIMIT price ${currentPrice}`);
+    
+    let notifyStatus = '';
+    let responseData = null;
+    let errorMessage = null;
+    
+    try {
+      const resp = await fetch('https://sections-bot.inbitme.com/order', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(orderBody)
+      });
+      
+      notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
+      
+      let responseText = '';
+      try {
+        responseText = await resp.text();
+        if (responseText) {
+          try {
+            responseData = JSON.parse(responseText);
+          } catch {
+            responseData = responseText;
+          }
+        }
+      } catch (textErr) {
+        console.error(`⚠️ Could not read response body:`, textErr.message);
+      }
+      
+      if (resp.ok) {
+        console.log(`✅ Sell order sent for ${symbol}: ${notifyStatus}`, responseData ? `Response: ${JSON.stringify(responseData)}` : '');
+      } else {
+        errorMessage = extractErrorMessage(responseData, responseText, resp.status, resp.statusText);
+        console.error(`❌ Error selling ${symbol}:`, {
+          status: notifyStatus,
+          response: responseData,
+          body: responseText,
+          extractedError: errorMessage
+        });
+      }
+    } catch (err) {
+      notifyStatus = `ERROR: ${err.message}`;
+      errorMessage = err.message;
+      console.error(`❌ Network/Parse error selling ${symbol}:`, {
+        message: err.message,
+        stack: err.stack
+      });
+    }
+    
+    const isSuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
+    
+    if (notifyStatus.startsWith('ERROR:')) {
+      return res.status(500).json({
+        success: false,
+        error: errorMessage || `Failed to sell ${symbol}: Network or parsing error`,
+        data: { symbol, quantity, orderType: 'LIMIT', limitPrice: currentPrice, notifyStatus, response: responseData }
+      });
+    }
+    
+    console.log(`✅ Manual sell executed for ${symbol}`);
+    
+    return res.status(200).json({ 
+      success: isSuccess, 
+      error: !isSuccess ? (errorMessage || `Failed to sell ${symbol}`) : undefined,
+      data: { 
+        symbol, 
+        quantity, 
+        orderType: 'LIMIT', 
+        limitPrice: currentPrice, 
+        notifyStatus, 
+        response: responseData
+      } 
+    });
+  } catch (e) {
+    console.error(`❌ Error in manual sell for ${req.body?.symbol}:`, e);
     res.status(500).json({ success: false, error: e.message });
   }
 });

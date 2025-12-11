@@ -1,6 +1,6 @@
 const fetch = require('node-fetch');
 
-const ACTIVE_ORDER_STATUSES = new Set(['ACK', 'DON', 'REC', 'QUE', 'QUEUED']);
+const ACTIVE_ORDER_STATUSES = new Set(['ACK', 'DON', 'REC', 'QUE', 'QUEUED', 'OPEN', 'NEW', 'PENDING', 'PARTIALLY_FILLED', 'PND']);
 const NON_ACTIVE_STATUSES = new Set(['CAN', 'FIL', 'EXP', 'OUT', 'REJ', 'FLL']);
 
 class StopLimitService {
@@ -10,7 +10,7 @@ class StopLimitService {
     this.trackedPositions = new Map(); // Map<symbol, PositionState>
     this.soldPositions = new Map(); // Map<symbol, SoldPositionState>
     this.orderWaiters = new Map(); // Map<symbol, Set<OrderWaiter>>
-    this.analysisEnabled = true;
+    this.analysisEnabled = false; // Default to disabled for safety
     this.analysisChangedAt = Date.now();
 
     this.limitOffset = 0.02; // limit price always stays $0.02 below stop (stop_price = limit_price + 0.02)
@@ -1078,6 +1078,25 @@ class StopLimitService {
       // Delete any existing SELL orders (but not the one we're about to create, if any)
       await this.deleteExistingSellOrders(state.symbol, state.orderId);
 
+      // Double-check that no active orders remain after deletion attempt
+      const remainingOrders = this.findActiveSellOrders(state.symbol);
+      const remainingConflicting = remainingOrders.filter(o => o.orderId !== state.orderId);
+      
+      if (remainingConflicting.length > 0) {
+        console.warn(`⚠️ StopLimitService: Aborting initial order creation for ${state.symbol} - ${remainingConflicting.length} conflicting orders still active after deletion attempt.`);
+        // Try one more delete pass for stubborn orders
+        for (const o of remainingConflicting) {
+           await this.deleteOrder(o.orderId);
+        }
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        if (this.findActiveSellOrders(state.symbol).filter(o => o.orderId !== state.orderId).length > 0) {
+           console.error(`❌ StopLimitService: Failed to clear conflicting orders for ${state.symbol}, strictly aborting creation.`);
+           state.pendingCreate = false;
+           return;
+        }
+      }
+
       const body = {
         symbol: state.symbol,
         side: 'SELL',
@@ -1190,6 +1209,15 @@ class StopLimitService {
   async updateStopLimitStage(state, stopOffset, label, stageNumber) {
     if (!this.analysisEnabled) {
       return;
+    }
+
+    // Safety check: ensure we are updating an order that is still active
+    const activeOrder = this.findActiveStopLimitOrder(state.symbol);
+    if (!activeOrder && !state.orderId) {
+       console.warn(`⚠️ StopLimitService: Cannot update stage to ${stageNumber} for ${state.symbol} - no active StopLimit order found.`);
+       // Maybe try to recreate?
+       await this.ensureInitialOrder(state);
+       return;
     }
 
     if (this.isQueuedStatus(state.orderStatus)) {
@@ -1373,6 +1401,21 @@ class StopLimitService {
       const quantity = Math.max(1, Math.round(state.quantity));
       await this.deleteExistingSellOrders(state.symbol);
 
+      // Double-check that no active orders remain after deletion attempt
+      const remainingOrders = this.findActiveSellOrders(state.symbol);
+      if (remainingOrders.length > 0) {
+        console.warn(`⚠️ StopLimitService: Aborting auto-sell for ${state.symbol} - ${remainingOrders.length} conflicting orders still active after deletion attempt.`);
+        // Try one more time to delete specifically these orders
+        for (const o of remainingOrders) {
+           await this.deleteOrder(o.orderId);
+        }
+        // Check again
+        if (this.findActiveSellOrders(state.symbol).length > 0) {
+           console.error(`❌ StopLimitService: Failed to clear orders for auto-sell of ${state.symbol}, aborting to prevent duplicates`);
+           return;
+        }
+      }
+
       const body = {
         symbol: state.symbol,
         side: 'SELL',
@@ -1402,16 +1445,15 @@ class StopLimitService {
       return;
     }
 
-    // Filter out the order we want to exclude (if any) and queued orders
+    // Filter out the order we want to exclude (if any)
     const cancellableOrders = orders.filter(order => {
       if (excludeOrderId && order.orderId === excludeOrderId) {
         return false; // Don't delete the order we're excluding
       }
-      return !this.isQueuedStatus(order.status);
+      return true; // Cancel everything else, including queued orders
     });
 
     if (!cancellableOrders.length) {
-      console.log(`ℹ️ StopLimitService: Existing SELL order(s) for ${symbol} are queued or excluded; keeping pending order in place.`);
       return;
     }
 
@@ -1423,6 +1465,9 @@ class StopLimitService {
         console.error(`❌ StopLimitService: Error deleting order ${orderId} for ${symbol}:`, err);
       }
     }
+    
+    // Wait for deletion to propagate
+    await new Promise(resolve => setTimeout(resolve, 1000));
   }
 
   findActiveSellOrders(symbol) {
@@ -1605,6 +1650,18 @@ class StopLimitService {
   }
 
   async postOrder(body) {
+    // Final safety check: do not create orders if automation is disabled
+    // Exception: Allow 'Market' orders if they are from auto-sell (which checks enabled status before calling)
+    // But for StopLimit creation, strictly enforce enabled status
+    if (!this.analysisEnabled && body.order_type === 'StopLimit') {
+      console.warn(`🛑 StopLimitService: Blocked order creation for ${body.symbol} because automation is disabled`);
+      return {
+        success: false,
+        notifyStatus: 'BLOCKED: Automation Disabled',
+        error: 'Automation is disabled'
+      };
+    }
+
     try {
       const resp = await fetch(`${this.apiBaseUrl}/order`, {
         method: 'POST',
