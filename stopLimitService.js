@@ -69,12 +69,23 @@ class StopLimitService {
     const unrealizedQty = this.parseNumber(position?.UnrealizedProfitLossQty);
     const longShort = (position?.LongShort || '').toUpperCase();
     
+    // CRITICAL: If position is already marked as sold, don't track it
+    if (this.soldPositions.has(symbol)) {
+      console.log(`🛑 StopLimitService: Ignoring position update for ${symbol} - position is already marked as sold`);
+      // Clean up tracking if it exists
+      if (this.trackedPositions.has(symbol)) {
+        this.cleanupPosition(symbol);
+      }
+      return;
+    }
+
     // Debug logging for stage evaluation
     if (unrealizedQty !== null && unrealizedQty !== undefined) {
       console.log(`📊 StopLimitService: ${symbol} position update - unrealizedQty=${unrealizedQty.toFixed(4)}, quantity=${quantity}, avgPrice=${avgPrice?.toFixed(2)}`);
     }
 
     if (!quantity || quantity <= 0) {
+      console.log(`🧹 StopLimitService: Position ${symbol} has quantity ${quantity} - cleaning up tracking`);
       this.cleanupPosition(symbol);
       return;
     }
@@ -642,6 +653,14 @@ class StopLimitService {
   recordSoldPosition(symbol, saleData = {}) {
     if (!symbol) return;
     const normalized = symbol.toUpperCase();
+    
+    // CRITICAL: Immediately remove from tracking when position is sold
+    // This prevents any further order creation attempts for this position
+    if (this.trackedPositions.has(normalized)) {
+      console.log(`🛑 StopLimitService: Position ${normalized} is SOLD - immediately removing from tracking to prevent order creation`);
+      this.cleanupPosition(normalized);
+    }
+    
     const record = {
       symbol: normalized,
       positionId: saleData.positionId || null,
@@ -661,6 +680,7 @@ class StopLimitService {
     };
 
     this.soldPositions.set(normalized, record);
+    console.log(`✅ StopLimitService: Position ${normalized} marked as SOLD and removed from active tracking`);
   }
 
   schedulePostSaleCleanup(symbol) {
@@ -839,9 +859,16 @@ class StopLimitService {
     let issues = 0;
     let cleaned = 0;
 
-    // First pass: Cleanup inactive positions
+    // First pass: Cleanup inactive positions and sold positions
     const symbolsToCleanup = [];
     for (const [symbol, state] of this.trackedPositions.entries()) {
+      // CRITICAL: Check if position is already marked as sold
+      if (this.soldPositions.has(symbol)) {
+        console.log(`🛑 StopLimitService: VALIDATION CLEANUP - Removing ${symbol} - position is already marked as sold`);
+        symbolsToCleanup.push(symbol);
+        continue;
+      }
+      
       if (!this.hasActivePosition(symbol)) {
         symbolsToCleanup.push(symbol);
         continue;
@@ -849,7 +876,7 @@ class StopLimitService {
     }
     
     for (const symbol of symbolsToCleanup) {
-      console.log(`🧹 StopLimitService: VALIDATION CLEANUP - Removing inactive position ${symbol}`);
+      console.log(`🧹 StopLimitService: VALIDATION CLEANUP - Removing inactive/sold position ${symbol}`);
       this.cleanupPosition(symbol);
       cleaned++;
     }
@@ -857,6 +884,14 @@ class StopLimitService {
     // Second pass: Validate orders for remaining positions
     for (const [symbol, state] of this.trackedPositions.entries()) {
       validated++;
+      
+      // CRITICAL: Double-check position is not sold
+      if (this.soldPositions.has(symbol)) {
+        console.log(`🛑 StopLimitService: VALIDATION CLEANUP - Removing ${symbol} - position is already marked as sold`);
+        this.cleanupPosition(symbol);
+        cleaned++;
+        continue;
+      }
       
       // Double-check position is still active (might have closed during validation)
       if (!this.hasActivePosition(symbol)) {
@@ -962,6 +997,20 @@ class StopLimitService {
 
   async ensureInitialOrder(state) {
     if (!this.analysisEnabled) {
+      return;
+    }
+
+    // CRITICAL: Verify position is still active before creating any orders
+    if (!this.hasActivePosition(state.symbol)) {
+      console.log(`🛑 StopLimitService: Aborting order creation for ${state.symbol} - position is no longer active (may have been sold)`);
+      this.cleanupPosition(state.symbol);
+      return;
+    }
+
+    // CRITICAL: Check if position is already marked as sold
+    if (this.soldPositions.has(state.symbol)) {
+      console.log(`🛑 StopLimitService: Aborting order creation for ${state.symbol} - position is already marked as sold`);
+      this.cleanupPosition(state.symbol);
       return;
     }
 
@@ -1160,6 +1209,19 @@ class StopLimitService {
   }
 
   async evaluateAdjustments(state, unrealizedQty) {
+    // CRITICAL: Verify position is still active before evaluating adjustments
+    if (!this.hasActivePosition(state.symbol)) {
+      console.log(`🛑 StopLimitService: Aborting adjustment evaluation for ${state.symbol} - position is no longer active (may have been sold)`);
+      this.cleanupPosition(state.symbol);
+      return;
+    }
+
+    // CRITICAL: Check if position is already marked as sold
+    if (this.soldPositions.has(state.symbol)) {
+      console.log(`🛑 StopLimitService: Aborting adjustment evaluation for ${state.symbol} - position is already marked as sold`);
+      this.cleanupPosition(state.symbol);
+      return;
+    }
     if (!this.analysisEnabled) {
       return;
     }
@@ -1208,6 +1270,20 @@ class StopLimitService {
 
   async updateStopLimitStage(state, stopOffset, label, stageNumber) {
     if (!this.analysisEnabled) {
+      return;
+    }
+
+    // CRITICAL: Verify position is still active before updating order
+    if (!this.hasActivePosition(state.symbol)) {
+      console.log(`🛑 StopLimitService: Aborting stage update for ${state.symbol} - position is no longer active (may have been sold)`);
+      this.cleanupPosition(state.symbol);
+      return;
+    }
+
+    // CRITICAL: Check if position is already marked as sold
+    if (this.soldPositions.has(state.symbol)) {
+      console.log(`🛑 StopLimitService: Aborting stage update for ${state.symbol} - position is already marked as sold`);
+      this.cleanupPosition(state.symbol);
       return;
     }
 
@@ -1328,6 +1404,19 @@ class StopLimitService {
   }
 
   async recreateOrderWithNewPrices(state, stopPrice, limitPrice, stageNumber, label) {
+    // CRITICAL: Verify position is still active before recreating order
+    if (!this.hasActivePosition(state.symbol)) {
+      console.log(`🛑 StopLimitService: Aborting order recreation for ${state.symbol} - position is no longer active (may have been sold)`);
+      this.cleanupPosition(state.symbol);
+      return;
+    }
+
+    // CRITICAL: Check if position is already marked as sold
+    if (this.soldPositions.has(state.symbol)) {
+      console.log(`🛑 StopLimitService: Aborting order recreation for ${state.symbol} - position is already marked as sold`);
+      this.cleanupPosition(state.symbol);
+      return;
+    }
     console.log(`🔄 StopLimitService: Attempting cancel-and-recreate for ${state.symbol} to stage ${stageNumber} (${label})`);
     
     // Delete the existing order first
@@ -1390,6 +1479,20 @@ class StopLimitService {
 
   async executeAutoSell(state) {
     if (!this.analysisEnabled) {
+      return;
+    }
+
+    // CRITICAL: Verify position is still active before executing auto-sell
+    if (!this.hasActivePosition(state.symbol)) {
+      console.log(`🛑 StopLimitService: Aborting auto-sell for ${state.symbol} - position is no longer active (may have been sold)`);
+      this.cleanupPosition(state.symbol);
+      return;
+    }
+
+    // CRITICAL: Check if position is already marked as sold
+    if (this.soldPositions.has(state.symbol)) {
+      console.log(`🛑 StopLimitService: Aborting auto-sell for ${state.symbol} - position is already marked as sold`);
+      this.cleanupPosition(state.symbol);
       return;
     }
 
@@ -1650,6 +1753,30 @@ class StopLimitService {
   }
 
   async postOrder(body) {
+    const symbol = (body.symbol || '').toUpperCase();
+    
+    // CRITICAL: Verify position is still active before creating any order
+    if (symbol && body.order_type === 'StopLimit') {
+      if (!this.hasActivePosition(symbol)) {
+        console.warn(`🛑 StopLimitService: Blocked StopLimit order creation for ${symbol} - position is no longer active (may have been sold)`);
+        return {
+          success: false,
+          notifyStatus: 'BLOCKED: Position Not Active',
+          error: 'Position is no longer active'
+        };
+      }
+      
+      // CRITICAL: Check if position is already marked as sold
+      if (this.soldPositions.has(symbol)) {
+        console.warn(`🛑 StopLimitService: Blocked StopLimit order creation for ${symbol} - position is already marked as sold`);
+        return {
+          success: false,
+          notifyStatus: 'BLOCKED: Position Already Sold',
+          error: 'Position is already sold'
+        };
+      }
+    }
+    
     // Final safety check: do not create orders if automation is disabled
     // Exception: Allow 'Market' orders if they are from auto-sell (which checks enabled status before calling)
     // But for StopLimit creation, strictly enforce enabled status

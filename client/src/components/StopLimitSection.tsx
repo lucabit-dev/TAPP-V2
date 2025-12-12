@@ -117,11 +117,9 @@ const StopLimitSection: React.FC = () => {
   const [lastUpdated, setLastUpdated] = React.useState<number | null>(null);
   const [diagnostics, setDiagnostics] = React.useState<StopLimitDiagnostics | null>(null);
   const [isTogglingAutomation, setIsTogglingAutomation] = React.useState<boolean>(false);
-  const [isEnabled, setIsEnabled] = React.useState<boolean>(false); // Default to disabled as per requirements
   const refreshIntervalRef = React.useRef<number | null>(null);
 
   const fetchStatus = React.useCallback(async () => {
-    if (!isEnabled) return;
     try {
       const response = await fetchWithAuth(`${API_BASE_URL}/stoplimit/status`);
       if (!response.ok) {
@@ -145,27 +143,14 @@ const StopLimitSection: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [fetchWithAuth, isEnabled]);
+  }, [fetchWithAuth]);
 
   React.useEffect(() => {
-    if (!isEnabled) {
-      setLoading(false);
-      setRows([]);
-      return;
-    }
     setLoading(true);
     fetchStatus();
-  }, [fetchStatus, isEnabled]);
+  }, [fetchStatus]);
 
   React.useEffect(() => {
-    if (!isEnabled) {
-      if (refreshIntervalRef.current) {
-        clearInterval(refreshIntervalRef.current);
-        refreshIntervalRef.current = null;
-      }
-      return;
-    }
-
     if (refreshIntervalRef.current) {
       clearInterval(refreshIntervalRef.current);
     }
@@ -180,7 +165,7 @@ const StopLimitSection: React.FC = () => {
         refreshIntervalRef.current = null;
       }
     };
-  }, [fetchStatus, isEnabled]);
+  }, [fetchStatus]);
 
   const toggleAutomation = React.useCallback(async () => {
     if (isTogglingAutomation) return;
@@ -344,61 +329,38 @@ const StopLimitSection: React.FC = () => {
           </div>
           <div className="flex flex-col items-start lg:items-end space-y-2">
             <div className="flex items-center space-x-3">
+              <div className="text-[11px] text-[#eae9e9]/60">
+                Last update: {lastUpdated ? `${formatRelativeTime(lastUpdated)} (${formatTimestamp(lastUpdated)})` : 'N/A'}
+              </div>
+              <div className={`text-[11px] font-semibold ${automationStatusClass}`}>
+                Automation {analysisEnabled ? 'Enabled' : 'Disabled'}
+                {analysisChangedAt ? ` • ${formatRelativeTime(analysisChangedAt)} (${formatTimestamp(analysisChangedAt)})` : ''}
+              </div>
               <button
-                className={`px-3 py-1 rounded-sm text-[11px] font-bold transition-all ${
-                  isEnabled 
-                    ? 'bg-[#22c55e] text-[#14130e] hover:bg-[#16a34a] shadow-[0_0_8px_rgba(34,197,94,0.3)]' 
-                    : 'bg-[#2a2820] text-[#eae9e9] hover:bg-[#3e3e42] border border-[#3e3e42]'
-                }`}
-                onClick={() => setIsEnabled(!isEnabled)}
-                title={isEnabled ? 'Disable StopLimit Monitor' : 'Enable StopLimit Monitor'}
+                onClick={() => fetchStatus()}
+                className="px-3 py-1.5 text-xs font-semibold rounded border border-[#2a2820] text-[#eae9e9]/80 hover:text-[#eae9e9] hover:border-[#eae9e9]/30 transition-colors"
               >
-                {isEnabled ? 'ON' : 'OFF'}
+                Refresh
               </button>
-              
-              {isEnabled && (
-                <>
-                  <div className="text-[11px] text-[#eae9e9]/60">
-                    Last update: {lastUpdated ? `${formatRelativeTime(lastUpdated)} (${formatTimestamp(lastUpdated)})` : 'N/A'}
-                  </div>
-                  <div className={`text-[11px] font-semibold ${automationStatusClass}`}>
-                    Automation {analysisEnabled ? 'Enabled' : 'Disabled'}
-                    {analysisChangedAt ? ` • ${formatRelativeTime(analysisChangedAt)} (${formatTimestamp(analysisChangedAt)})` : ''}
-                  </div>
-                  <button
-                    onClick={() => fetchStatus()}
-                    className="px-3 py-1.5 text-xs font-semibold rounded border border-[#2a2820] text-[#eae9e9]/80 hover:text-[#eae9e9] hover:border-[#eae9e9]/30 transition-colors"
-                  >
-                    Refresh
-                  </button>
-                  <button
-                    onClick={toggleAutomation}
-                    disabled={isTogglingAutomation}
-                    className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors ${automationButtonClass} ${isTogglingAutomation ? 'opacity-60 cursor-not-allowed' : ''}`}
-                  >
-                    {automationButtonLabel}
-                  </button>
-                </>
-              )}
+              <button
+                onClick={toggleAutomation}
+                disabled={isTogglingAutomation}
+                className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors ${automationButtonClass} ${isTogglingAutomation ? 'opacity-60 cursor-not-allowed' : ''}`}
+              >
+                {automationButtonLabel}
+              </button>
             </div>
           </div>
         </div>
       </div>
 
-      {!isEnabled ? (
-        <div className="flex-1 flex items-center justify-center">
-          <div className="text-center">
-            <div className="text-[#808080] text-sm mb-2 uppercase tracking-wider">Stop Limit Monitor Disabled</div>
-            <p className="text-[#eae9e9]/40 text-xs">Click ON to enable monitoring</p>
-          </div>
+      {!analysisEnabled && (
+        <div className="px-4 py-2 bg-[#3a1e1e] border-b border-[#f87171]/40 text-[#f87171] text-xs">
+          StopLimit automation is disabled. Orders will not be created or updated automatically while AUTO is OFF.
         </div>
-      ) : (
-        <>
-          {!analysisEnabled && (
-            <div className="px-4 py-2 bg-[#3a1e1e] border-b border-[#f87171]/40 text-[#f87171] text-xs">
-              StopLimit automation is disabled. Orders will not be created or updated automatically while AUTO is OFF.
-            </div>
-          )}
+      )}
+
+      <>
 
           {diagnostics && (
             <div className="px-4 py-3 border-b border-[#2a2820]/40 bg-[#15130d]">
