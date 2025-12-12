@@ -2320,6 +2320,11 @@ class StopLimitService {
     const orderStatus = (state.orderStatus || '').toUpperCase();
     if (state.autoSellExecuted) return 'auto-sell-executed';
     
+    // CRITICAL: Check if StopLimit order is filled - position should show as closed
+    if (orderStatus === 'FLL' || orderStatus === 'FIL') {
+      return 'closed';
+    }
+    
     // CRITICAL: Check for rejected orders first - they should show as rejected, not active
     if (orderStatus === 'REJ') {
       return 'order-rejected';
@@ -2345,7 +2350,7 @@ class StopLimitService {
       if (ACTIVE_ORDER_STATUSES.has(orderStatus) || this.isQueuedStatus(orderStatus) || orderStatus === 'ACK') {
         return 'active';
       }
-      // If order status is non-active but not REJ (already handled), show as inactive
+      // If order status is non-active but not REJ (already handled) and not FLL/FIL (already handled), show as inactive
       if (NON_ACTIVE_STATUSES.has(orderStatus)) {
         return 'order-inactive';
       }
@@ -2360,6 +2365,8 @@ class StopLimitService {
     switch (status) {
       case 'sold':
         return 'SOLD';
+      case 'closed':
+        return 'CLOSED';
       case 'auto-sell-executed':
         return 'Auto Sell Executed';
       case 'creating-order':

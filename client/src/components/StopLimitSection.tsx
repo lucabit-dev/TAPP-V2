@@ -92,12 +92,14 @@ const statusStyles: Record<string, string> = {
   'awaiting-ack': 'bg-[#2f1f33] text-[#e879f9] border border-[#e879f9]/30',
   'auto-sell-executed': 'bg-[#3a1e1e] text-[#f87171] border border-[#f87171]/30',
   'analysis-disabled': 'bg-[#3a1e1e] text-[#f87171] border border-[#f87171]/40',
+  closed: 'bg-[#2a2820] text-[#808080] border border-[#808080]/40',
   sold: 'bg-[#1e3a2e] text-[#4ade80] border border-[#4ade80]/50'
 };
 
 const statusDot: Record<string, string> = {
   active: 'bg-[#4ade80]',
   'creating-order': 'bg-[#facc15]',
+  closed: 'bg-[#808080]',
   'updating-order': 'bg-[#38bdf8]',
   queued: 'bg-[#fde68a]',
   'awaiting-stoplimit': 'bg-[#fde68a]',
@@ -522,6 +524,18 @@ const StopLimitSection: React.FC = () => {
                                     Sold at {row.sellPrice !== undefined ? formatCurrency(row.sellPrice) : 'N/A'}
                                   </div>
                                 </>
+                              ) : row.status === 'closed' ? (
+                                <>
+                                  <div className="font-mono font-semibold text-[#808080]">
+                                    CLOSED
+                                  </div>
+                                  <div className="text-[10px] text-[#eae9e9]/50">
+                                    StopLimit Filled
+                                  </div>
+                                  <div className="text-[10px] text-[#eae9e9]/45">
+                                    Qty {row.quantity ? row.quantity.toLocaleString() : 'N/A'}
+                                  </div>
+                                </>
                               ) : (
                                 <>
                                   <div className={`font-mono font-semibold ${row.unrealizedQty !== null && row.unrealizedQty >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
@@ -548,6 +562,17 @@ const StopLimitSection: React.FC = () => {
                                     <span className="font-mono text-sm text-[#4ade80]">{row.sellPrice !== undefined ? formatCurrency(row.sellPrice) : 'N/A'}</span>
                                   </div>
                                 </>
+                              ) : row.status === 'closed' ? (
+                                <>
+                                  <div className="flex items-center space-x-2">
+                                    <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Buy Avg</span>
+                                    <span className="font-mono text-sm text-[#eae9e9]">{formatCurrency(row.avgPrice)}</span>
+                                  </div>
+                                  <div className="flex items-center space-x-2">
+                                    <span className="text-[10px] text-[#eae9e9]/50 uppercase tracking-wider">Filled At</span>
+                                    <span className="font-mono text-sm text-[#808080]">{formatCurrency(row.limitPrice)}</span>
+                                  </div>
+                                </>
                               ) : (
                                 <>
                                   <div className="flex items-center space-x-2">
@@ -569,6 +594,15 @@ const StopLimitSection: React.FC = () => {
                                   </div>
                                   <div className="text-[10px] text-[#eae9e9]/50">
                                     Qty: {row.quantity ? row.quantity.toLocaleString() : 'N/A'}
+                                  </div>
+                                </div>
+                              ) : row.status === 'closed' ? (
+                                <div className="space-y-1">
+                                  <div className="text-[10px] text-[#808080]">
+                                    Closed {row.updatedAt ? formatRelativeTime(row.updatedAt) : 'N/A'}
+                                  </div>
+                                  <div className="text-[10px] text-[#eae9e9]/50">
+                                    Order Filled
                                   </div>
                                 </div>
                               ) : row.progress !== null ? (
