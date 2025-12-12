@@ -37,6 +37,9 @@ JWT_SECRET=your_super_secret_jwt_key_min_32_chars_long
 PNL_API_KEY=ruXNebYJhJ09H6D8lyQCKSfr9gcDvxQo
 PNL_WS_BASE_URL=wss://sections-bot.inbitme.com
 
+# L2 Market Depth API Configuration
+INBITME_API_KEY=your_inbitme_api_key_here
+
 # Optional
 WS_HEARTBEAT_MS=30000
 ENABLE_VERIFICATION=false
@@ -82,6 +85,7 @@ MONGODB_URI=mongodb+srv://username:password@cluster.mongodb.net/tapp?retryWrites
 JWT_SECRET=your_super_secret_jwt_key_min_32_chars_long
 PNL_API_KEY=ruXNebYJhJ09H6D8lyQCKSfr9gcDvxQo
 PNL_WS_BASE_URL=wss://sections-bot.inbitme.com
+INBITME_API_KEY=your_inbitme_api_key_here
 PORT=3001  # Railway sets this automatically, but you can specify
 ```
 
@@ -186,7 +190,8 @@ npm run dev
 1. **Never commit `.env` files** to Git (they're in `.gitignore`)
 2. **JWT_SECRET** should be at least 32 characters, random string
 3. **PNL_API_KEY** stays on backend only (Railway), never in frontend
-4. **MONGODB_URI** contains credentials - keep it secret
+4. **INBITME_API_KEY** stays on backend only (Railway), used for L2 market depth data
+5. **MONGODB_URI** contains credentials - keep it secret
 
 ## Quick Reference
 
@@ -195,6 +200,7 @@ npm run dev
 | `MONGODB_URI` | ✅ | ❌ | `mongodb://localhost:27017/tapp` | ✅ |
 | `JWT_SECRET` | ✅ | ❌ | None | ✅ |
 | `PNL_API_KEY` | ✅ | ❌ | None | ✅ |
+| `INBITME_API_KEY` | ✅ | ❌ | None | ❌ |
 | `VITE_API_BASE_URL` | ❌ | ✅ | `http://localhost:3001/api` | ✅ |
 | `VITE_WS_BASE_URL` | ❌ | ✅ | `ws://localhost:3001` | ✅ |
 | `PORT` | ✅ | ❌ | `3001` | ❌ |

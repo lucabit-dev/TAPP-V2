@@ -13,6 +13,7 @@ const FloatSegmentationService = require('./api/floatSegmentationService');
 const MACDEMAVerificationService = require('./macdEmaVerificationService');
 const PnLProxyService = require('./pnlProxyService');
 const StopLimitService = require('./stopLimitService');
+const L2Service = require('./l2Service');
 
 const app = express();
 const server = http.createServer(app);
@@ -121,6 +122,7 @@ const indicatorsService = new IndicatorsService();
 const conditionsService = new ConditionsService();
 const floatService = new FloatSegmentationService();
 const verificationService = new MACDEMAVerificationService();
+const l2Service = new L2Service();
 
 // Alerts manual control state
 let alertsEnabled = false;
@@ -536,6 +538,23 @@ function hasBoughtToday(ticker) {
 // Initialize Toplist WebSocket connection
 toplistService.connect().catch(error => {
   console.error('Failed to initialize Toplist connection:', error);
+});
+
+// Set up L2 service listeners to broadcast data to clients
+l2Service.onData((data) => {
+  broadcastToClients({
+    type: 'L2_DATA',
+    data: data,
+    timestamp: new Date().toISOString()
+  });
+});
+
+l2Service.onStatus((status) => {
+  broadcastToClients({
+    type: 'L2_STATUS',
+    data: status,
+    timestamp: new Date().toISOString()
+  });
 });
 
 // WebSocket connection handling for frontend clients
@@ -2443,6 +2462,41 @@ app.post('/api/buys/enabled', (req, res) => {
   }
 });
 
+// L2 Market Depth endpoints
+app.get('/api/l2/status', (req, res) => {
+  try {
+    const status = l2Service.getStatus();
+    res.json({ success: true, data: status });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/l2/connect', async (req, res) => {
+  try {
+    const { symbol } = req.body;
+    if (!symbol || typeof symbol !== 'string') {
+      return res.status(400).json({ success: false, error: 'Symbol is required' });
+    }
+
+    const cleanSymbol = symbol.trim().toUpperCase();
+    await l2Service.connect(cleanSymbol);
+    const status = l2Service.getStatus();
+    res.json({ success: true, data: status });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/l2/disconnect', (req, res) => {
+  try {
+    l2Service.disconnect();
+    res.json({ success: true, data: { isConnected: false, symbol: null } });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // Helper function to send buy order using new LIMIT order logic
 // Returns { success: boolean, notifyStatus: string, responseData: any, errorMessage: string | null, quantity: number, limitPrice: number | null }
 async function sendBuyOrder(symbol, configId = null, groupKey = null) {
@@ -4053,85 +4107,28 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
     
     console.log(`💸 Manual ${action} signal for ${quantity} ${symbol} (${orderType}, ${side})`);
     
-    // Delete all existing SELL orders for this symbol before creating new sell order
+    // CRITICAL: Ensure only one active sell order exists for this position
+    // Cancel any existing sell orders (StopLimit or Limit) before placing the new one
     // Only one SELL order can be active per stock at a time
     if (side === 'SELL') {
+      console.log(`🧹 Manual Sell from P&L: Checking for existing sell orders for ${symbol}...`);
       try {
-        const activeSellOrders = await getActiveSellOrdersFromWebSocket(symbol);
-        const queuedSellOrders = activeSellOrders.filter(order => {
-          const status = (order.status || '').toUpperCase();
-          return status === 'DON' || status === 'QUE' || status === 'QUEUED';
-        });
-        if (queuedSellOrders.length > 0) {
-          console.log(`⏳ Found ${queuedSellOrders.length} queued SELL order(s) for ${symbol}. They will be cancelled before placing the manual sell.`);
-          queuedSellOrders.forEach(order => {
-            console.log(`   • Queued order ${order.orderId} (status ${order.status}, qty ${order.quantity})`);
-          });
-        }
-      } catch (err) {
-        console.warn(`⚠️ Unable to inspect existing sell orders for ${symbol}:`, err.message);
-      }
-
-      console.log(`🗑️ Deleting existing SELL orders for ${symbol} before creating new sell order...`);
-      const deleteResult = await deleteAllSellOrdersForSymbol(symbol);
-      
-      if (deleteResult.failed > 0) {
-        console.warn(`⚠️ Failed to delete ${deleteResult.failed} SELL order(s) for ${symbol}. Results:`, deleteResult.results);
-      }
-      
-      if (deleteResult.deleted > 0 || deleteResult.failed > 0) {
-        console.log(`📊 Deletion summary for ${symbol}: ${deleteResult.deleted} deleted, ${deleteResult.failed} failed`);
-        
-        // Wait for the external API to process the deletion
-        // Even though we've removed orders from cache, the API needs time to process the DELETE request
-        console.log(`⏳ Waiting for external API to process deletion...`);
-        await new Promise(resolve => setTimeout(resolve, 600));
-        
-        // Verify that all active sell orders were actually deleted
-        // Since we remove from cache immediately after deletion, this should find no remaining orders
-        // unless there were orders we couldn't delete or new orders appeared
-        console.log(`🔍 Verifying deletion - checking for remaining active SELL orders for ${symbol}...`);
-        const remainingOrders = await getActiveSellOrdersFromWebSocket(symbol);
-        
-        if (remainingOrders.length > 0) {
-          console.warn(`⚠️ Found ${remainingOrders.length} remaining active SELL order(s) for ${symbol} after deletion. This might be due to:`);
-          console.warn(`   1. Orders that failed to delete (check deletion results)`);
-          console.warn(`   2. New orders that appeared after deletion`);
-          console.warn(`   3. Orders that weren't in the cache initially`);
-          console.warn(`   Order IDs: ${remainingOrders.map(o => o.orderId).join(', ')}`);
+        if (stopLimitService) {
+          await stopLimitService.deleteExistingSellOrders(symbol);
+          // Small buffer to allow cancellation to propagate if needed
+          await new Promise(resolve => setTimeout(resolve, 500));
           
-          // Try to delete remaining orders one more time
-          const retryOrders = remainingOrders.map(o => o.orderId);
-          for (const orderId of retryOrders) {
-            console.log(`🔄 Retrying deletion of order ${orderId}...`);
-            const retryResult = await deleteOrder(orderId);
-            if (retryResult.success) {
-              console.log(`✅ Successfully deleted order ${orderId} on retry`);
-            } else {
-              console.error(`❌ Failed to delete order ${orderId} on retry:`, retryResult.error);
-            }
-            // Small delay between retries
-            await new Promise(resolve => setTimeout(resolve, 150));
-          }
-          
-          // Wait again after retry for API to process
-          await new Promise(resolve => setTimeout(resolve, 600));
-          
-          // Final verification
-          const finalRemaining = await getActiveSellOrdersFromWebSocket(symbol);
-          if (finalRemaining.length > 0) {
-            // Check if these are the same orders that failed to delete
-            const failedOrderIds = deleteResult.results
-              .filter(r => !r.success)
-              .map(r => r.orderId);
-            const areFailedOrders = finalRemaining.every(o => failedOrderIds.includes(o.orderId));
+          // Double-check that no active orders remain after deletion attempt
+          const remainingOrders = stopLimitService.findActiveSellOrders(symbol);
+          if (remainingOrders.length > 0) {
+            console.warn(`⚠️ P&L Sell: Found ${remainingOrders.length} remaining active sell orders for ${symbol} after deletion. Retrying...`);
+            // Try one more delete pass for stubborn orders
+            await stopLimitService.deleteExistingSellOrders(symbol);
+            await new Promise(resolve => setTimeout(resolve, 500));
             
-            if (areFailedOrders) {
-              console.error(`❌ Cannot delete ${finalRemaining.length} SELL order(s) for ${symbol}. These orders may be in a state that prevents deletion.`);
-              console.error(`   Order IDs: ${finalRemaining.map(o => o.orderId).join(', ')}`);
-              console.error(`   Attempting to proceed anyway - the API may reject the new order if these are still active`);
-              // Continue anyway - let the API handle the conflict
-            } else {
+            // Final check
+            const finalRemaining = stopLimitService.findActiveSellOrders(symbol);
+            if (finalRemaining.length > 0) {
               const errorMsg = `Cannot create new sell order: ${finalRemaining.length} active SELL order(s) still exist for ${symbol} after deletion attempts. Order IDs: ${finalRemaining.map(o => o.orderId).join(', ')}`;
               console.error(`❌ ${errorMsg}`);
               return res.status(400).json({
@@ -4139,23 +4136,21 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
                 error: errorMsg,
                 data: {
                   symbol,
-                  remainingOrders: finalRemaining.map(o => ({ orderId: o.orderId, status: o.status })),
-                  deletionAttempts: deleteResult
+                  remainingOrders: finalRemaining.map(o => ({ orderId: o.orderId, status: o.status }))
                 }
               });
+            } else {
+              console.log(`✅ All active SELL orders successfully deleted for ${symbol} after retry`);
             }
           } else {
-            console.log(`✅ All active SELL orders successfully deleted for ${symbol} after retry`);
+            console.log(`✅ Verified: No remaining active SELL orders for ${symbol}`);
           }
         } else {
-          console.log(`✅ Verified: No remaining active SELL orders for ${symbol}`);
+          console.warn(`⚠️ P&L Sell: stopLimitService not available, skipping order cleanup`);
         }
-        
-        // Additional wait to ensure external API has fully processed the deletion
-        // This helps prevent the API from rejecting the new order due to timing issues
-        await new Promise(resolve => setTimeout(resolve, 400));
-      } else {
-        console.log(`ℹ️ No active SELL orders found for ${symbol} - proceeding with new order`);
+      } catch (cleanupErr) {
+        console.warn(`⚠️ P&L Sell: Error cleaning up existing orders for ${symbol}:`, cleanupErr.message);
+        // Continue, but warn - better to try placing the sell than fail completely
       }
     }
     

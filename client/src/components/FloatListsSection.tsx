@@ -26,7 +26,7 @@ const FloatListsSection: React.FC<Props> = ({ onSymbolClick }) => {
   const wsRef = React.useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = React.useRef(0);
   const reconnectTimerRef = React.useRef<number | null>(null);
-  const [buysEnabled, setBuysEnabled] = React.useState<boolean>(true);
+  const [buysEnabled, setBuysEnabled] = React.useState<boolean>(false);
   const [isTogglingBuys, setIsTogglingBuys] = React.useState<boolean>(false);
 
   React.useEffect(() => {

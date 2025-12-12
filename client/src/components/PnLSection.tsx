@@ -148,13 +148,58 @@ const PnLSection: React.FC = () => {
           // Handle position updates
           if (data.PositionID) {
             const position: Position = data;
-            console.log('✅ Position update received:', position.Symbol, position.PositionID);
+            const quantity = parseFloat(position.Quantity || '0');
+            console.log('✅ Position update received:', position.Symbol, position.PositionID, 'Quantity:', quantity);
+            
             setPositions(prev => {
               const newMap = new Map(prev);
-              newMap.set(position.PositionID, position);
-              return newMap;
+              
+              // If quantity is 0 or negative, remove the position (it's been closed)
+              if (quantity <= 0) {
+                console.log('🗑️ Removing position (quantity <= 0):', position.PositionID, position.Symbol);
+                newMap.delete(position.PositionID);
+              } else {
+                // Update or add the position
+                newMap.set(position.PositionID, position);
+              }
+              
+              // Force a new Map instance to ensure React detects the change
+              return new Map(newMap);
             });
-          } else {
+          } 
+          // Handle array of positions (batch update)
+          else if (Array.isArray(data)) {
+            console.log('✅ Batch position update received:', data.length, 'positions');
+            setPositions(prev => {
+              const newMap = new Map();
+              
+              // Process all positions in the array
+              data.forEach((position: Position) => {
+                if (position.PositionID) {
+                  const quantity = parseFloat(position.Quantity || '0');
+                  if (quantity > 0) {
+                    newMap.set(position.PositionID, position);
+                  }
+                }
+              });
+              
+              // Force a new Map instance
+              return new Map(newMap);
+            });
+          }
+          // Handle position deletion (when a position is closed)
+          else if (data.action === 'delete' || data.action === 'remove' || data.action === 'close') {
+            const positionId = data.PositionID || data.positionId || data.position_id;
+            if (positionId) {
+              console.log('🗑️ Position deletion received:', positionId);
+              setPositions(prev => {
+                const newMap = new Map(prev);
+                newMap.delete(positionId);
+                return new Map(newMap);
+              });
+            }
+          }
+          else {
             console.log('⚠️ Unknown message format:', data);
           }
         } catch (err) {
@@ -238,12 +283,15 @@ const PnLSection: React.FC = () => {
     };
   }, [connectWebSocket, disconnectWebSocket]);
 
-  const positionsArray = Array.from(positions.values()).sort((a, b) => {
-    // Sort by Symbol alphabetically, handle undefined/null values
-    const symbolA = a.Symbol || '';
-    const symbolB = b.Symbol || '';
-    return symbolA.localeCompare(symbolB);
-  });
+  // Memoize positions array to ensure it updates when positions Map changes
+  const positionsArray = React.useMemo(() => {
+    return Array.from(positions.values()).sort((a, b) => {
+      // Sort by Symbol alphabetically, handle undefined/null values
+      const symbolA = a.Symbol || '';
+      const symbolB = b.Symbol || '';
+      return symbolA.localeCompare(symbolB);
+    });
+  }, [positions]);
 
   const addNotification = (message: string, type: 'success' | 'error' | 'warning' | 'info' = 'info', duration?: number) => {
     const id = Date.now().toString() + Math.random().toString(36).substr(2, 9);
@@ -281,15 +329,16 @@ const PnLSection: React.FC = () => {
     }
   };
 
-  const totalUnrealizedPL = positionsArray.reduce((sum, pos) => {
+  // Memoize totals to ensure they update when positions change
+  const totalUnrealizedPL = React.useMemo(() => positionsArray.reduce((sum, pos) => {
     const pl = parseFloat(pos.UnrealizedProfitLoss);
     return sum + (isNaN(pl) ? 0 : pl);
-  }, 0);
+  }, 0), [positionsArray]);
 
-  const totalTodaysPL = positionsArray.reduce((sum, pos) => {
+  const totalTodaysPL = React.useMemo(() => positionsArray.reduce((sum, pos) => {
     const pl = parseFloat(pos.TodaysProfitLoss);
     return sum + (isNaN(pl) ? 0 : pl);
-  }, 0);
+  }, 0), [positionsArray]);
 
   const handleSell = async (position: Position) => {
     const positionId = position.PositionID;
