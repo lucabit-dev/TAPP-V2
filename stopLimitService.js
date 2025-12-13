@@ -262,11 +262,26 @@ class StopLimitService {
     
     console.log(`📥 StopLimitService: Received ${orderType} SELL order update for ${symbol} - OrderID: ${orderId}, Status: ${status}`);
 
+    // CRITICAL: Check if position is already marked as sold before processing order update
+    if (this.soldPositions.has(symbol)) {
+      console.log(`🛑 StopLimitService: Ignoring order update for ${symbol} - position is already marked as sold`);
+      // Clean up tracking if it exists
+      if (this.trackedPositions.has(symbol)) {
+        this.cleanupPosition(symbol);
+      }
+      return;
+    }
+
     // Try to get or create state for this symbol
     let state = this.trackedPositions.get(symbol);
     if (!state && this.positionsCache && typeof this.positionsCache.get === 'function') {
       const position = this.positionsCache.get(symbol);
       if (position) {
+        // CRITICAL: Check if position is sold before bootstrapping
+        if (this.soldPositions.has(symbol)) {
+          console.log(`🛑 StopLimitService: Skipping bootstrap for ${symbol} - position is already marked as sold`);
+          return;
+        }
         console.log(`🔄 StopLimitService: Bootstrapping position tracking for ${symbol} from order update`);
         try {
           await this.handlePositionUpdate(position);
@@ -760,6 +775,12 @@ class StopLimitService {
     if (!symbol) return false;
     const normalized = symbol.toUpperCase();
 
+    // CRITICAL: If position is already marked as sold, it's not active
+    if (this.soldPositions.has(normalized)) {
+      console.log(`🛑 StopLimitService: Position ${normalized} is marked as sold - not active`);
+      return false;
+    }
+
     // CRITICAL: If positionsCache is not available, we cannot verify the position is active
     // In this case, we should return false to ensure we don't keep tracking closed positions
     if (!this.positionsCache || typeof this.positionsCache.get !== 'function') {
@@ -792,9 +813,15 @@ class StopLimitService {
     // Get current active symbols from positions cache
     const activeSymbols = this.getActivePositionSymbols();
     
-    // Cleanup positions that are no longer in active symbols
+    // Cleanup positions that are no longer in active symbols OR are marked as sold
     if (activeSymbols) {
       for (const symbol of Array.from(this.trackedPositions.keys())) {
+        // CRITICAL: Check if position is sold first
+        if (this.soldPositions.has(symbol)) {
+          console.log(`🛑 StopLimitService: Removing ${symbol} during refresh - position is marked as sold`);
+          this.cleanupPosition(symbol);
+          continue;
+        }
         if (!activeSymbols.has(symbol)) {
           console.log(`🧹 StopLimitService: Removing ${symbol} - not in active positions cache`);
           this.cleanupPosition(symbol);
@@ -805,6 +832,13 @@ class StopLimitService {
     // Validate each remaining tracked position individually
     // This ensures we catch positions that might have closed but weren't removed from cache yet
     for (const [symbol, state] of Array.from(this.trackedPositions.entries())) {
+      // CRITICAL: Check if position is sold
+      if (this.soldPositions.has(symbol)) {
+        console.log(`🛑 StopLimitService: Removing ${symbol} during refresh - position is marked as sold`);
+        this.cleanupPosition(symbol);
+        continue;
+      }
+      
       // Verify position is still active
       if (!this.hasActivePosition(symbol)) {
         console.log(`🧹 StopLimitService: Removing ${symbol} during refresh - position no longer active`);
@@ -2038,6 +2072,13 @@ class StopLimitService {
         }
       }
 
+      // CRITICAL: Check if position is sold before doing any validation
+      if (this.soldPositions.has(state.symbol)) {
+        console.log(`🛑 StopLimitService: Removing ${state.symbol} from snapshot validation - position is marked as sold`);
+        symbolsToCleanup.push(state.symbol);
+        continue;
+      }
+
       // Quick validation pass - check for any missing order links
       // If we have stageIndex >= 0 but no orderId, try to find and link the order
       if (state.stageIndex >= 0 && !state.orderId && !state.pendingCreate) {
@@ -2058,6 +2099,14 @@ class StopLimitService {
     // Build snapshot ONLY for positions that are confirmed active
     const rows = [];
     for (const state of this.trackedPositions.values()) {
+      // CRITICAL: Final check - ensure position is not marked as sold
+      if (this.soldPositions.has(state.symbol)) {
+        console.log(`🛑 StopLimitService: Skipping ${state.symbol} in snapshot - position is marked as sold`);
+        // Clean up if still in tracking
+        this.cleanupPosition(state.symbol);
+        continue;
+      }
+      
       // Final triple-check before adding to snapshot
       // Only include if symbol is in activeSymbolsFromCache AND hasActivePosition returns true
       if (!activeSymbolsFromCache.has(state.symbol) || !this.hasActivePosition(state.symbol)) {
