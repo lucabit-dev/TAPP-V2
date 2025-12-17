@@ -352,63 +352,49 @@ const PnLSection: React.FC = () => {
       return;
     }
     
-    // Confirm action using modal
     const action = position.LongShort === 'Long' ? 'sell' : 'close';
-    const actionCapitalized = action.charAt(0).toUpperCase() + action.slice(1);
+    setSellingPositions(prev => new Set(prev).add(positionId));
     
-    setConfirmModal({
-      isOpen: true,
-      title: `${actionCapitalized} Position`,
-      message: `Are you sure you want to ${action} ${quantity} ${symbol}?`,
-      confirmText: actionCapitalized,
-      cancelText: 'Cancel',
-      type: 'danger',
-      onConfirm: async () => {
-        setConfirmModal(null);
-        setSellingPositions(prev => new Set(prev).add(positionId));
-        
-        try {
-          // Send sell order using POST /order endpoint format
-          // https://inbitme.gitbook.io/sections-bot/xKy06Pb8j01LsqEnmSik/rest-api/ordenes
-          const response = await fetchWithAuth(`${API_BASE_URL}/sell`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-              symbol,
-              quantity,
-              order_type: 'Limit', // Use Limit order type
-              long_short: position.LongShort // Include position side for proper handling
-            })
-          });
-          
-          if (!response.ok) {
-            // HTTP error (500, etc) - try to get error message
-            const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}: ${response.statusText}` }));
-            addNotification(`Failed to ${action} ${symbol}: ${errorData.error || `HTTP ${response.status}`}`, 'error');
-            return;
-          }
-          
-          const data = await response.json();
-          
-          if (data.success) {
-            console.log(`✅ Sell order sent for ${quantity} ${symbol}:`, data.data?.notifyStatus);
-            addNotification(`Sell order sent successfully for ${quantity} ${symbol}`, 'success');
-            // Position will be removed from the list via WebSocket update
-          } else {
-            // API returned error response
-            addNotification(`Failed to ${action} ${symbol}: ${data.error || data.data?.notifyStatus || 'Unknown error'}`, 'error');
-          }
-        } catch (err: any) {
-          addNotification(`Error ${action === 'sell' ? 'selling' : 'closing'} ${symbol}: ${err.message || 'Unknown error'}`, 'error');
-        } finally {
-          setSellingPositions(prev => {
-            const newSet = new Set(prev);
-            newSet.delete(positionId);
-            return newSet;
-          });
-        }
+    try {
+      // Send sell order using POST /order endpoint format
+      // https://inbitme.gitbook.io/sections-bot/xKy06Pb8j01LsqEnmSik/rest-api/ordenes
+      const response = await fetchWithAuth(`${API_BASE_URL}/sell`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          symbol,
+          quantity,
+          order_type: 'Limit', // Use Limit order type
+          long_short: position.LongShort // Include position side for proper handling
+        })
+      });
+      
+      if (!response.ok) {
+        // HTTP error (500, etc) - try to get error message
+        const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}: ${response.statusText}` }));
+        addNotification(`Failed to ${action} ${symbol}: ${errorData.error || `HTTP ${response.status}`}`, 'error');
+        return;
       }
-    });
+      
+      const data = await response.json();
+      
+      if (data.success) {
+        console.log(`✅ Sell order sent for ${quantity} ${symbol}:`, data.data?.notifyStatus);
+        addNotification(`Sell order sent successfully for ${quantity} ${symbol}`, 'success');
+        // Position will be removed from the list via WebSocket update
+      } else {
+        // API returned error response
+        addNotification(`Failed to ${action} ${symbol}: ${data.error || data.data?.notifyStatus || 'Unknown error'}`, 'error');
+      }
+    } catch (err: any) {
+      addNotification(`Error ${action === 'sell' ? 'selling' : 'closing'} ${symbol}: ${err.message || 'Unknown error'}`, 'error');
+    } finally {
+      setSellingPositions(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(positionId);
+        return newSet;
+      });
+    }
   };
 
   const handleSellAll = async () => {

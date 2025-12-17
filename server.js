@@ -14,6 +14,7 @@ const MACDEMAVerificationService = require('./macdEmaVerificationService');
 const PnLProxyService = require('./pnlProxyService');
 const StopLimitService = require('./stopLimitService');
 const L2Service = require('./l2Service');
+const { ManualConfig, MANUAL_CONFIG_ID } = require('./models/manualConfig.model');
 
 const app = express();
 const server = http.createServer(app);
@@ -83,9 +84,13 @@ app.use(express.json());
 // Database
 const { connectDatabase } = require('./auth/db');
 const mongoose = require('mongoose');
-connectDatabase().catch(() => {
-  console.warn('Server started without DB connection. Auth routes will return 503.');
-});
+connectDatabase()
+  .then(() => {
+    loadManualWeightsFromDb();
+  })
+  .catch(() => {
+    console.warn('Server started without DB connection. Auth routes will return 503.');
+  });
 
 // DB-ready guard for auth endpoints
 function requireDbReady(req, res, next) {
@@ -2397,10 +2402,14 @@ app.post('/api/float/thresholds', (req, res) => {
 
 // Manual Weights Configuration
 app.get('/api/manual/weights', (req, res) => {
-  res.json({ success: true, data: MANUAL_WEIGHTS });
+  res.json({ 
+    success: true, 
+    data: MANUAL_WEIGHTS,
+    source: isDbConnected() ? 'database' : 'memory'
+  });
 });
 
-app.post('/api/manual/weights', (req, res) => {
+app.post('/api/manual/weights', async (req, res) => {
   const { weights } = req.body;
   if (!weights) return res.status(400).json({ success: false, error: 'Missing weights' });
 
@@ -2428,7 +2437,14 @@ app.post('/api/manual/weights', (req, res) => {
   
   broadcastManualUpdate();
   
-  res.json({ success: true, data: MANUAL_WEIGHTS });
+  const persisted = await persistManualWeights(MANUAL_WEIGHTS);
+
+  res.json({ 
+    success: true, 
+    data: MANUAL_WEIGHTS,
+    persisted,
+    warning: persisted ? undefined : 'Database not connected; changes are kept in memory only'
+  });
 });
 
 // Buy list endpoints
@@ -4900,7 +4916,6 @@ app.use((req, res) => {
 // ============================================
 // Manual List Logic
 // ============================================
-const MANUAL_CONFIG_ID = '692117e2b7bb6ba7a6ae6f6c';
 let MANUAL_WEIGHTS = {
   distVwap: 0.20,
   change2m: 0.15,
@@ -4917,6 +4932,63 @@ let MANUAL_WEIGHTS = {
 let manualListRows = [];
 const manualListIndicators = new Map(); // symbol -> indicators
 let manualUpdateTimeout = null;
+
+const isDbConnected = () => mongoose.connection && mongoose.connection.readyState === 1;
+
+async function loadManualWeightsFromDb() {
+  if (!isDbConnected()) {
+    console.warn('⚠️ MongoDB not connected; using in-memory MANUAL_WEIGHTS');
+    return false;
+  }
+
+  try {
+    const doc = await ManualConfig.findById(MANUAL_CONFIG_ID).lean();
+    const rawWeights = doc?.weights instanceof Map ? Object.fromEntries(doc.weights) : doc?.weights || {};
+    const normalized = {};
+
+    for (const [key, val] of Object.entries(rawWeights)) {
+      const num = Number(val);
+      if (!Number.isNaN(num)) normalized[key] = num;
+    }
+
+    if (Object.keys(normalized).length > 0) {
+      MANUAL_WEIGHTS = { ...MANUAL_WEIGHTS, ...normalized };
+      console.log('✅ Loaded MANUAL weights from database');
+      broadcastManualUpdate();
+    } else if (!doc) {
+      // Seed document so next writes succeed without race
+      await ManualConfig.findByIdAndUpdate(
+        MANUAL_CONFIG_ID,
+        { weights: MANUAL_WEIGHTS },
+        { upsert: true, setDefaultsOnInsert: true }
+      );
+    }
+
+    return true;
+  } catch (err) {
+    console.warn('⚠️ Failed to load MANUAL weights from database:', err.message);
+    return false;
+  }
+}
+
+async function persistManualWeights(weights) {
+  if (!isDbConnected()) {
+    console.warn('⚠️ MongoDB not connected; MANUAL weights kept in memory only');
+    return false;
+  }
+
+  try {
+    await ManualConfig.findByIdAndUpdate(
+      MANUAL_CONFIG_ID,
+      { weights, updatedAt: new Date() },
+      { upsert: true, setDefaultsOnInsert: true }
+    );
+    return true;
+  } catch (err) {
+    console.warn('⚠️ Failed to persist MANUAL weights:', err.message);
+    return false;
+  }
+}
 
 function getManualColVal(row, keys) {
   if (!row.columns) return 0;
