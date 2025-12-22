@@ -22,3 +22,6 @@ const ManualConfigSchema = new mongoose.Schema(
 const ManualConfig = mongoose.models.ManualConfig || mongoose.model('ManualConfig', ManualConfigSchema);
 
 module.exports = { ManualConfig, MANUAL_CONFIG_ID };
+
+
+

@@ -2674,6 +2674,31 @@ class StopLimitService {
   getTrackedSymbols() {
     return Array.from(this.trackedPositions.keys());
   }
+
+  getGroupConfigs() {
+    return JSON.parse(JSON.stringify(this.groupConfigs)); // Return deep copy
+  }
+
+  updateGroupConfig(groupKey, configUpdate) {
+    if (!this.groupConfigs[groupKey]) {
+      throw new Error(`Group ${groupKey} does not exist`);
+    }
+    this.groupConfigs[groupKey] = { ...this.groupConfigs[groupKey], ...configUpdate };
+  }
+
+  addGroupConfig(groupKey, config) {
+    if (this.groupConfigs[groupKey]) {
+      throw new Error(`Group ${groupKey} already exists`);
+    }
+    this.groupConfigs[groupKey] = config;
+  }
+
+  removeGroupConfig(groupKey) {
+    if (!this.groupConfigs[groupKey]) {
+      throw new Error(`Group ${groupKey} does not exist`);
+    }
+    delete this.groupConfigs[groupKey];
+  }
 }
 
 module.exports = StopLimitService;

@@ -2447,6 +2447,76 @@ app.post('/api/manual/weights', async (req, res) => {
   });
 });
 
+// StopLimit Configuration endpoints
+app.get('/api/stoplimit/config', (req, res) => {
+  try {
+    if (!stopLimitService) {
+      return res.status(500).json({ success: false, error: 'StopLimitService not initialized' });
+    }
+    const configs = stopLimitService.getGroupConfigs();
+    res.json({ success: true, data: configs });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/stoplimit/config', (req, res) => {
+  try {
+    if (!stopLimitService) {
+      return res.status(500).json({ success: false, error: 'StopLimitService not initialized' });
+    }
+    const { groupKey, config } = req.body;
+    if (!groupKey) {
+      return res.status(400).json({ success: false, error: 'Missing groupKey' });
+    }
+    if (!config) {
+      return res.status(400).json({ success: false, error: 'Missing config' });
+    }
+    stopLimitService.updateGroupConfig(groupKey, config);
+    const updatedConfigs = stopLimitService.getGroupConfigs();
+    res.json({ success: true, data: updatedConfigs });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/stoplimit/config/group', (req, res) => {
+  try {
+    if (!stopLimitService) {
+      return res.status(500).json({ success: false, error: 'StopLimitService not initialized' });
+    }
+    const { groupKey, config } = req.body;
+    if (!groupKey) {
+      return res.status(400).json({ success: false, error: 'Missing groupKey' });
+    }
+    if (!config) {
+      return res.status(400).json({ success: false, error: 'Missing config' });
+    }
+    stopLimitService.addGroupConfig(groupKey, config);
+    const updatedConfigs = stopLimitService.getGroupConfigs();
+    res.json({ success: true, data: updatedConfigs });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.delete('/api/stoplimit/config/group/:groupKey', (req, res) => {
+  try {
+    if (!stopLimitService) {
+      return res.status(500).json({ success: false, error: 'StopLimitService not initialized' });
+    }
+    const { groupKey } = req.params;
+    if (!groupKey) {
+      return res.status(400).json({ success: false, error: 'Missing groupKey' });
+    }
+    stopLimitService.removeGroupConfig(groupKey);
+    const updatedConfigs = stopLimitService.getGroupConfigs();
+    res.json({ success: true, data: updatedConfigs });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // Buy list endpoints
 app.get('/api/buys', (req, res) => {
   res.json({ success: true, data: buyList });
