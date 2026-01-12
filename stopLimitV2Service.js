@@ -728,19 +728,10 @@ class StopLimitV2Service {
       this.cleanupPosition(normalized);
     }
     
-    // We update the existing sold record (created by cleanupPosition) or create new one
-    // ... logic below handles it by overwriting or merging
-    // ... but for V2 simplicity, cleanupPosition might have already done it.
-    
-    // Let's just update the record with more details if we have them
     const record = {
       symbol: normalized,
       // ... same fields as before ...
       status: 'sold',
-      // ...
-    };
-    // ...
-    this.soldPositions.set(normalized, record);
       positionId: saleData.positionId || null,
       accountId: saleData.accountId || null,
       groupKey: saleData.groupKey || null,
