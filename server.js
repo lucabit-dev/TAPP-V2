@@ -13,7 +13,6 @@ const FloatSegmentationService = require('./api/floatSegmentationService');
 const MACDEMAVerificationService = require('./macdEmaVerificationService');
 const PnLProxyService = require('./pnlProxyService');
 const StopLimitService = require('./stopLimitService');
-const StopLimitV2Service = require('./stopLimitV2Service');
 const L2Service = require('./l2Service');
 const { ManualConfig, MANUAL_CONFIG_ID } = require('./models/manualConfig.model');
 const { MACD } = require('technicalindicators');
@@ -2823,7 +2822,6 @@ function isActiveOrderStatus(status) {
 
 // StopLimit automation service
 const stopLimitService = new StopLimitService({ ordersCache, positionsCache });
-const stopLimitV2Service = new StopLimitV2Service({ ordersCache, positionsCache });
 
 const STOPLIMIT_POSITION_SYNC_INTERVAL_MS = parseInt(process.env.STOPLIMIT_POSITION_SYNC_MS || '5000', 10);
 const STOPLIMIT_POSITION_STALE_THRESHOLD_MS = parseInt(process.env.STOPLIMIT_POSITION_STALE_MS || '60000', 10);
@@ -2965,19 +2963,6 @@ app.get('/api/stoplimit/status', requireDbReady, requireAuth, (req, res) => {
   }
 });
 
-app.get('/api/stoplimit/v2/snapshot', requireDbReady, requireAuth, (req, res) => {
-  try {
-    const snapshot = stopLimitV2Service.getSnapshot();
-    res.json({
-      success: true,
-      data: snapshot
-    });
-  } catch (e) {
-    console.error('❌ Error retrieving StopLimit V2 snapshot:', e);
-    res.status(500).json({ success: false, error: e.message || 'Failed to retrieve StopLimit V2 snapshot' });
-  }
-});
-
 app.post('/api/stoplimit/analysis', requireDbReady, requireAuth, async (req, res) => {
   try {
     const { enabled } = req.body || {};
@@ -3074,66 +3059,48 @@ function connectPositionsWebSocket() {
         }
         
         // Handle position updates
-        // If data is an array, it's a full snapshot or batch update
-        if (Array.isArray(dataObj)) {
-            // If we receive a full list, we should probably mark missing ones as closed?
-            // Assuming this websocket sends individual updates.
-            // If dataObj is an array, iterate.
-            dataObj.forEach(item => processPositionUpdate(item));
-        } else if (dataObj.PositionID && dataObj.Symbol) {
-            processPositionUpdate(dataObj);
+        if (dataObj.PositionID && dataObj.Symbol) {
+          const symbol = dataObj.Symbol.toUpperCase();
+          const quantity = parseFloat(dataObj.Quantity || '0');
+          
+          if (quantity > 0) {
+            // Update cache with position
+            positionsCache.set(symbol, {
+              ...dataObj,
+              Symbol: symbol,
+              lastUpdated: Date.now()
+            });
+            console.log(`📊 Position cache updated: ${symbol} (${quantity} shares)`);
+
+            if (stopLimitService) {
+              stopLimitService.handlePositionUpdate(dataObj).catch(err => {
+                console.error(`❌ StopLimitService position handler error for ${symbol}:`, err);
+              });
+            }
+          } else {
+            // Position closed or quantity is 0, remove from cache
+            positionsCache.delete(symbol);
+            if (typeof lastBuyTsByTicker !== 'undefined' && lastBuyTsByTicker.has(symbol)) {
+              lastBuyTsByTicker.delete(symbol);
+              console.log(`🔁 Reset buy lock for ${symbol} (position closed)`);
+            }
+            console.log(`📊 Position removed from cache: ${symbol}`);
+            if (stopLimitService) {
+              // Explicitly call cleanupPosition to remove it from StopLimit tracking immediately
+              stopLimitService.cleanupPosition(symbol);
+            }
+          }
+          
+          if (stopLimitService) {
+            // Prune any other inactive symbols just in case
+            const activeSymbols = new Set(positionsCache.keys());
+            stopLimitService.pruneInactiveSymbols(activeSymbols);
+          }
         }
       } catch (err) {
         console.error('⚠️ Error parsing positions WebSocket message:', err.message);
       }
     });
-
-    function processPositionUpdate(dataObj) {
-      const symbol = dataObj.Symbol.toUpperCase();
-      const quantity = parseFloat(dataObj.Quantity || '0');
-      
-      if (quantity > 0) {
-        // Update cache with position
-        positionsCache.set(symbol, {
-          ...dataObj,
-          Symbol: symbol,
-          lastUpdated: Date.now()
-        });
-        console.log(`📊 Position cache updated: ${symbol} (${quantity} shares)`);
-
-        if (stopLimitService) {
-          stopLimitService.handlePositionUpdate(dataObj).catch(err => {
-            console.error(`❌ StopLimitService position handler error for ${symbol}:`, err);
-          });
-        }
-        if (stopLimitV2Service) {
-          stopLimitV2Service.handlePositionUpdate(dataObj).catch(err => {
-            console.error(`❌ StopLimitV2Service position handler error for ${symbol}:`, err);
-          });
-        }
-      } else {
-        // Position closed or quantity is 0, remove from cache
-        positionsCache.delete(symbol);
-        if (typeof lastBuyTsByTicker !== 'undefined' && lastBuyTsByTicker.has(symbol)) {
-          lastBuyTsByTicker.delete(symbol);
-          console.log(`🔁 Reset buy lock for ${symbol} (position closed)`);
-        }
-        console.log(`📊 Position removed from cache: ${symbol}`);
-        if (stopLimitService) {
-          // Explicitly call cleanupPosition to remove it from StopLimit tracking immediately
-          stopLimitService.cleanupPosition(symbol);
-        }
-        if (stopLimitV2Service) {
-          stopLimitV2Service.handlePositionClosed(symbol);
-        }
-      }
-      
-      if (stopLimitService) {
-        // Prune any other inactive symbols just in case
-        const activeSymbols = new Set(positionsCache.keys());
-        stopLimitService.pruneInactiveSymbols(activeSymbols);
-      }
-    }
     
     positionsWs.on('error', (error) => {
       console.error('❌ Positions WebSocket error:', error.message);
