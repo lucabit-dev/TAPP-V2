@@ -179,10 +179,22 @@ class StopLimitService {
       // Don't reset if we're waiting for websocket update (orderId set but status null)
       const orderStatusUpper = (state.orderStatus || '').toUpperCase();
       const recentlyCreated = state.lastOrderCreateAttempt && (Date.now() - state.lastOrderCreateAttempt) < 10000; // 10 seconds
-      const shouldReset = 
+      
+      let shouldReset = 
         state.autoSellExecuted || 
         (state.orderStatus && NON_ACTIVE_STATUSES.has(orderStatusUpper) && !recentlyCreated) ||
         (!state.orderId && state.stageIndex >= 0 && !recentlyCreated && !state.pendingCreate);
+
+      // CRITICAL: If order was rejected, only reset (retry) if there are NO other active sell orders
+      if (orderStatusUpper === 'REJ' && shouldReset) {
+        if (this.hasActiveSellOrder(symbol)) {
+          console.log(`🛑 StopLimitService: Order rejected for ${symbol}, but active sell order exists. NOT retrying.`);
+          shouldReset = false;
+          // Optionally update status to indicate manual intervention needed or just keep as REJ
+        } else {
+          console.log(`⚠️ StopLimitService: Order rejected for ${symbol} and no active sell order found. Retrying...`);
+        }
+      }
 
       if (shouldReset) {
         console.log(`🔄 StopLimitService: Reinitializing StopLimit tracking for ${symbol} (autoSell=${state.autoSellExecuted}, orderId=${state.orderId}, status=${state.orderStatus}, recentlyCreated=${recentlyCreated})`);
@@ -2003,6 +2015,26 @@ class StopLimitService {
     return null;
   }
 
+  hasActiveSellOrder(symbol) {
+    if (!this.ordersCache) return false;
+    const targetSymbol = symbol.toUpperCase();
+    
+    for (const order of this.ordersCache.values()) {
+      // Check status
+      if (!ACTIVE_ORDER_STATUSES.has((order.Status || '').toUpperCase())) continue;
+      
+      // Check legs for SELL on symbol
+      if (order.Legs && Array.isArray(order.Legs)) {
+        for (const leg of order.Legs) {
+          if ((leg.Symbol || '').toUpperCase() === targetSymbol && (leg.BuyOrSell || '').toUpperCase() === 'SELL') {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
   getSnapshot() {
     // CRITICAL: Always validate before returning snapshot to ensure accuracy
     // This ensures we're using the latest data from the positions WebSocket
@@ -2118,9 +2150,12 @@ class StopLimitService {
     }
     
     // Add sold positions to snapshot
+    // DISABLED: User requested to eliminate sold positions from visual
+    /*
     for (const soldState of this.soldPositions.values()) {
       rows.push(this.toSoldSnapshot(soldState));
     }
+    */
     
     return rows.sort((a, b) => {
       // Sort sold positions to the end

@@ -40,7 +40,7 @@ class PolygonService {
         throw new Error(`No data returned from Polygon API for ${ticker}`);
       }
       
-      console.log(`[Polygon] Successfully fetched ${results.length} candles for ${ticker}`);
+      // console.log(`[Polygon] Successfully fetched ${results.length} candles for ${ticker}`);
       
       // Transform data to our expected format
       return results.map(candle => ({
@@ -144,7 +144,7 @@ class PolygonService {
           dateRange.to = this.formatDateForAPI(to);
         }
         
-        console.log(`[Extended Hours] Fetching ${timeframe}-minute candles for ${ticker} using extended hours range: ${dateRange.from} to ${dateRange.to} (Session: ${dateRange.session}, ${daysBack} days)`);
+        // console.log(`[Extended Hours] Fetching ${timeframe}-minute candles for ${ticker} using extended hours range: ${dateRange.from} to ${dateRange.to} (Session: ${dateRange.session}, ${daysBack} days)`);
       } else {
         const hoursBack = daysBack * 24;
         dateRange = this.getDateRange(hoursBack);
@@ -154,7 +154,7 @@ class PolygonService {
       
       // Don't filter candles for extended hours - we need all historical data for EMA calculations
       // The validation was filtering out 99% of historical data, leaving only recent candles
-      console.log(`[Extended Hours] Retrieved ${candles.length} ${timeframe}-minute candles for ${ticker}`);
+      // console.log(`[Extended Hours] Retrieved ${candles.length} ${timeframe}-minute candles for ${ticker}`);
       
       return {
         candles: candles,
@@ -221,7 +221,7 @@ class PolygonService {
             // 1. Last trade price (most recent, includes extended hours)
             if (tickerData.lastTrade && tickerData.lastTrade.p) {
               const lastTradePrice = tickerData.lastTrade.p;
-              console.log(`[Price] Using snapshot lastTrade for ${ticker}: ${lastTradePrice} (includes extended hours)`);
+              // console.log(`[Price] Using snapshot lastTrade for ${ticker}: ${lastTradePrice} (includes extended hours)`);
               return lastTradePrice;
             }
             
@@ -231,13 +231,13 @@ class PolygonService {
               const ask = tickerData.lastQuote.ap || 0;
               if (bid > 0 && ask > 0) {
                 const midPrice = (bid + ask) / 2;
-                console.log(`[Price] Using snapshot quote midpoint for ${ticker}: ${midPrice}`);
+                // console.log(`[Price] Using snapshot quote midpoint for ${ticker}: ${midPrice}`);
                 return midPrice;
               } else if (bid > 0) {
-                console.log(`[Price] Using snapshot quote bid for ${ticker}: ${bid}`);
+                // console.log(`[Price] Using snapshot quote bid for ${ticker}: ${bid}`);
                 return bid;
               } else if (ask > 0) {
-                console.log(`[Price] Using snapshot quote ask for ${ticker}: ${ask}`);
+                // console.log(`[Price] Using snapshot quote ask for ${ticker}: ${ask}`);
                 return ask;
               }
             }
@@ -245,20 +245,20 @@ class PolygonService {
             // 3. Day close (regular session close)
             if (tickerData.day && tickerData.day.c) {
               const dayClose = tickerData.day.c;
-              console.log(`[Price] Using snapshot day close for ${ticker}: ${dayClose}`);
+              // console.log(`[Price] Using snapshot day close for ${ticker}: ${dayClose}`);
               return dayClose;
             }
             
             // 4. Previous day close (fallback)
             if (tickerData.prevDay && tickerData.prevDay.c) {
               const prevClose = tickerData.prevDay.c;
-              console.log(`[Price] Using snapshot prevDay close for ${ticker}: ${prevClose}`);
+              // console.log(`[Price] Using snapshot prevDay close for ${ticker}: ${prevClose}`);
               return prevClose;
             }
           }
         }
       } catch (snapshotError) {
-        console.log(`[Price] Snapshot endpoint failed for ${ticker}, trying last trade endpoint...`);
+        // console.log(`[Price] Snapshot endpoint failed for ${ticker}, trying last trade endpoint...`);
       }
       
       // Fallback to last trade endpoint
@@ -283,7 +283,7 @@ class PolygonService {
       }
       
       const price = result.p;
-      console.log(`[Price] Using last trade price for ${ticker}: ${price}`);
+      // console.log(`[Price] Using last trade price for ${ticker}: ${price}`);
       return price;
       
     } catch (error) {
@@ -325,13 +325,13 @@ class PolygonService {
     
     // Log the current session for informational purposes
     if (currentHour >= 4 && currentHour < 9) {
-      console.log(`[Extended Hours] Premarket session detected: ${currentHour}:${currentMinute.toString().padStart(2, '0')} ET`);
+      // console.log(`[Extended Hours] Premarket session detected: ${currentHour}:${currentMinute.toString().padStart(2, '0')} ET`);
     } else if (currentHour >= 9 && currentHour < 16) {
-      console.log(`[Extended Hours] Regular trading session detected: ${currentHour}:${currentMinute.toString().padStart(2, '0')} ET`);
+      // console.log(`[Extended Hours] Regular trading session detected: ${currentHour}:${currentMinute.toString().padStart(2, '0')} ET`);
     } else if (currentHour >= 16 && currentHour < 20) {
-      console.log(`[Extended Hours] After-hours session detected: ${currentHour}:${currentMinute.toString().padStart(2, '0')} ET`);
+      // console.log(`[Extended Hours] After-hours session detected: ${currentHour}:${currentMinute.toString().padStart(2, '0')} ET`);
     } else {
-      console.log(`[Extended Hours] Outside trading hours: ${currentHour}:${currentMinute.toString().padStart(2, '0')} ET`);
+      // console.log(`[Extended Hours] Outside trading hours: ${currentHour}:${currentMinute.toString().padStart(2, '0')} ET`);
     }
     
     return {
@@ -459,12 +459,12 @@ class PolygonService {
         // Use extended trading hours data for more accurate real-time calculations (default 7 days)
         const extendedData = await this.fetchExtendedHoursCandles(ticker, timeframe, true);
         candleData = extendedData.candles;
-        console.log(`[Extended Hours] EMA ${period} calculation using ${extendedData.session} session data`);
+        // console.log(`[Extended Hours] EMA ${period} calculation using ${extendedData.session} session data`);
       } else {
         // Use specified hoursBack for adaptive fetching
         const dateRange = this.getDateRange(hoursBack);
         candleData = await this.fetchOHLCV(ticker, timeframe, dateRange.from, dateRange.to);
-        console.log(`[EMA] Fetching ${hoursBack} hours of data for EMA ${period} calculation`);
+        // console.log(`[EMA] Fetching ${hoursBack} hours of data for EMA ${period} calculation`);
       }
       
       if (!candleData || candleData.length === 0) {
@@ -481,7 +481,7 @@ class PolygonService {
         throw new Error(`Cannot calculate EMA ${period} from ${closes.length} candles (need at least ${period})`);
       }
       
-      console.log(`[EMA] EMA ${period} calculated: ${emaValue.toFixed(4)} from ${closes.length} candles`);
+      // console.log(`[EMA] EMA ${period} calculated: ${emaValue.toFixed(4)} from ${closes.length} candles`);
       
       return {
         value: emaValue,
@@ -526,11 +526,11 @@ class PolygonService {
           // Disable extended hours for longer periods to get more historical data
           const useExtendedHours = timeRange.hours === 168;
           ema5m18 = await this.fetchEMAValues(ticker, 5, 18, timeRange.hours, useExtendedHours);
-          console.log(`[Adaptive] EMA5m18 successful with ${timeRange.label} (${ema5m18.candleCount} candles)`);
+          // console.log(`[Adaptive] EMA5m18 successful with ${timeRange.label} (${ema5m18.candleCount} candles)`);
           ema5m18Success = true;
           break;
         } catch (error) {
-          console.log(`[Adaptive] EMA5m18 failed with ${timeRange.label}, trying more data...`);
+          // console.log(`[Adaptive] EMA5m18 failed with ${timeRange.label}, trying more data...`);
         }
       }
       
@@ -545,11 +545,11 @@ class PolygonService {
           // Disable extended hours for longer periods to get more historical data
           const useExtendedHours = timeRange.hours === 168;
           ema5m200 = await this.fetchEMAValues(ticker, 5, 200, timeRange.hours, useExtendedHours);
-          console.log(`[Adaptive] EMA5m200 successful with ${timeRange.label} (${ema5m200.candleCount} candles)`);
+          // console.log(`[Adaptive] EMA5m200 successful with ${timeRange.label} (${ema5m200.candleCount} candles)`);
           ema5m200Success = true;
           break;
         } catch (error) {
-          console.log(`[Adaptive] EMA5m200 failed with ${timeRange.label}, trying more data...`);
+          // console.log(`[Adaptive] EMA5m200 failed with ${timeRange.label}, trying more data...`);
         }
       }
       
@@ -682,7 +682,7 @@ class PolygonService {
   // Fetch all MACD values needed for trading conditions with extended hours support
   async fetchAllMACDValues(ticker, useExtendedHours = true) {
     try {
-      console.log(`[TradingView MACD] Fetching MACD values for ${ticker} with extended hours: ${useExtendedHours}`);
+      // console.log(`[TradingView MACD] Fetching MACD values for ${ticker} with extended hours: ${useExtendedHours}`);
       
       // Use only local TradingView-compatible calculation for both 1m and 5m
       let macd1m, macd5m;
@@ -691,7 +691,7 @@ class PolygonService {
       if (useExtendedHours) {
         const extendedData1m = await this.fetchExtendedHoursCandles(ticker, 1, true);
         macd1m = this.calculateMACDWithEMA(extendedData1m.candles, '1m', 12, 26, 9);
-        console.log(`[TradingView MACD] 1-minute MACD calculated using ${extendedData1m.session} session`);
+        // console.log(`[TradingView MACD] 1-minute MACD calculated using ${extendedData1m.session} session`);
       } else {
         const dateRange = this.getDateRange(168); // 7 days
         const candles1m = await this.fetch1MinuteCandles(ticker, dateRange.from, dateRange.to);
@@ -706,7 +706,7 @@ class PolygonService {
       if (useExtendedHours) {
         const extendedData5m = await this.fetchExtendedHoursCandles(ticker, 5, true);
         macd5m = this.calculateMACDWithEMA(extendedData5m.candles, '5m', 12, 26, 9);
-        console.log(`[TradingView MACD] 5-minute MACD calculated using ${extendedData5m.session} session`);
+        // console.log(`[TradingView MACD] 5-minute MACD calculated using ${extendedData5m.session} session`);
       } else {
         const dateRange = this.getDateRange(168); // 7 days
         const candles5m = await this.fetch5MinuteCandles(ticker, dateRange.from, dateRange.to);
@@ -735,7 +735,7 @@ class PolygonService {
         }
       };
       
-      console.log(`[TradingView MACD] MACD values calculated for ${ticker} - 1m: ${macd1m.macd?.toFixed(4)}, 5m: ${macd5m.macd?.toFixed(4)}`);
+      // console.log(`[TradingView MACD] MACD values calculated for ${ticker} - 1m: ${macd1m.macd?.toFixed(4)}, 5m: ${macd5m.macd?.toFixed(4)}`);
       
       return results;
       

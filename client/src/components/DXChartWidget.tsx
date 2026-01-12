@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import { createChart } from '@devexperts/dxcharts-lite';
 
 interface DXChartWidgetProps {
   symbol: string;
@@ -9,165 +10,227 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001
 
 const DXChartWidget: React.FC<DXChartWidgetProps> = ({ symbol }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const widgetRef = useRef<any>(null);
+  const chartRef = useRef<any>(null);
+  const macdPaneRef = useRef<any>(null);
+  const macdSeriesRef = useRef<any>(null);
+  const signalSeriesRef = useRef<any>(null);
+  const histogramSeriesRef = useRef<any>(null);
 
   useEffect(() => {
     let active = true;
-    const subscriptions = new Map<string, any>();
+    let pollInterval: NodeJS.Timeout | null = null;
 
-    const initWidget = async () => {
+    const initChart = async () => {
       if (!containerRef.current) return;
 
-      // Destroy existing widget if any
-      if (widgetRef.current) {
-        widgetRef.current.destroy();
-        widgetRef.current = null;
+      // Clean up previous chart
+      if (chartRef.current) {
+        chartRef.current.destroy();
+        chartRef.current = null;
+        macdPaneRef.current = null;
+        macdSeriesRef.current = null;
+        signalSeriesRef.current = null;
+        histogramSeriesRef.current = null;
       }
 
       try {
-        let DXChart = (window as any).DXChart;
-        
-        // Try to load script if not present
-        if (!DXChart) {
-           // Check if script is already added
-           if (!document.querySelector('script[src="/dxcharts/index.js"]')) {
-               const script = document.createElement('script');
-               script.src = '/dxcharts/index.js';
-               script.async = true;
-               document.body.appendChild(script);
-           }
-           
-           // Wait for it to load
-           let attempts = 0;
-           while (!DXChart && attempts < 50) {
-              if (attempts === 0) console.log("Waiting for DXChart script to load...");
-              await new Promise(r => setTimeout(r, 100));
-              DXChart = (window as any).DXChart;
-              attempts++;
-           }
-        }
-
-        if (!DXChart) {
-            console.error("DXChart global not found after waiting.");
-            return;
-        }
-
-        const createWidget = DXChart.createWidget || DXChart.widget?.createWidget;
-
-        if (!createWidget) {
-            console.error("createWidget function not found on DXChart global:", DXChart);
-            return;
-        }
-        
-        const chartDataProvider = {
-            requestHistoryData: async (reqSymbol: string, aggregation: any, options: any) => {
-                // Use symbol from props if reqSymbol is suspicious, but reqSymbol should be correct.
-                // Log to debugging
-                console.log(`[DXChart] Requesting history for: ${reqSymbol} (Widget symbol: ${symbol})`);
-                
-                try {
-                    const res = await fetch(`${API_BASE_URL.replace(/\/$/, '')}/history/${reqSymbol}?limit=1000`);
-                    const result = await res.json();
-                    
-                    if (result.success && Array.isArray(result.data)) {
-                         // Transform data to DXChart format
-                         return result.data.map((candle: any) => ({
-                             time: new Date(candle.timestamp).getTime(),
-                             open: candle.open,
-                             high: candle.high,
-                             low: candle.low,
-                             close: candle.close,
-                             volume: candle.volume
-                         }));
-                    }
-                    return [];
-                } catch (err) {
-                    console.error("Error fetching history:", err);
-                    return [];
+        // Initialize the chart
+        const chart = createChart(containerRef.current, {
+            components: {
+                chart: {
+                    type: 'candle',
                 }
             },
-            subscribeCandles: (subSymbol: string, aggregation: any, subscriptionId: string, callback: any) => {
-                console.log(`[DXChart] Subscribing candles for: ${subSymbol}`);
-                // Poll for updates every 5 seconds (simulating real-time)
-                const interval = setInterval(async () => {
-                    if (!active) return;
-                    try {
-                        const res = await fetch(`${API_BASE_URL.replace(/\/$/, '')}/history/${subSymbol}?limit=5`);
-                        const result = await res.json();
-                        
-                        if (result.success && Array.isArray(result.data) && result.data.length > 0) {
-                            const lastCandle = result.data[result.data.length - 1];
-                            const candle = {
-                                 time: new Date(lastCandle.timestamp).getTime(),
-                                 open: lastCandle.open,
-                                 high: lastCandle.high,
-                                 low: lastCandle.low,
-                                 close: lastCandle.close,
-                                 volume: lastCandle.volume
-                             };
-                             callback([candle]);
-                        }
-                    } catch (err) {
-                        console.error("Error polling candle:", err);
-                    }
-                }, 5000);
-                
-                subscriptions.set(subscriptionId, interval);
-            },
-            unsubscribeCandles: (subscriptionId: string) => {
-                const interval = subscriptions.get(subscriptionId);
-                if (interval) {
-                    clearInterval(interval);
-                    subscriptions.delete(subscriptionId);
+            colors: {
+                chartArea: {
+                    background: '#14130e',
+                    grid: '#2a2820'
+                },
+                axis: {
+                    text: '#969696',
+                    tick: '#2a2820',
+                },
+                candle: {
+                    up: '#4ec9b0',
+                    down: '#f44747',
+                    wickUp: '#4ec9b0',
+                    wickDown: '#f44747',
+                    outlineUp: '#4ec9b0',
+                    outlineDown: '#f44747'
                 }
-            },
-            subscribeServiceData: (symbol: string, callback: any) => {},
-            unsubscribeServiceData: (symbol: string) => {}
-        };
-
-        const providers = {
-            chartDataProvider,
-        };
-        
-        const widget = await createWidget(containerRef.current, {
-          dependencies: providers,
-          symbol: symbol, 
-          period: '1m', 
-          chartTheme: 'dark', 
-          width: containerRef.current.clientWidth,
-          height: containerRef.current.clientHeight,
-          // Minimalist config for small views (optional, DXChart usually handles this via config file but we pass basic override)
-          settings: {
-              // We might want to disable some UI elements if it's too small
-          }
+            }
         });
-
-        if (active) {
-          widgetRef.current = widget;
-        } else {
-          widget.destroy();
+        
+        if (!active) {
+            chart.destroy();
+            return;
         }
+        
+        chartRef.current = chart;
+
+        // Fetch initial data (Candles + MACD)
+        const fetchInitialData = async () => {
+            try {
+                const [historyRes, macdRes] = await Promise.all([
+                    fetch(`${API_BASE_URL.replace(/\/$/, '')}/history/${symbol}?limit=1000`),
+                    fetch(`${API_BASE_URL.replace(/\/$/, '')}/indicators/macd/${symbol}?limit=1000`)
+                ]);
+
+                const historyResult = await historyRes.json();
+                const macdResult = await macdRes.json();
+                
+                if (!active) return;
+
+                // 1. Set Candle Data
+                if (historyResult.success && Array.isArray(historyResult.data)) {
+                    const candles = historyResult.data.map((candle: any) => ({
+                        id: new Date(candle.timestamp).getTime().toString(),
+                        timestamp: new Date(candle.timestamp).getTime(),
+                        open: candle.open,
+                        hi: candle.high,
+                        lo: candle.low,
+                        close: candle.close,
+                        volume: candle.volume
+                    }));
+
+                    chart.setData({
+                        candles: candles,
+                        instrument: {
+                            symbol: symbol,
+                            description: symbol,
+                            priceIncrements: [0.01]
+                        }
+                    });
+                }
+
+                // 2. Setup MACD Pane and Series
+                if (macdResult.success && macdResult.data) {
+                    const { macd, signal, histogram } = macdResult.data;
+                    
+                    if (!macdPaneRef.current) {
+                        const pane = chart.createPane();
+                        macdPaneRef.current = pane;
+                        
+                        const macdSeries = pane.createDataSeries();
+                        macdSeries.name = 'MACD';
+                        macdSeries.setType('line');
+                        
+                        const signalSeries = pane.createDataSeries();
+                        signalSeries.name = 'Signal';
+                        signalSeries.setType('line');
+                        
+                        const histogramSeries = pane.createDataSeries();
+                        histogramSeries.name = 'Histogram';
+                        histogramSeries.setType('histogram');
+                        
+                        macdSeriesRef.current = macdSeries;
+                        signalSeriesRef.current = signalSeries;
+                        histogramSeriesRef.current = histogramSeries;
+                    }
+
+                    if (macdSeriesRef.current && signalSeriesRef.current && histogramSeriesRef.current) {
+                        const macdPoints = macd.map((p: any) => ({ timestamp: p.timestamp, close: p.value }));
+                        const signalPoints = signal.map((p: any) => ({ timestamp: p.timestamp, close: p.value }));
+                        const histogramPoints = histogram.map((p: any) => ({ timestamp: p.timestamp, close: p.value }));
+                        
+                        macdSeriesRef.current.setDataPoints(macdPoints);
+                        signalSeriesRef.current.setDataPoints(signalPoints);
+                        histogramSeriesRef.current.setDataPoints(histogramPoints);
+                    }
+                }
+
+            } catch (err) {
+                console.error("Error fetching initial data:", err);
+            }
+        };
+
+        await fetchInitialData();
+
+        // Polling for updates (Fast polling for realtime feel)
+        pollInterval = setInterval(async () => {
+            if (!active || !chartRef.current) return;
+            
+            try {
+                // 1. Fetch current price for immediate update
+                const priceRes = await fetch(`${API_BASE_URL.replace(/\/$/, '')}/price/${symbol}`);
+                const priceResult = await priceRes.json();
+                
+                if (priceResult.success && priceResult.data) {
+                    const currentPrice = priceResult.data.price;
+                    const now = Date.now();
+                    
+                    // Create a pseudo-candle update for the current second
+                    // If we have access to last candle, we update it.
+                    // DXCharts Lite handles "updateLastCandle" if we pass a candle with same timestamp or newer?
+                    // We need to construct a valid candle object.
+                    
+                    // Since we don't have full OHLC for the current second from this endpoint, 
+                    // we might need to rely on the history endpoint which hopefully includes the developing bar.
+                    // BUT, to make it "tick", we can fetch history more frequently.
+                }
+
+                // 2. Fetch history (developing bar)
+                const historyRes = await fetch(`${API_BASE_URL.replace(/\/$/, '')}/history/${symbol}?limit=2`);
+                const historyResult = await historyRes.json();
+                
+                if (historyResult.success && Array.isArray(historyResult.data) && historyResult.data.length > 0) {
+                    const newCandles = historyResult.data.map((candle: any) => ({
+                        id: new Date(candle.timestamp).getTime().toString(),
+                        timestamp: new Date(candle.timestamp).getTime(),
+                        open: candle.open,
+                        hi: candle.high,
+                        lo: candle.low,
+                        close: candle.close,
+                        volume: candle.volume
+                    }));
+                    
+                    if (chartRef.current.data) {
+                        chartRef.current.data.updateCandles(newCandles, symbol);
+                    }
+                }
+                
+                // 3. Fetch MACD less frequently or every time? 
+                // Every 1s might be heavy for full MACD recalc, but fine for small dataset.
+                // Let's do it every poll to keep sync.
+                const macdRes = await fetch(`${API_BASE_URL.replace(/\/$/, '')}/indicators/macd/${symbol}?limit=500`);
+                const macdResult = await macdRes.json();
+
+                if (macdResult.success && macdResult.data && macdSeriesRef.current) {
+                    const { macd, signal, histogram } = macdResult.data;
+                    
+                    const macdPoints = macd.map((p: any) => ({ timestamp: p.timestamp, close: p.value }));
+                    const signalPoints = signal.map((p: any) => ({ timestamp: p.timestamp, close: p.value }));
+                    const histogramPoints = histogram.map((p: any) => ({ timestamp: p.timestamp, close: p.value }));
+                    
+                    macdSeriesRef.current.setDataPoints(macdPoints);
+                    signalSeriesRef.current.setDataPoints(signalPoints);
+                    histogramSeriesRef.current.setDataPoints(histogramPoints);
+                }
+            } catch (err) {
+                console.error("Error polling updates:", err);
+            }
+        }, 1000); // 1 second polling
+
       } catch (error) {
-        console.error("Failed to initialize DXCharts widget:", error);
+        console.error("Failed to initialize DXCharts Lite:", error);
       }
     };
 
-    setTimeout(initWidget, 0);
+    setTimeout(initChart, 0);
 
     return () => {
       active = false;
-      subscriptions.forEach(interval => clearInterval(interval));
-      subscriptions.clear();
-      if (widgetRef.current) {
-        widgetRef.current.destroy();
-        widgetRef.current = null;
+      if (pollInterval) clearInterval(pollInterval);
+      if (chartRef.current) {
+        chartRef.current.destroy();
+        chartRef.current = null;
       }
     };
   }, [symbol]);
 
   return (
-    <div className="w-full h-full bg-[#0f0e0a] relative">
-       <div ref={containerRef} className="w-full h-full" />
+    <div className="w-full h-full bg-[#14130e] relative">
+       <div ref={containerRef} className="w-full h-full" id="chart_container" />
     </div>
   );
 };

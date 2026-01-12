@@ -15,6 +15,7 @@ const PnLProxyService = require('./pnlProxyService');
 const StopLimitService = require('./stopLimitService');
 const L2Service = require('./l2Service');
 const { ManualConfig, MANUAL_CONFIG_ID } = require('./models/manualConfig.model');
+const { MACD } = require('technicalindicators');
 
 const app = express();
 const server = http.createServer(app);
@@ -1788,12 +1789,12 @@ async function processAlertNormally(alert, validateNASDAQ = false) {
     const currentSession = polygonService.getCurrentTradingSession();
     const useExtendedHours = polygonService.isExtendedHours();
     
-    console.log(`[Extended Hours] Processing ${ticker} - Current session: ${currentSession}, Extended hours: ${useExtendedHours}`);
+    // console.log(`[Extended Hours] Processing ${ticker} - Current session: ${currentSession}, Extended hours: ${useExtendedHours}`);
     
     try {
       if (useExtendedHours) {
         // Use extended trading hours data with adaptive fetching
-        console.log(`[Extended Hours] Fetching extended hours data for ${ticker}`);
+        // console.log(`[Extended Hours] Fetching extended hours data for ${ticker}`);
         
         // Try adaptive fetching with progressively longer periods
         const timeRanges = [
@@ -1816,21 +1817,21 @@ async function processAlertNormally(alert, validateNASDAQ = false) {
             
             // Check if we have enough candles for EMA200 (need at least 200 for both 1m and 5m)
             if (tempCandles1m.length >= 200 && tempCandles5m.length >= 200) {
-              console.log(`[Adaptive] Successful fetch for ${ticker}: ${tempCandles1m.length} 1m candles, ${tempCandles5m.length} 5m candles with ${timeRange.days} days`);
+              // console.log(`[Adaptive] Successful fetch for ${ticker}: ${tempCandles1m.length} 1m candles, ${tempCandles5m.length} 5m candles with ${timeRange.days} days`);
               candles1m = tempCandles1m;
               candles5m = tempCandles5m;
               fetchSuccess = true;
               break;
             } else {
-              console.log(`[Adaptive] Insufficient candles for ${ticker} with ${timeRange.days} days: ${tempCandles1m.length} 1m, ${tempCandles5m.length} 5m (need 200+ for both)`);
+              // console.log(`[Adaptive] Insufficient candles for ${ticker} with ${timeRange.days} days: ${tempCandles1m.length} 1m, ${tempCandles5m.length} 5m (need 200+ for both)`);
             }
           } catch (error) {
-            console.log(`[Adaptive] Error fetching ${ticker} with ${timeRange.days} days: ${error.message}`);
+            // console.log(`[Adaptive] Error fetching ${ticker} with ${timeRange.days} days: ${error.message}`);
           }
         }
         
         if (!fetchSuccess) {
-          console.warn(`[Adaptive] Failed to fetch sufficient candles for ${ticker} after trying all time ranges`);
+          // console.warn(`[Adaptive] Failed to fetch sufficient candles for ${ticker} after trying all time ranges`);
           // Use the last attempt's data anyway
           const [extendedData1m, extendedData5m] = await Promise.all([
             polygonService.fetchExtendedHoursCandles(ticker, 1, true, 60),
@@ -1842,10 +1843,10 @@ async function processAlertNormally(alert, validateNASDAQ = false) {
         
         isExtendedHours = true;
         
-        console.log(`[Extended Hours] Retrieved ${candles1m.length} 1m candles and ${candles5m.length} 5m candles for ${ticker}`);
+        // console.log(`[Extended Hours] Retrieved ${candles1m.length} 1m candles and ${candles5m.length} 5m candles for ${ticker}`);
       } else {
         // Use regular market hours data
-        console.log(`[Extended Hours] Fetching regular market hours data for ${ticker}`);
+        // console.log(`[Extended Hours] Fetching regular market hours data for ${ticker}`);
         
         // Start with 10 days for better EMA200 accuracy, extend if needed
         let daysToFetch = 10;
@@ -4707,6 +4708,28 @@ app.get('/api/stock/:symbol', async (req, res) => {
 });
 
 // Get historical 1-minute candles for a symbol
+// Get current price snapshot
+app.get('/api/price/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const price = await polygonService.getCurrentPrice(symbol);
+    
+    res.json({
+      success: true,
+      data: {
+        symbol,
+        price,
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 app.get('/api/history/:symbol', async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
@@ -4750,6 +4773,81 @@ app.get('/api/history/:symbol', async (req, res) => {
       }
     }
   } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+app.get('/api/indicators/macd/:symbol', async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const limit = parseInt(req.query.limit) || 200; // Default to 200 for sufficient calculation
+    
+    // Fetch enough history for MACD (at least 200 candles + buffer)
+    // We need more history to stabilize EMA
+    // Calculate limit needed for MACD: requested limit + 26 (slow) + 9 (signal) + buffer
+    const fetchLimit = Math.max(limit + 50, 300);
+    
+    // Use extended hours for continuous data
+    // Use days back to ensure enough data points
+    const daysBack = Math.ceil(fetchLimit / (60 * 6.5)) + 2; // Approximate days needed
+    
+    const result = await polygonService.fetchExtendedHoursCandles(symbol, 1, true, daysBack);
+    let candles = result.candles || [];
+    
+    if (candles.length < 35) { // Minimum for MACD calculation
+        return res.json({ success: false, error: 'Insufficient data for MACD' });
+    }
+    
+    // Calculate MACD using technicalindicators
+    const closes = candles.map(c => c.close);
+    const macdInput = {
+      values: closes,
+      fastPeriod: 12,
+      slowPeriod: 26,
+      signalPeriod: 9,
+      SimpleMAOscillator: false,
+      SimpleMASignal: false
+    };
+    
+    const macdOutput = MACD.calculate(macdInput);
+    
+    // Align timestamps
+    // macdOutput length is less than candles length. The result corresponds to the end of the data.
+    const resultStartIndex = candles.length - macdOutput.length;
+    
+    const macdSeries = [];
+    const signalSeries = [];
+    const histogramSeries = [];
+    
+    for (let i = 0; i < macdOutput.length; i++) {
+        const candleIndex = resultStartIndex + i;
+        const timestamp = new Date(candles[candleIndex].timestamp).getTime();
+        const point = macdOutput[i];
+        
+        macdSeries.push({ timestamp, value: point.MACD });
+        signalSeries.push({ timestamp, value: point.signal });
+        histogramSeries.push({ timestamp, value: point.histogram });
+    }
+    
+    // If user requested specific limit, slice from end
+    const limitedMacd = macdSeries.slice(-limit);
+    const limitedSignal = signalSeries.slice(-limit);
+    const limitedHistogram = histogramSeries.slice(-limit);
+    
+    res.json({
+      success: true,
+      data: {
+        macd: limitedMacd,
+        signal: limitedSignal,
+        histogram: limitedHistogram
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[MACD API] Error calculating MACD for ${req.params.symbol}:`, error);
     res.status(500).json({
       success: false,
       error: error.message

@@ -159,7 +159,7 @@ const StopLimitSection: React.FC = () => {
 
     refreshIntervalRef.current = window.setInterval(() => {
       fetchStatus();
-    }, 4000);
+    }, 1000);
 
     return () => {
       if (refreshIntervalRef.current) {
