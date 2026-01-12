@@ -13,6 +13,7 @@ const FloatSegmentationService = require('./api/floatSegmentationService');
 const MACDEMAVerificationService = require('./macdEmaVerificationService');
 const PnLProxyService = require('./pnlProxyService');
 const StopLimitService = require('./stopLimitService');
+const StopLimitV2Service = require('./stopLimitV2Service');
 const L2Service = require('./l2Service');
 const { ManualConfig, MANUAL_CONFIG_ID } = require('./models/manualConfig.model');
 const { MACD } = require('technicalindicators');
@@ -2474,6 +2475,10 @@ app.post('/api/stoplimit/config', (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing config' });
     }
     stopLimitService.updateGroupConfig(groupKey, config);
+    // Sync to V2
+    if (stopLimitV2Service) {
+        stopLimitV2Service.setGroupConfigs(stopLimitService.getGroupConfigs());
+    }
     const updatedConfigs = stopLimitService.getGroupConfigs();
     res.json({ success: true, data: updatedConfigs });
   } catch (e) {
@@ -2494,6 +2499,9 @@ app.post('/api/stoplimit/config/group', (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing config' });
     }
     stopLimitService.addGroupConfig(groupKey, config);
+    if (stopLimitV2Service) {
+        stopLimitV2Service.setGroupConfigs(stopLimitService.getGroupConfigs());
+    }
     const updatedConfigs = stopLimitService.getGroupConfigs();
     res.json({ success: true, data: updatedConfigs });
   } catch (e) {
@@ -2511,6 +2519,9 @@ app.delete('/api/stoplimit/config/group/:groupKey', (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing groupKey' });
     }
     stopLimitService.removeGroupConfig(groupKey);
+    if (stopLimitV2Service) {
+        stopLimitV2Service.setGroupConfigs(stopLimitService.getGroupConfigs());
+    }
     const updatedConfigs = stopLimitService.getGroupConfigs();
     res.json({ success: true, data: updatedConfigs });
   } catch (e) {
@@ -2822,6 +2833,7 @@ function isActiveOrderStatus(status) {
 
 // StopLimit automation service
 const stopLimitService = new StopLimitService({ ordersCache, positionsCache });
+const stopLimitV2Service = new StopLimitV2Service({ ordersCache, positionsCache });
 
 const STOPLIMIT_POSITION_SYNC_INTERVAL_MS = parseInt(process.env.STOPLIMIT_POSITION_SYNC_MS || '5000', 10);
 const STOPLIMIT_POSITION_STALE_THRESHOLD_MS = parseInt(process.env.STOPLIMIT_POSITION_STALE_MS || '60000', 10);
@@ -2963,6 +2975,19 @@ app.get('/api/stoplimit/status', requireDbReady, requireAuth, (req, res) => {
   }
 });
 
+app.get('/api/stoplimit/v2/snapshot', requireDbReady, requireAuth, (req, res) => {
+  try {
+    const snapshot = stopLimitV2Service.getSnapshot();
+    res.json({
+      success: true,
+      data: snapshot
+    });
+  } catch (e) {
+    console.error('❌ Error retrieving StopLimit V2 snapshot:', e);
+    res.status(500).json({ success: false, error: e.message || 'Failed to retrieve StopLimit V2 snapshot' });
+  }
+});
+
 app.post('/api/stoplimit/analysis', requireDbReady, requireAuth, async (req, res) => {
   try {
     const { enabled } = req.body || {};
@@ -3072,30 +3097,38 @@ function connectPositionsWebSocket() {
             });
             console.log(`📊 Position cache updated: ${symbol} (${quantity} shares)`);
 
-            if (stopLimitService) {
-              stopLimitService.handlePositionUpdate(dataObj).catch(err => {
-                console.error(`❌ StopLimitService position handler error for ${symbol}:`, err);
-              });
-            }
-          } else {
-            // Position closed or quantity is 0, remove from cache
-            positionsCache.delete(symbol);
-            if (typeof lastBuyTsByTicker !== 'undefined' && lastBuyTsByTicker.has(symbol)) {
-              lastBuyTsByTicker.delete(symbol);
-              console.log(`🔁 Reset buy lock for ${symbol} (position closed)`);
-            }
-            console.log(`📊 Position removed from cache: ${symbol}`);
-            if (stopLimitService) {
-              // Explicitly call cleanupPosition to remove it from StopLimit tracking immediately
-              stopLimitService.cleanupPosition(symbol);
-            }
-          }
-          
           if (stopLimitService) {
-            // Prune any other inactive symbols just in case
-            const activeSymbols = new Set(positionsCache.keys());
-            stopLimitService.pruneInactiveSymbols(activeSymbols);
+            stopLimitService.handlePositionUpdate(dataObj).catch(err => {
+              console.error(`❌ StopLimitService position handler error for ${symbol}:`, err);
+            });
           }
+          if (stopLimitV2Service) {
+            stopLimitV2Service.handlePositionUpdate(dataObj).catch(err => {
+              console.error(`❌ StopLimitV2Service position handler error for ${symbol}:`, err);
+            });
+          }
+        } else {
+          // Position closed or quantity is 0, remove from cache
+          positionsCache.delete(symbol);
+          if (typeof lastBuyTsByTicker !== 'undefined' && lastBuyTsByTicker.has(symbol)) {
+            lastBuyTsByTicker.delete(symbol);
+            console.log(`🔁 Reset buy lock for ${symbol} (position closed)`);
+          }
+          console.log(`📊 Position removed from cache: ${symbol}`);
+          if (stopLimitService) {
+            // Explicitly call cleanupPosition to remove it from StopLimit tracking immediately
+            stopLimitService.cleanupPosition(symbol);
+          }
+          if (stopLimitV2Service) {
+            stopLimitV2Service.handlePositionClosed(symbol);
+          }
+        }
+        
+        if (stopLimitService) {
+          // Prune any other inactive symbols just in case
+          const activeSymbols = new Set(positionsCache.keys());
+          stopLimitService.pruneInactiveSymbols(activeSymbols);
+        }
         }
       } catch (err) {
         console.error('⚠️ Error parsing positions WebSocket message:', err.message);
@@ -3199,13 +3232,18 @@ function connectOrdersWebSocket() {
             lastUpdated: Date.now()
           });
           
-          if (stopLimitService) {
-            stopLimitService.handleOrderUpdate(order).catch(err => {
-              console.error(`❌ StopLimitService order handler error for ${orderId}:`, err);
-            });
-          }
+        if (stopLimitService) {
+          stopLimitService.handleOrderUpdate(order).catch(err => {
+            console.error(`❌ StopLimitService order handler error for ${orderId}:`, err);
+          });
+        }
+        if (stopLimitV2Service) {
+          stopLimitV2Service.handleOrderUpdate(order).catch(err => {
+            console.error(`❌ StopLimitV2Service order handler error for ${orderId}:`, err);
+          });
+        }
 
-          // Log order updates for debugging (only for active orders)
+        // Log order updates for debugging (only for active orders)
           if (isActiveOrderStatus(order.Status)) {
             const symbol = order.Legs && order.Legs.length > 0 ? order.Legs[0].Symbol : 'UNKNOWN';
             console.log(`📋 Order cache updated: ${orderId} (${symbol}, Status: ${order.Status})`);
