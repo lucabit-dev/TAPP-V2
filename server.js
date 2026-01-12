@@ -3086,11 +3086,13 @@ function connectPositionsWebSocket() {
             }
             console.log(`📊 Position removed from cache: ${symbol}`);
             if (stopLimitService) {
+              // Explicitly call cleanupPosition to remove it from StopLimit tracking immediately
               stopLimitService.cleanupPosition(symbol);
             }
           }
           
           if (stopLimitService) {
+            // Prune any other inactive symbols just in case
             const activeSymbols = new Set(positionsCache.keys());
             stopLimitService.pruneInactiveSymbols(activeSymbols);
           }

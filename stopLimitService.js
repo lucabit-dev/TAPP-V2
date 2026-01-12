@@ -84,28 +84,7 @@ class StopLimitService {
       console.log(`📊 StopLimitService: ${symbol} position update - unrealizedQty=${unrealizedQty.toFixed(4)}, quantity=${quantity}, avgPrice=${avgPrice?.toFixed(2)}`);
     }
 
-    if (!quantity || quantity <= 0) {
-      console.log(`🧹 StopLimitService: Position ${symbol} has quantity ${quantity} - cleaning up tracking`);
-      this.cleanupPosition(symbol);
-      return;
-    }
-
-    if (!avgPrice || avgPrice <= 0) {
-      console.warn(`⚠️ StopLimitService: Skipping ${symbol} - invalid average price: ${position?.AveragePrice}`);
-      return;
-    }
-
-    if (longShort !== 'LONG') {
-      // Only manage long positions for this automation
-      // If we were tracking this position, cleanup since it's no longer LONG
-      if (this.trackedPositions.has(symbol)) {
-        console.log(`🧹 StopLimitService: Position ${symbol} is no longer LONG (${longShort}), cleaning up tracking`);
-        this.cleanupPosition(symbol);
-      }
-      return;
-    }
-
-    // CRITICAL: If quantity is 0 or negative, position is closed - cleanup immediately
+    // 1. If quantity is 0 or negative, position is closed - cleanup immediately
     if (!quantity || quantity <= 0) {
       if (this.trackedPositions.has(symbol)) {
         console.log(`🧹 StopLimitService: Position ${symbol} is closed (quantity: ${quantity}), cleaning up tracking immediately`);
@@ -114,12 +93,28 @@ class StopLimitService {
       return;
     }
 
+    // 2. If no longer LONG, cleanup immediately
+    if (longShort !== 'LONG') {
+      if (this.trackedPositions.has(symbol)) {
+        console.log(`🧹 StopLimitService: Position ${symbol} is no longer LONG (${longShort}), cleaning up tracking`);
+        this.cleanupPosition(symbol);
+      }
+      return;
+    }
+
+    if (!avgPrice || avgPrice <= 0) {
+      console.warn(`⚠️ StopLimitService: Skipping ${symbol} - invalid average price: ${position?.AveragePrice}`);
+      return;
+    }
+
+    // 3. Ensure we have a valid state
     let state = this.trackedPositions.get(symbol);
     if (!state) {
       // CRITICAL: Final validation before creating new state
       // This prevents re-adding closed positions that might have passed earlier checks
+      // We check our local hasActivePosition logic which checks caches
       if (!this.hasActivePosition(symbol)) {
-        console.log(`🧹 StopLimitService: Skipping ${symbol} - position is not active (may have closed)`);
+        console.log(`🧹 StopLimitService: Skipping ${symbol} - position is not active in cache (may have closed)`);
         return;
       }
 
