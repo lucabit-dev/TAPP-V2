@@ -2778,5 +2778,5 @@ class StopLimitV2Service {
   }
 }
 
-module.exports = StopLimitService;
+module.exports = StopLimitV2Service;
 
