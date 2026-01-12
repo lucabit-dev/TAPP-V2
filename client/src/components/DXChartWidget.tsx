@@ -42,21 +42,26 @@ const DXChartWidget: React.FC<DXChartWidgetProps> = ({ symbol }) => {
                 }
             },
             colors: {
-                chartArea: {
-                    background: '#14130e',
-                    grid: '#2a2820'
+                chartAreaTheme: {
+                    backgroundColor: '#14130e',
+                    gridColor: '#2a2820'
                 },
-                axis: {
-                    text: '#969696',
-                    tick: '#2a2820',
+                xAxis: {
+                    labelTextColor: '#969696',
+                    backgroundColor: '#14130e'
                 },
-                candle: {
-                    up: '#4ec9b0',
-                    down: '#f44747',
-                    wickUp: '#4ec9b0',
-                    wickDown: '#f44747',
-                    outlineUp: '#4ec9b0',
-                    outlineDown: '#f44747'
+                yAxis: {
+                    labelTextColor: '#969696',
+                    backgroundColor: '#14130e',
+                    labelBoxColor: '#2a2820'
+                },
+                candleTheme: {
+                    upColor: '#4ec9b0',
+                    downColor: '#f44747',
+                    upWickColor: '#4ec9b0',
+                    downWickColor: '#f44747',
+                    noneColor: '#969696',
+                    noneWickColor: '#969696'
                 }
             }
         });
