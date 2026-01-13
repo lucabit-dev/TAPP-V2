@@ -859,49 +859,49 @@ const PositionsWithStopLimitSection: React.FC = () => {
                         {/* Stage & Progress */}
                         <div className="text-center">
                           {stopLimit && stopLimit.status === 'active' ? (
-                            <div className="flex flex-col items-center justify-center bg-[#1a1915] border border-[#2a2820]/40 rounded-lg p-3 mx-auto min-w-[180px]">
-                              <div className="w-full mb-2">
-                                <div className="flex items-center justify-between mb-1">
-                                  <span className="font-bold text-[#eae9e9] text-sm">{stopLimit.stageLabel}</span>
-                                </div>
-                                <div className="text-[11px] text-[#808080] mb-2">{stopLimit.stageDescription}</div>
+                            <div className="flex flex-row items-center justify-center gap-2 bg-[#1a1915] border border-[#2a2820]/40 rounded px-2 py-1.5 mx-auto">
+                              {/* Stage Info */}
+                              <div className="flex flex-col items-start min-w-0">
+                                <span className="font-bold text-[#eae9e9] text-xs leading-tight">{stopLimit.stageLabel}</span>
+                                <span className="text-[9px] text-[#808080] leading-tight truncate max-w-[80px]">{stopLimit.stageDescription}</span>
                               </div>
                               
+                              {/* Separator */}
+                              <div className="w-px h-4 bg-[#2a2820]/40"></div>
+                              
+                              {/* Next Stage */}
                               {stopLimit.nextStageLabel ? (
-                                <div className="w-full pt-2 border-t border-[#2a2820]/40">
-                                  <div className="flex items-center justify-between">
-                                    <span className="text-[10px] text-[#808080] uppercase tracking-wide">Next:</span>
-                                    <div className="flex items-center space-x-2">
-                                      <span className="text-[11px] text-[#eae9e9] font-semibold">{stopLimit.nextStageLabel}</span>
-                                      {stopLimit.nextTrigger !== null && (
-                                        <span className="text-[10px] text-[#4ade80] bg-[#4ade80]/20 px-2 py-0.5 rounded font-medium">
-                                          +{(stopLimit.nextTrigger * 100).toFixed(0)}%
-                                        </span>
-                                      )}
-                                    </div>
-                                  </div>
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  <span className="text-[9px] text-[#808080] uppercase tracking-wide whitespace-nowrap">Next:</span>
+                                  <span className="text-[10px] text-[#eae9e9] font-semibold leading-tight truncate max-w-[60px]">{stopLimit.nextStageLabel}</span>
+                                  {stopLimit.nextTrigger !== null && (
+                                    <span className="text-[9px] text-[#4ade80] bg-[#4ade80]/20 px-1 py-0.5 rounded font-medium whitespace-nowrap">
+                                      +{(stopLimit.nextTrigger * 100).toFixed(0)}%
+                                    </span>
+                                  )}
                                 </div>
                               ) : (
-                                <div className="w-full pt-2 border-t border-[#2a2820]/40">
-                                  <span className="text-[10px] text-[#4ade80] uppercase tracking-widest font-bold">Max Stage Reached</span>
+                                <div className="flex items-center">
+                                  <span className="text-[9px] text-[#4ade80] uppercase tracking-wider font-bold whitespace-nowrap">Max</span>
                                 </div>
                               )}
-
+                              
+                              {/* Progress Bar */}
                               {stopLimit.progress !== null && (
-                                <div className="w-full mt-3">
-                                  <div className="flex items-center justify-between mb-1">
-                                    <span className="text-[9px] text-[#808080] uppercase tracking-wide">Progress</span>
-                                    <span className="text-[10px] text-[#eae9e9] font-mono font-semibold">
+                                <>
+                                  <div className="w-px h-4 bg-[#2a2820]/40"></div>
+                                  <div className="flex items-center gap-1.5 min-w-[60px]">
+                                    <div className="flex-1 h-1.5 bg-[#2a2820] rounded-full overflow-hidden shadow-inner min-w-[40px]">
+                                      <div 
+                                        className="h-full bg-gradient-to-r from-[#4ade80] to-[#22c55e] shadow-[0_0_4px_rgba(74,222,128,0.4)] transition-all duration-500 ease-out" 
+                                        style={{ width: `${Math.min(Math.max((stopLimit.progress || 0) * 100, 0), 100)}%` }}
+                                      ></div>
+                                    </div>
+                                    <span className="text-[9px] text-[#eae9e9] font-mono font-semibold whitespace-nowrap">
                                       {Math.min(Math.max((stopLimit.progress || 0) * 100, 0), 100).toFixed(0)}%
                                     </span>
                                   </div>
-                                  <div className="w-full h-2 bg-[#2a2820] rounded-full overflow-hidden shadow-inner">
-                                    <div 
-                                      className="h-full bg-gradient-to-r from-[#4ade80] to-[#22c55e] shadow-[0_0_8px_rgba(74,222,128,0.4)] transition-all duration-500 ease-out" 
-                                      style={{ width: `${Math.min(Math.max((stopLimit.progress || 0) * 100, 0), 100)}%` }}
-                                    ></div>
-                                  </div>
-                                </div>
+                                </>
                               )}
                             </div>
                           ) : (
