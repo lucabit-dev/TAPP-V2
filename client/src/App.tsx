@@ -640,8 +640,8 @@ function App() {
                   ))}
                 </div> */}
 
-                {/* Lists group */}
-                <div className="flex items-center space-x-1">
+                {/* Lists group - Hidden */}
+                {/* <div className="flex items-center space-x-1">
                   <button
                     onClick={() => setListsCollapsed(!listsCollapsed)}
                     className="flex items-center space-x-1 px-2 py-1 text-xs opacity-60 hover:opacity-100 transition-colors"
@@ -659,9 +659,7 @@ function App() {
                   </button>
                   {!listsCollapsed && [ 
                     { key: 'listas-float-raw', label: 'Listas FLOAT (RAW)', count: 0 },
-                    /* { key: 'config-float', label: 'Config FLOAT', count: 0 }, */
                     { key: 'buy-list', label: 'Buy List', count: 0 },
-                    { key: 'orders', label: 'Orders', count: 0 },
                   ].map(tab => (
                     <button
                       key={tab.key}
@@ -678,7 +676,7 @@ function App() {
                       <span className="relative z-10">{tab.label}</span>
                     </button>
                   ))}
-                </div>
+                </div> */}
 
                 {/* Manual group */}
                 <div className="flex items-center space-x-1">
@@ -701,6 +699,7 @@ function App() {
                     { key: 'manual', label: 'MANUAL', count: 0 },
                     { key: 'manual-non-qualified', label: 'NON-QUALIFIED', count: 0 },
                     { key: 'pnl', label: 'P&L', count: 0 },
+                    { key: 'orders', label: 'Orders', count: 0 },
                     { key: 'stoplimit', label: 'Stop Limit', count: 0 },
                     { key: 'stoplimit-v2', label: 'Stop Limit V2', count: 0 },
                     { key: 'l2', label: 'L2', count: 0 },
