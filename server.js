@@ -4375,10 +4375,55 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
       });
     }
 
-    // Remove position from StopLimit tracking when manually sold
-    if (isSuccess && stopLimitService && side === 'SELL') {
-      console.log(`🧹 StopLimitService: Removing ${symbol} from tracking (manually sold)`);
-      stopLimitService.cleanupPosition(symbol);
+    // CRITICAL: Remove position from StopLimit tracking IMMEDIATELY when manually sold
+    // This ensures the position is removed from V2 as soon as the sell button is clicked
+    if (isSuccess && side === 'SELL') {
+      if (stopLimitService) {
+        console.log(`🧹 StopLimitService: Removing ${symbol} from tracking (manually sold)`);
+        stopLimitService.cleanupPosition(symbol);
+      }
+      if (stopLimitV2Service) {
+        console.log(`🧹 StopLimitV2Service: Immediately removing ${symbol} from tracking (manual sell order placed)`);
+        
+        // Get tracked state before cleanup for P&L calculation
+        const trackedState = stopLimitV2Service.trackedPositions?.get(symbol);
+        
+        // Immediately mark as sold in V2 - don't wait for order to fill or position to be removed
+        // This ensures the position disappears from V2 as soon as sell is clicked
+        if (trackedState) {
+          // Get current price for P&L calculation (fire-and-forget, non-blocking)
+          // The actual sell price will be updated when the order is filled via WebSocket
+          const estimatedSellPrice = trackedState.lastLimitPrice || trackedState.avgPrice;
+          
+          // Mark as sold with available info
+          stopLimitV2Service.recordSoldPosition(symbol, {
+            positionId: trackedState.positionId,
+            accountId: trackedState.accountId,
+            groupKey: trackedState.groupKey,
+            avgPrice: trackedState.avgPrice,
+            quantity: trackedState.quantity,
+            sellPrice: estimatedSellPrice, // Will be updated when order fills
+            pnlPerShare: null, // Will be calculated when order fills
+            totalPnL: null, // Will be calculated when order fills
+            orderId: null, // Will be updated when order is filled
+            soldAt: Date.now(),
+            createdAt: trackedState.createdAt,
+            stageIndex: trackedState.stageIndex,
+            lastStopPrice: trackedState.lastStopPrice,
+            lastLimitPrice: trackedState.lastLimitPrice
+          });
+          console.log(`✅ StopLimitV2Service: Position ${symbol} marked as SOLD immediately (manual sell)`);
+        } else {
+          // Position wasn't tracked, but mark as sold anyway to prevent future tracking
+          stopLimitV2Service.recordSoldPosition(symbol, {
+            soldAt: Date.now()
+          });
+          console.log(`✅ StopLimitV2Service: Position ${symbol} marked as SOLD (wasn't tracked, but manual sell placed)`);
+        }
+        
+        // Also call handlePositionClosed to ensure cleanup
+        stopLimitV2Service.handlePositionClosed(symbol);
+      }
     }
     
     // External API responded (even if error), return 200 with success flag

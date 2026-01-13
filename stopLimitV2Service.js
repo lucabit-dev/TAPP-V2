@@ -83,33 +83,23 @@ class StopLimitV2Service {
     const unrealizedQty = this.parseNumber(position?.UnrealizedProfitLossQty);
     const longShort = (position?.LongShort || '').toUpperCase();
     
-    // CRITICAL: If position is already marked as sold, don't track it
-    // For V2, if sold, we update it in soldPositions if we have new info, but don't re-track as active
+    // CRITICAL: If position is already marked as sold, check if it's a re-entry
+    // If quantity > 0 and position exists in cache, it's a new position (re-entry) - allow tracking
     if (this.soldPositions.has(symbol)) {
-      // If we receive a position update for a "sold" position, it might mean we bought it back?
-      // Or it's a delayed message. 
-      // If quantity > 0, we should probably re-activate it?
-      // The user says: "if a position is not received anymore it means I do not have it anymore."
-      // "Once a stock has been bought it now appreas in my POSITIONS WEBSOCKET"
-      
-      // If quantity > 0 and we thought it was sold, we should probably resurrect it?
-      // But for safety, let's just log and maybe ignore if we want strict "once sold stay sold until reset".
-      // However, usually trading involves re-entering.
-      // Let's assume if quantity > 0, it is ACTIVE.
-      // But wait, the previous logic was aggressive about ignoring sold positions.
-      // "CRITICAL: If position is already marked as sold, don't track it"
-      
-      // For V2: "Active means the position is being analyzed... Closed means the position has been sold."
-      // If I buy it again, it should become Active again.
-      // So if quantity > 0, I should probably remove from soldPositions and add to trackedPositions?
-      // Let's stick to the V1 logic for now to be safe, but V2 might need to handle re-entry.
-      // I'll leave the check for now.
-      
-      console.log(`🛑 StopLimitV2Service: Ignoring position update for ${symbol} - position is already marked as sold`);
-      if (this.trackedPositions.has(symbol)) {
-        this.cleanupPosition(symbol);
+      // Check if this is a re-entry (new position after being sold)
+      if (quantity > 0 && this.hasActivePosition(symbol)) {
+        // This is a re-entry - remove from sold positions and allow tracking
+        console.log(`🔄 StopLimitV2Service: Position ${symbol} re-entered after being sold - removing from sold list and re-tracking`);
+        this.soldPositions.delete(symbol);
+        // Continue to track this position
+      } else {
+        // Still sold or invalid - don't track
+        console.log(`🛑 StopLimitV2Service: Ignoring position update for ${symbol} - position is already marked as sold`);
+        if (this.trackedPositions.has(symbol)) {
+          this.cleanupPosition(symbol);
+        }
+        return;
       }
-      return;
     }
 
     // Debug logging for stage evaluation
