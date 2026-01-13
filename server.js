@@ -4333,6 +4333,11 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
         }
       };
       
+      // CRITICAL: Cancel all active sell orders BEFORE attempting to create a new one
+      // This is essential to prevent API rejections due to conflicting orders
+      let cancellationSuccessful = true;
+      let cancellationError = null;
+      
       try {
         // First, find all active sell orders in the global cache
         let activeSellOrders = findActiveSellOrdersInCache(symbol);
@@ -4359,7 +4364,8 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
           );
           
           const successCount = cancelResults.filter(r => r.status === 'fulfilled' && r.value === true).length;
-          console.log(`✅ Successfully cancelled ${successCount}/${activeSellOrders.length} orders`);
+          const failedCount = cancelResults.length - successCount;
+          console.log(`✅ Successfully cancelled ${successCount}/${activeSellOrders.length} orders${failedCount > 0 ? `, ${failedCount} failed` : ''}`);
           
           // Wait for cancellation to propagate
           await new Promise(resolve => setTimeout(resolve, 1500));
@@ -4367,8 +4373,12 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
         
         // Also use StopLimitService if available (for its own tracking)
         if (stopLimitService) {
-          await stopLimitService.deleteExistingSellOrders(symbol);
-          await new Promise(resolve => setTimeout(resolve, 500));
+          try {
+            await stopLimitService.deleteExistingSellOrders(symbol);
+            await new Promise(resolve => setTimeout(resolve, 500));
+          } catch (slErr) {
+            console.warn(`⚠️ StopLimitService deletion failed for ${symbol}:`, slErr.message);
+          }
         }
         
         // Final check - verify no active orders remain (check both caches)
@@ -4387,13 +4397,16 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
           
           // Retry cancellation for remaining orders with individual delays
           for (const order of finalCheck) {
-            await cancelOrderDirectly(order.orderId);
+            const cancelled = await cancelOrderDirectly(order.orderId);
+            if (!cancelled) {
+              console.warn(`⚠️ Failed to cancel order ${order.orderId} during retry`);
+            }
             await new Promise(resolve => setTimeout(resolve, 300)); // Small delay between cancellations
           }
           
           await new Promise(resolve => setTimeout(resolve, 2000)); // Longer wait after retry
           
-          // Final verification
+          // Final verification - check both caches one more time
           let finalRemaining = findActiveSellOrdersInCache(symbol);
           if (stopLimitService) {
             const slFinalRemaining = stopLimitService.findActiveSellOrders(symbol);
@@ -4407,6 +4420,8 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
           if (finalRemaining.length > 0) {
             const errorMsg = `Cannot create new sell order: ${finalRemaining.length} active SELL order(s) still exist for ${symbol} after deletion attempts. Order IDs: ${finalRemaining.map(o => o.orderId).join(', ')}`;
             console.error(`❌ ${errorMsg}`);
+            cancellationSuccessful = false;
+            cancellationError = errorMsg;
             return res.status(400).json({
               success: false,
               error: errorMsg,
@@ -4422,9 +4437,16 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
           console.log(`✅ Verified: No remaining active SELL orders for ${symbol}`);
         }
       } catch (cleanupErr) {
-        console.error(`❌ P&L Sell: Error cleaning up existing orders for ${symbol}:`, cleanupErr);
-        // Don't fail completely - try to proceed anyway
-        // The order might still be placed, and if there's a conflict, the API will reject it
+        console.error(`❌ P&L Sell: Critical error cleaning up existing orders for ${symbol}:`, cleanupErr);
+        cancellationSuccessful = false;
+        cancellationError = `Failed to cancel existing orders: ${cleanupErr.message}`;
+        // Continue anyway - cancellation errors shouldn't block the sell attempt
+        // The API will handle conflicts if orders still exist
+      }
+      
+      // Log cancellation status
+      if (!cancellationSuccessful && cancellationError) {
+        console.warn(`⚠️ P&L Sell: Cancellation had issues for ${symbol}, but proceeding with sell attempt: ${cancellationError}`);
       }
     }
     
