@@ -747,20 +747,17 @@ const PositionsWithStopLimitSection: React.FC = () => {
           <div className="h-full flex flex-col">
             {/* Table Header */}
             <div className="bg-[#14130e] border-b border-[#2a2820] px-4 py-3 sticky top-0 z-10">
-              <div className="grid grid-cols-16 gap-2 text-xs font-medium opacity-60 uppercase tracking-wide">
-                <div className="col-span-2">Symbol</div>
-                <div className="col-span-1 text-right">Qty</div>
-                <div className="col-span-1 text-right">Avg Price</div>
-                <div className="col-span-1 text-right">Last</div>
-                <div className="col-span-1 text-right">Market Value</div>
-                <div className="col-span-1 text-right">Unrealized P&L</div>
-                <div className="col-span-1 text-right">P&L %</div>
-                <div className="col-span-1 text-right">Stop</div>
-                <div className="col-span-1 text-right">Limit</div>
-                <div className="col-span-3 text-center">Stage & Progress</div>
-                <div className="col-span-1 text-right">Today's P&L</div>
-                <div className="col-span-1 text-right">Time</div>
-                <div className="col-span-1 text-center">Action</div>
+              <div className="grid grid-cols-10 gap-4 text-xs font-medium opacity-60 uppercase tracking-wide">
+                <div>Symbol</div>
+                <div className="text-right">Qty</div>
+                <div className="text-right">Avg Price</div>
+                <div className="text-right">Last</div>
+                <div className="text-right">Unrealized P&L</div>
+                <div className="text-right">P&L</div>
+                <div className="text-right">Limit</div>
+                <div className="text-right">Time</div>
+                <div className="text-center">Stage & Progress</div>
+                <div className="text-center">Action</div>
               </div>
             </div>
 
@@ -783,9 +780,9 @@ const PositionsWithStopLimitSection: React.FC = () => {
                         index % 2 === 0 ? 'bg-[#0f0e0a]' : 'bg-[#14130e]'
                       }`}
                     >
-                      <div className="grid grid-cols-16 gap-2 items-center text-sm">
+                      <div className="grid grid-cols-10 gap-4 items-center text-sm">
                         {/* Symbol */}
-                        <div className="col-span-2">
+                        <div>
                           <div className="flex items-center space-x-2">
                             {stopLimit && stopLimit.status === 'active' && (
                               <div className="w-1 h-6 rounded-full bg-[#4ade80]"></div>
@@ -800,50 +797,36 @@ const PositionsWithStopLimitSection: React.FC = () => {
                         </div>
 
                         {/* Quantity */}
-                        <div className="col-span-1 text-right">
+                        <div className="text-right">
                           <div className="text-[#eae9e9] font-mono">{formatQuantity(position.Quantity)}</div>
                         </div>
 
                         {/* Average Price */}
-                        <div className="col-span-1 text-right">
+                        <div className="text-right">
                           <div className="text-[#eae9e9] font-mono text-xs">{formatPrice(position.AveragePrice)}</div>
                         </div>
 
                         {/* Last */}
-                        <div className="col-span-1 text-right">
+                        <div className="text-right">
                           <div className="text-[#eae9e9] font-mono text-xs">{formatPrice(position.Last)}</div>
                         </div>
 
-                        {/* Market Value */}
-                        <div className="col-span-1 text-right">
-                          <div className="text-[#eae9e9] font-mono text-xs">{formatPrice(position.MarketValue)}</div>
-                        </div>
-
                         {/* Unrealized P&L */}
-                        <div className="col-span-1 text-right">
+                        <div className="text-right">
                           <div className={`font-semibold font-mono text-xs ${unrealizedPL >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
                             {formatPrice(position.UnrealizedProfitLoss)}
                           </div>
                         </div>
 
                         {/* P&L % */}
-                        <div className="col-span-1 text-right">
-                          <div className={`font-semibold font-mono ${unrealizedPLPercent >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
+                        <div className="text-right">
+                          <div className={`font-semibold font-mono text-xs ${unrealizedPLPercent >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
                             {formatPercent(position.UnrealizedProfitLossPercent)}
                           </div>
                         </div>
 
-                        {/* Stop Price */}
-                        <div className="col-span-1 text-right">
-                          {stopLimit && stopLimit.stopPrice !== null ? (
-                            <div className="font-mono text-[#facc15] font-medium text-xs">{formatCurrency(stopLimit.stopPrice)}</div>
-                          ) : (
-                            <div className="text-[#2a2820] text-xs">-</div>
-                          )}
-                        </div>
-
                         {/* Limit Price */}
-                        <div className="col-span-1 text-right">
+                        <div className="text-right">
                           {stopLimit && stopLimit.limitPrice !== null ? (
                             <div className="font-mono text-[#facc15]/80 text-xs">{formatCurrency(stopLimit.limitPrice)}</div>
                           ) : (
@@ -851,10 +834,15 @@ const PositionsWithStopLimitSection: React.FC = () => {
                           )}
                         </div>
 
+                        {/* Time */}
+                        <div className="text-right">
+                          <div className="text-xs opacity-60 font-mono">{formatTimestamp(position.Timestamp)}</div>
+                        </div>
+
                         {/* Stage & Progress */}
-                        <div className="col-span-3 text-center">
+                        <div className="text-center">
                           {stopLimit && stopLimit.status === 'active' ? (
-                            <div className="flex flex-col items-center justify-center bg-[#1a1915] border border-[#2a2820]/40 rounded-lg p-2 mx-auto">
+                            <div className="flex flex-col items-center justify-center bg-[#1a1915] border border-[#2a2820]/40 rounded-lg p-2 mx-auto max-w-[200px]">
                               <div className="flex items-center justify-between w-full mb-1">
                                 <span className="font-bold text-[#eae9e9] text-xs">{stopLimit.stageLabel}</span>
                                 <span className="text-[10px] text-[#808080] truncate ml-2">{stopLimit.stageDescription}</span>
@@ -892,20 +880,8 @@ const PositionsWithStopLimitSection: React.FC = () => {
                           )}
                         </div>
 
-                        {/* Today's P&L */}
-                        <div className="col-span-1 text-right">
-                          <div className={`font-semibold font-mono text-xs ${todaysPL >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
-                            {formatPrice(position.TodaysProfitLoss)}
-                          </div>
-                        </div>
-
-                        {/* Time */}
-                        <div className="col-span-1 text-right">
-                          <div className="text-xs opacity-60 font-mono">{formatTimestamp(position.Timestamp)}</div>
-                        </div>
-
                         {/* Sell Button */}
-                        <div className="col-span-1 text-center">
+                        <div className="text-center">
                           <button
                             onClick={() => handleSell(position)}
                             disabled={sellingPositions.has(position.PositionID)}
