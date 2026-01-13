@@ -4261,13 +4261,22 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
         const normalized = symbol.toUpperCase();
         const activeOrders = [];
         
+        // Active order statuses that can be cancelled
+        const activeStatuses = new Set(['ACK', 'DON', 'REC', 'QUE', 'QUEUED', 'OPEN', 'NEW', 'PENDING', 'PARTIALLY_FILLED', 'PND']);
+        // Terminal statuses that cannot be cancelled
+        const terminalStatuses = new Set(['FIL', 'FLL', 'CAN', 'EXP', 'REJ', 'OUT', 'CANCELLED', 'FILLED', 'REJECTED', 'EXPIRED']);
+        
         for (const [orderId, order] of ordersCache.entries()) {
           if (!order || !order.Legs) continue;
           const status = (order.Status || '').toUpperCase();
           
-          // Check if order is active (not terminal)
-          const terminalStatuses = ['FIL', 'FLL', 'CAN', 'EXP', 'REJ', 'OUT'];
-          if (terminalStatuses.includes(status)) continue;
+          // Skip terminal statuses
+          if (terminalStatuses.has(status)) continue;
+          
+          // Include if it's an active status OR if status is unknown (better to try cancelling than miss it)
+          const isActive = activeStatuses.has(status) || !status || status === '';
+          
+          if (!isActive) continue;
           
           // Check if it's a SELL order for this symbol
           for (const leg of order.Legs) {
@@ -4286,6 +4295,7 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
       // Helper function to cancel an order directly via API
       const cancelOrderDirectly = async (orderId) => {
         try {
+          console.log(`🗑️ Attempting to cancel order ${orderId}...`);
           const resp = await fetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(orderId)}`, {
             method: 'DELETE',
             headers: {
@@ -4293,16 +4303,28 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
             }
           });
           
-          if (resp.ok || resp.status === 200 || resp.status === 204) {
-            console.log(`✅ Successfully cancelled order ${orderId}`);
+          const statusCode = resp.status;
+          const isSuccess = resp.ok || statusCode === 200 || statusCode === 204;
+          
+          if (isSuccess) {
+            console.log(`✅ Successfully cancelled order ${orderId} (HTTP ${statusCode})`);
             // Remove from cache if it exists
             if (ordersCache.has(orderId)) {
               ordersCache.delete(orderId);
+              console.log(`🗑️ Removed order ${orderId} from cache`);
             }
             return true;
           } else {
             const text = await resp.text().catch(() => '');
-            console.warn(`⚠️ Failed to cancel order ${orderId}: HTTP ${resp.status} - ${text}`);
+            // Some APIs return 404 if order doesn't exist - that's also success for our purposes
+            if (statusCode === 404) {
+              console.log(`✅ Order ${orderId} not found (likely already cancelled) - treating as success`);
+              if (ordersCache.has(orderId)) {
+                ordersCache.delete(orderId);
+              }
+              return true;
+            }
+            console.warn(`⚠️ Failed to cancel order ${orderId}: HTTP ${statusCode} - ${text}`);
             return false;
           }
         } catch (err) {
@@ -4313,17 +4335,34 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
       
       try {
         // First, find all active sell orders in the global cache
-        const activeSellOrders = findActiveSellOrdersInCache(symbol);
+        let activeSellOrders = findActiveSellOrdersInCache(symbol);
         console.log(`🔍 Found ${activeSellOrders.length} active sell order(s) for ${symbol} in orders cache`);
+        
+        // Also check StopLimitService cache if available
+        if (stopLimitService) {
+          const stopLimitOrders = stopLimitService.findActiveSellOrders(symbol);
+          console.log(`🔍 Found ${stopLimitOrders.length} active sell order(s) for ${symbol} in StopLimitService cache`);
+          
+          // Merge orders from both sources (avoid duplicates)
+          for (const slOrder of stopLimitOrders) {
+            if (!activeSellOrders.find(o => o.orderId === slOrder.orderId)) {
+              activeSellOrders.push(slOrder);
+            }
+          }
+        }
         
         // Cancel all active sell orders directly
         if (activeSellOrders.length > 0) {
           console.log(`🗑️ Cancelling ${activeSellOrders.length} active sell order(s) for ${symbol}...`);
-          const cancelPromises = activeSellOrders.map(order => cancelOrderDirectly(order.orderId));
-          await Promise.all(cancelPromises);
+          const cancelResults = await Promise.allSettled(
+            activeSellOrders.map(order => cancelOrderDirectly(order.orderId))
+          );
+          
+          const successCount = cancelResults.filter(r => r.status === 'fulfilled' && r.value === true).length;
+          console.log(`✅ Successfully cancelled ${successCount}/${activeSellOrders.length} orders`);
           
           // Wait for cancellation to propagate
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          await new Promise(resolve => setTimeout(resolve, 1500));
         }
         
         // Also use StopLimitService if available (for its own tracking)
@@ -4332,18 +4371,39 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
           await new Promise(resolve => setTimeout(resolve, 500));
         }
         
-        // Final check - verify no active orders remain
-        const finalCheck = findActiveSellOrdersInCache(symbol);
+        // Final check - verify no active orders remain (check both caches)
+        let finalCheck = findActiveSellOrdersInCache(symbol);
+        if (stopLimitService) {
+          const slFinalCheck = stopLimitService.findActiveSellOrders(symbol);
+          for (const slOrder of slFinalCheck) {
+            if (!finalCheck.find(o => o.orderId === slOrder.orderId)) {
+              finalCheck.push(slOrder);
+            }
+          }
+        }
+        
         if (finalCheck.length > 0) {
           console.warn(`⚠️ P&L Sell: ${finalCheck.length} active sell order(s) still exist after cancellation attempts. Retrying...`);
           
-          // Retry cancellation for remaining orders
-          const retryPromises = finalCheck.map(order => cancelOrderDirectly(order.orderId));
-          await Promise.all(retryPromises);
-          await new Promise(resolve => setTimeout(resolve, 1500));
+          // Retry cancellation for remaining orders with individual delays
+          for (const order of finalCheck) {
+            await cancelOrderDirectly(order.orderId);
+            await new Promise(resolve => setTimeout(resolve, 300)); // Small delay between cancellations
+          }
+          
+          await new Promise(resolve => setTimeout(resolve, 2000)); // Longer wait after retry
           
           // Final verification
-          const finalRemaining = findActiveSellOrdersInCache(symbol);
+          let finalRemaining = findActiveSellOrdersInCache(symbol);
+          if (stopLimitService) {
+            const slFinalRemaining = stopLimitService.findActiveSellOrders(symbol);
+            for (const slOrder of slFinalRemaining) {
+              if (!finalRemaining.find(o => o.orderId === slOrder.orderId)) {
+                finalRemaining.push(slOrder);
+              }
+            }
+          }
+          
           if (finalRemaining.length > 0) {
             const errorMsg = `Cannot create new sell order: ${finalRemaining.length} active SELL order(s) still exist for ${symbol} after deletion attempts. Order IDs: ${finalRemaining.map(o => o.orderId).join(', ')}`;
             console.error(`❌ ${errorMsg}`);
