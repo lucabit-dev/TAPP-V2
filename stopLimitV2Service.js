@@ -2587,9 +2587,41 @@ class StopLimitV2Service {
       }
       // If we have stageIndex >= 0 but no orderId yet, we're waiting for websocket to link it
       if (!state.orderId && state.stageIndex >= 0) {
+        // Validate if order exists even without orderId
+        const validation = this.validateExistingStopLimitOrder(state.symbol);
+        if (validation.hasOrder) {
+          return 'active';
+        }
         return 'awaiting-ack';
       }
-      // Only return 'active' if order status is actually active
+      
+      // CRITICAL: If we have an orderId, verify the order actually exists in the cache
+      if (state.orderId) {
+        const cachedOrder = this.ordersCache?.get(state.orderId);
+        if (!cachedOrder) {
+          // Order doesn't exist in cache - it may have been deleted/cancelled
+          // Use validateExistingStopLimitOrder to check if there's another order for this symbol
+          const validation = this.validateExistingStopLimitOrder(state.symbol);
+          if (validation.hasOrder) {
+            // Found a different order - this shouldn't happen but handle it
+            return 'active';
+          }
+          // No order found - return order-inactive instead of active
+          return 'order-inactive';
+        }
+        // Order exists in cache - use its status instead of state.orderStatus (more accurate)
+        const cachedStatus = (cachedOrder.Status || '').toUpperCase();
+        if (ACTIVE_ORDER_STATUSES.has(cachedStatus) || this.isQueuedStatus(cachedStatus) || cachedStatus === 'ACK') {
+          return 'active';
+        }
+        if (NON_ACTIVE_STATUSES.has(cachedStatus)) {
+          return 'order-inactive';
+        }
+        // Unknown status - treat as inactive
+        return 'order-inactive';
+      }
+      
+      // Only return 'active' if order status is actually active (when orderId doesn't exist but orderStatus does)
       if (ACTIVE_ORDER_STATUSES.has(orderStatus) || this.isQueuedStatus(orderStatus) || orderStatus === 'ACK') {
         return 'active';
       }
@@ -2597,7 +2629,18 @@ class StopLimitV2Service {
       if (NON_ACTIVE_STATUSES.has(orderStatus)) {
         return 'order-inactive';
       }
-      return 'active';
+      
+      // Default: if orderStatus is empty/null, validate order exists before returning active
+      if (!orderStatus || orderStatus === '') {
+        const validation = this.validateExistingStopLimitOrder(state.symbol);
+        if (validation.hasOrder) {
+          return 'active';
+        }
+        return 'order-inactive';
+      }
+      
+      // Unknown status - return inactive
+      return 'order-inactive';
     }
     
     // No order yet

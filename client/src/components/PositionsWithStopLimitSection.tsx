@@ -752,12 +752,12 @@ const PositionsWithStopLimitSection: React.FC = () => {
                 <div className="text-right">Qty</div>
                 <div className="text-right">Avg Price</div>
                 <div className="text-right">Last</div>
-                <div className="text-right">Unrealized P&L</div>
-                <div className="text-right">P&L</div>
                 <div className="text-right">Limit</div>
-                <div className="text-right">Time</div>
-                <div className="text-center">Stage & Progress</div>
+                <div className="text-right">P&L</div>
+                <div className="text-right">Unrealized P&L</div>
                 <div className="text-center">Action</div>
+                <div className="text-center">Stage & Progress</div>
+                <div className="text-right">Time</div>
               </div>
             </div>
 
@@ -769,7 +769,7 @@ const PositionsWithStopLimitSection: React.FC = () => {
                 overscan={200}
                 itemContent={(index, position) => {
                   const unrealizedPL = parseFloat(position.UnrealizedProfitLoss);
-                  const unrealizedPLPercent = parseFloat(position.UnrealizedProfitLossPercent);
+                  const unrealizedPLQty = parseFloat(position.UnrealizedProfitLossQty || '0');
                   const todaysPL = parseFloat(position.TodaysProfitLoss);
                   const stopLimit = position.stopLimit;
                   
@@ -811,20 +811,6 @@ const PositionsWithStopLimitSection: React.FC = () => {
                           <div className="text-[#eae9e9] font-mono text-xs">{formatPrice(position.Last)}</div>
                         </div>
 
-                        {/* Unrealized P&L */}
-                        <div className="text-right">
-                          <div className={`font-semibold font-mono text-xs ${unrealizedPL >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
-                            {formatPrice(position.UnrealizedProfitLoss)}
-                          </div>
-                        </div>
-
-                        {/* P&L % */}
-                        <div className="text-right">
-                          <div className={`font-semibold font-mono text-xs ${unrealizedPLPercent >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
-                            {formatPercent(position.UnrealizedProfitLossPercent)}
-                          </div>
-                        </div>
-
                         {/* Limit Price */}
                         <div className="text-right">
                           {stopLimit && stopLimit.limitPrice !== null ? (
@@ -834,50 +820,18 @@ const PositionsWithStopLimitSection: React.FC = () => {
                           )}
                         </div>
 
-                        {/* Time */}
+                        {/* P&L (Quantity) */}
                         <div className="text-right">
-                          <div className="text-xs opacity-60 font-mono">{formatTimestamp(position.Timestamp)}</div>
+                          <div className={`font-semibold font-mono text-xs ${unrealizedPLQty >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
+                            {formatPrice(position.UnrealizedProfitLossQty)}
+                          </div>
                         </div>
 
-                        {/* Stage & Progress */}
-                        <div className="text-center">
-                          {stopLimit && stopLimit.status === 'active' ? (
-                            <div className="flex flex-col items-center justify-center bg-[#1a1915] border border-[#2a2820]/40 rounded-lg p-2 mx-auto max-w-[200px]">
-                              <div className="flex items-center justify-between w-full mb-1">
-                                <span className="font-bold text-[#eae9e9] text-xs">{stopLimit.stageLabel}</span>
-                                <span className="text-[10px] text-[#808080] truncate ml-2">{stopLimit.stageDescription}</span>
-                              </div>
-                              
-                              {stopLimit.nextStageLabel ? (
-                                <div className="flex items-center justify-between w-full mt-1 pt-1 border-t border-[#2a2820]/40">
-                                  <span className="text-[9px] text-[#808080] uppercase tracking-wide">Next</span>
-                                  <div className="flex items-center space-x-1">
-                                    <span className="text-[10px] text-[#eae9e9] font-medium">{stopLimit.nextStageLabel}</span>
-                                    {stopLimit.nextTrigger !== null && (
-                                      <span className="text-[10px] text-[#4ade80] bg-[#4ade80]/10 px-1 rounded">
-                                        +{(stopLimit.nextTrigger * 100).toFixed(0)}%
-                                      </span>
-                                    )}
-                                  </div>
-                                </div>
-                              ) : (
-                                <div className="mt-1 pt-1 border-t border-[#2a2820]/40 w-full text-center">
-                                  <span className="text-[9px] text-[#4ade80] uppercase tracking-widest font-bold">Max Stage</span>
-                                </div>
-                              )}
-
-                              {stopLimit.progress !== null && (
-                                <div className="w-full h-1.5 bg-[#2a2820] rounded-full mt-2 overflow-hidden shadow-inner">
-                                  <div 
-                                    className="h-full bg-gradient-to-r from-[#4ade80] to-[#22c55e] shadow-[0_0_8px_rgba(74,222,128,0.4)] transition-all duration-500 ease-out" 
-                                    style={{ width: `${Math.min(Math.max((stopLimit.progress || 0) * 100, 0), 100)}%` }}
-                                  ></div>
-                                </div>
-                              )}
-                            </div>
-                          ) : (
-                            <div className="text-[#2a2820] text-xs">-</div>
-                          )}
+                        {/* Unrealized P&L */}
+                        <div className="text-right">
+                          <div className={`font-semibold font-mono text-xs ${unrealizedPL >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
+                            {formatPrice(position.UnrealizedProfitLoss)}
+                          </div>
                         </div>
 
                         {/* Sell Button */}
@@ -900,6 +854,64 @@ const PositionsWithStopLimitSection: React.FC = () => {
                               'Sell'
                             )}
                           </button>
+                        </div>
+
+                        {/* Stage & Progress */}
+                        <div className="text-center">
+                          {stopLimit && stopLimit.status === 'active' ? (
+                            <div className="flex flex-col items-center justify-center bg-[#1a1915] border border-[#2a2820]/40 rounded-lg p-3 mx-auto min-w-[180px]">
+                              <div className="w-full mb-2">
+                                <div className="flex items-center justify-between mb-1">
+                                  <span className="font-bold text-[#eae9e9] text-sm">{stopLimit.stageLabel}</span>
+                                </div>
+                                <div className="text-[11px] text-[#808080] mb-2">{stopLimit.stageDescription}</div>
+                              </div>
+                              
+                              {stopLimit.nextStageLabel ? (
+                                <div className="w-full pt-2 border-t border-[#2a2820]/40">
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-[10px] text-[#808080] uppercase tracking-wide">Next:</span>
+                                    <div className="flex items-center space-x-2">
+                                      <span className="text-[11px] text-[#eae9e9] font-semibold">{stopLimit.nextStageLabel}</span>
+                                      {stopLimit.nextTrigger !== null && (
+                                        <span className="text-[10px] text-[#4ade80] bg-[#4ade80]/20 px-2 py-0.5 rounded font-medium">
+                                          +{(stopLimit.nextTrigger * 100).toFixed(0)}%
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="w-full pt-2 border-t border-[#2a2820]/40">
+                                  <span className="text-[10px] text-[#4ade80] uppercase tracking-widest font-bold">Max Stage Reached</span>
+                                </div>
+                              )}
+
+                              {stopLimit.progress !== null && (
+                                <div className="w-full mt-3">
+                                  <div className="flex items-center justify-between mb-1">
+                                    <span className="text-[9px] text-[#808080] uppercase tracking-wide">Progress</span>
+                                    <span className="text-[10px] text-[#eae9e9] font-mono font-semibold">
+                                      {Math.min(Math.max((stopLimit.progress || 0) * 100, 0), 100).toFixed(0)}%
+                                    </span>
+                                  </div>
+                                  <div className="w-full h-2 bg-[#2a2820] rounded-full overflow-hidden shadow-inner">
+                                    <div 
+                                      className="h-full bg-gradient-to-r from-[#4ade80] to-[#22c55e] shadow-[0_0_8px_rgba(74,222,128,0.4)] transition-all duration-500 ease-out" 
+                                      style={{ width: `${Math.min(Math.max((stopLimit.progress || 0) * 100, 0), 100)}%` }}
+                                    ></div>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="text-[#2a2820] text-xs">-</div>
+                          )}
+                        </div>
+
+                        {/* Time */}
+                        <div className="text-right">
+                          <div className="text-xs opacity-60 font-mono">{formatTimestamp(position.Timestamp)}</div>
                         </div>
                       </div>
                     </div>
