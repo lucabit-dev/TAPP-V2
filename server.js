@@ -2946,11 +2946,22 @@ function runStopLimitMonitoring() {
   const now = Date.now();
   if (now - lastValidationTime >= VALIDATION_INTERVAL_MS) {
     lastValidationTime = now;
+    
+    // Validate V1
     if (stopLimitService && typeof stopLimitService.validateAllTrackedPositions === 'function') {
       try {
         stopLimitService.validateAllTrackedPositions();
       } catch (err) {
         console.error('❌ StopLimitService: Error during periodic validation:', err?.message || err);
+      }
+    }
+    
+    // Validate V2
+    if (stopLimitV2Service && typeof stopLimitV2Service.validateAllTrackedPositions === 'function') {
+      try {
+        stopLimitV2Service.validateAllTrackedPositions();
+      } catch (err) {
+        console.error('❌ StopLimitV2Service: Error during periodic validation:', err?.message || err);
       }
     }
   }
@@ -3128,6 +3139,11 @@ function connectPositionsWebSocket() {
           // Prune any other inactive symbols just in case
           const activeSymbols = new Set(positionsCache.keys());
           stopLimitService.pruneInactiveSymbols(activeSymbols);
+        }
+        if (stopLimitV2Service) {
+          // Prune any other inactive symbols just in case
+          const activeSymbols = new Set(positionsCache.keys());
+          stopLimitV2Service.pruneInactiveSymbols(activeSymbols);
         }
         }
       } catch (err) {

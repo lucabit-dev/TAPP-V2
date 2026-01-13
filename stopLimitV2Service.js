@@ -17,6 +17,11 @@ class StopLimitV2Service {
     console.log(`⚙️ StopLimitV2Service initialized with limitOffset=${this.limitOffset}`);
     this.apiBaseUrl = 'https://sections-bot.inbitme.com';
 
+    // Start periodic validation to constantly check if tracked positions still exist
+    // This ensures positions are immediately removed when manually sold
+    this.validationInterval = null;
+    this.startPeriodicValidation();
+
     // Initialize with default configs, but allow external updates
     this.groupConfigs = {
       A: {
@@ -761,8 +766,21 @@ class StopLimitV2Service {
 
   pruneInactiveSymbols(activeSymbols) {
     const activeSet = activeSymbols instanceof Set ? activeSymbols : new Set(activeSymbols);
+    
+    // First pass: Remove symbols not in the active set
     for (const symbol of Array.from(this.trackedPositions.keys())) {
       if (!activeSet.has(symbol)) {
+        console.log(`🧹 StopLimitV2Service: Removing ${symbol} - not in active symbols set`);
+        this.cleanupPosition(symbol);
+      }
+    }
+    
+    // Second pass: Validate all remaining tracked positions against actual cache
+    // This catches cases where a position might be in the set but no longer exists in cache
+    for (const symbol of Array.from(this.trackedPositions.keys())) {
+      // CRITICAL: Use hasActivePosition to validate against actual cache state
+      if (!this.hasActivePosition(symbol)) {
+        console.log(`🧹 StopLimitV2Service: Removing ${symbol} - position no longer active in cache (prune validation)`);
         this.cleanupPosition(symbol);
       }
     }
@@ -2775,6 +2793,96 @@ class StopLimitV2Service {
       throw new Error(`Group ${groupKey} does not exist`);
     }
     delete this.groupConfigs[groupKey];
+  }
+
+  /**
+   * Start periodic validation to constantly check if tracked positions still exist in cache
+   * This ensures positions are immediately removed when manually sold, even if WebSocket messages are delayed
+   */
+  startPeriodicValidation() {
+    // Clear any existing interval
+    if (this.validationInterval) {
+      clearInterval(this.validationInterval);
+    }
+
+    // Run validation every 3 seconds to catch manually sold positions quickly
+    const VALIDATION_INTERVAL_MS = 3000;
+    
+    this.validationInterval = setInterval(() => {
+      try {
+        this.validateAllTrackedPositionsAgainstCache();
+      } catch (error) {
+        console.error(`❌ StopLimitV2Service: Error in periodic validation:`, error);
+      }
+    }, VALIDATION_INTERVAL_MS);
+
+    console.log(`✅ StopLimitV2Service: Started periodic validation (every ${VALIDATION_INTERVAL_MS}ms)`);
+  }
+
+  /**
+   * Stop periodic validation (useful for cleanup or testing)
+   */
+  stopPeriodicValidation() {
+    if (this.validationInterval) {
+      clearInterval(this.validationInterval);
+      this.validationInterval = null;
+      console.log(`🛑 StopLimitV2Service: Stopped periodic validation`);
+    }
+  }
+
+  /**
+   * Fast validation that checks all tracked positions against the positions cache
+   * This is called periodically to catch positions that were manually sold
+   */
+  validateAllTrackedPositionsAgainstCache() {
+    if (!this.positionsCache || typeof this.positionsCache.get !== 'function') {
+      // Cache not available, skip validation
+      return;
+    }
+
+    const symbolsToCleanup = [];
+    
+    // Check each tracked position against the actual cache
+    for (const [symbol, state] of this.trackedPositions.entries()) {
+      // CRITICAL: Check if position is marked as sold
+      if (this.soldPositions.has(symbol)) {
+        symbolsToCleanup.push(symbol);
+        continue;
+      }
+
+      // CRITICAL: Validate position exists in cache and is active
+      if (!this.hasActivePosition(symbol)) {
+        symbolsToCleanup.push(symbol);
+        continue;
+      }
+
+      // Additional validation: Check position in cache directly
+      const position = this.positionsCache.get(symbol);
+      if (!position) {
+        symbolsToCleanup.push(symbol);
+        continue;
+      }
+
+      const quantity = this.parseNumber(position?.Quantity);
+      if (!quantity || quantity <= 0) {
+        symbolsToCleanup.push(symbol);
+        continue;
+      }
+
+      const longShort = (position?.LongShort || '').toUpperCase();
+      if (longShort && longShort !== 'LONG') {
+        symbolsToCleanup.push(symbol);
+        continue;
+      }
+    }
+
+    // Cleanup all invalid positions
+    if (symbolsToCleanup.length > 0) {
+      console.log(`🧹 StopLimitV2Service: Periodic validation found ${symbolsToCleanup.length} inactive position(s) to cleanup: ${symbolsToCleanup.join(', ')}`);
+      for (const symbol of symbolsToCleanup) {
+        this.cleanupPosition(symbol);
+      }
+    }
   }
 }
 
