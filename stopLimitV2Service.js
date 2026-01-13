@@ -84,10 +84,23 @@ class StopLimitV2Service {
     const longShort = (position?.LongShort || '').toUpperCase();
     
     // CRITICAL: If position is already marked as sold, check if it's a re-entry
-    // If quantity > 0 and position exists in cache, it's a new position (re-entry) - allow tracking
+    // If quantity > 0 and position exists in cache with valid quantity, it's a new position (re-entry) - allow tracking
     if (this.soldPositions.has(symbol)) {
       // Check if this is a re-entry (new position after being sold)
-      if (quantity > 0 && this.hasActivePosition(symbol)) {
+      // We check the cache directly instead of hasActivePosition because hasActivePosition returns false for sold positions
+      let isReEntry = false;
+      if (quantity > 0 && this.positionsCache && typeof this.positionsCache.get === 'function') {
+        const cachedPosition = this.positionsCache.get(symbol);
+        if (cachedPosition) {
+          const cachedQuantity = this.parseNumber(cachedPosition?.Quantity);
+          const cachedLongShort = (cachedPosition?.LongShort || '').toUpperCase();
+          if (cachedQuantity > 0 && cachedLongShort === 'LONG') {
+            isReEntry = true;
+          }
+        }
+      }
+      
+      if (isReEntry) {
         // This is a re-entry - remove from sold positions and allow tracking
         console.log(`🔄 StopLimitV2Service: Position ${symbol} re-entered after being sold - removing from sold list and re-tracking`);
         this.soldPositions.delete(symbol);
