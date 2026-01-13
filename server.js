@@ -4706,6 +4706,89 @@ app.post('/api/sell_all', requireDbReady, requireAuth, async (req, res) => {
     
     const isSuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
     
+    // CRITICAL: Remove ALL positions from StopLimit tracking when Sell All is executed
+    // This ensures all positions are removed from V2 as soon as Sell All is clicked
+    if (isSuccess) {
+      console.log(`🧹 Sell All: Removing all positions from StopLimit tracking...`);
+      
+      // Get all tracked positions from positions cache
+      const allTrackedSymbols = new Set();
+      if (positionsCache && typeof positionsCache.keys === 'function') {
+        for (const symbol of positionsCache.keys()) {
+          const position = positionsCache.get(symbol);
+          if (position) {
+            const quantity = parseFloat(position.Quantity || '0');
+            if (quantity > 0) {
+              allTrackedSymbols.add(symbol);
+            }
+          }
+        }
+      }
+      
+      // Also get symbols from StopLimit V2 tracked positions
+      if (stopLimitV2Service && stopLimitV2Service.trackedPositions) {
+        for (const symbol of stopLimitV2Service.trackedPositions.keys()) {
+          allTrackedSymbols.add(symbol);
+        }
+      }
+      
+      console.log(`🔍 Sell All: Found ${allTrackedSymbols.size} position(s) to mark as sold in StopLimit V2`);
+      
+      // Mark all positions as sold in StopLimit V2
+      if (stopLimitV2Service && allTrackedSymbols.size > 0) {
+        for (const symbol of allTrackedSymbols) {
+          try {
+            const trackedState = stopLimitV2Service.trackedPositions?.get(symbol);
+            
+            if (trackedState) {
+              // Mark as sold with available info
+              stopLimitV2Service.recordSoldPosition(symbol, {
+                positionId: trackedState.positionId,
+                accountId: trackedState.accountId,
+                groupKey: trackedState.groupKey,
+                avgPrice: trackedState.avgPrice,
+                quantity: trackedState.quantity,
+                sellPrice: trackedState.lastLimitPrice || trackedState.avgPrice, // Will be updated when orders fill
+                pnlPerShare: null, // Will be calculated when orders fill
+                totalPnL: null, // Will be calculated when orders fill
+                orderId: null, // Will be updated when orders fill
+                soldAt: Date.now(),
+                createdAt: trackedState.createdAt,
+                stageIndex: trackedState.stageIndex,
+                lastStopPrice: trackedState.lastStopPrice,
+                lastLimitPrice: trackedState.lastLimitPrice
+              });
+              console.log(`✅ StopLimitV2Service: Position ${symbol} marked as SOLD (Sell All)`);
+            } else {
+              // Position wasn't tracked, but mark as sold anyway to prevent future tracking
+              stopLimitV2Service.recordSoldPosition(symbol, {
+                soldAt: Date.now()
+              });
+              console.log(`✅ StopLimitV2Service: Position ${symbol} marked as SOLD (wasn't tracked, but Sell All executed)`);
+            }
+            
+            // Also call handlePositionClosed to ensure cleanup
+            stopLimitV2Service.handlePositionClosed(symbol);
+          } catch (err) {
+            console.error(`❌ Error marking ${symbol} as sold in StopLimit V2:`, err.message);
+          }
+        }
+        console.log(`✅ Sell All: All ${allTrackedSymbols.size} position(s) marked as sold in StopLimit V2`);
+      }
+      
+      // Also cleanup StopLimit V1
+      if (stopLimitService && allTrackedSymbols.size > 0) {
+        for (const symbol of allTrackedSymbols) {
+          try {
+            stopLimitService.cleanupPosition(symbol);
+          } catch (err) {
+            console.error(`❌ Error cleaning up ${symbol} in StopLimit V1:`, err.message);
+          }
+        }
+        console.log(`✅ Sell All: All ${allTrackedSymbols.size} position(s) cleaned up in StopLimit V1`);
+      }
+    }
+    
     // Handle network errors with 500, otherwise return 200 with success flag
     if (notifyStatus.startsWith('ERROR:')) {
       return res.status(500).json({
