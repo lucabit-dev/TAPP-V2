@@ -421,6 +421,10 @@ class StopLimitV2Service {
       // For Market SELL orders, check if filled even if not previously linked
       // This handles both StopLimit-tracked positions and manually sold positions
       if (isMarketSell && (status === 'FLL' || status === 'FIL')) {
+        // CRITICAL: Check if position no longer exists in cache (manually sold)
+        // If position is not in cache or has quantity 0, it was sold
+        const positionStillExists = this.hasActivePosition(symbol);
+        
         // Try to get position info from tracked state or from positions cache
         let positionInfo = null;
         let groupKey = null;
@@ -463,9 +467,12 @@ class StopLimitV2Service {
           }
         }
         
+        // CRITICAL: If we're tracking this position OR position no longer exists, mark as sold
+        if (state || !positionStillExists) {
+          const sellPrice = this.parseNumber(order.FilledPrice || leg.FilledPrice || order.Price || leg.Price);
+        
         if (positionInfo) {
           // Calculate P&L from the filled order
-          const sellPrice = this.parseNumber(order.FilledPrice || leg.FilledPrice || order.Price || leg.Price);
           const quantity = positionInfo.quantity || this.parseNumber(leg.ExecQuantity || leg.QuantityRemaining || order.Quantity);
           const avgPrice = positionInfo.avgPrice;
           
@@ -494,10 +501,49 @@ class StopLimitV2Service {
             const saleType = state ? 'Market (StopLimit-tracked)' : 'Manual';
             console.log(`💰 StopLimitService: ${symbol} SOLD (${saleType}) - Avg: $${avgPrice.toFixed(2)}, Sell: $${sellPrice.toFixed(2)}, Qty: ${quantity}, P&L/Share: $${pnlPerShare.toFixed(2)}, Total P&L: $${totalPnL.toFixed(2)}`);
           } else {
-            console.warn(`⚠️ StopLimitService: Could not calculate P&L for ${symbol} manual sale - sellPrice: ${sellPrice}, avgPrice: ${avgPrice}, quantity: ${quantity}`);
+              // Mark as sold even without full P&L calculation
+              const saleRecord = {
+                positionId: positionInfo.positionId,
+                accountId: positionInfo.accountId,
+                groupKey: positionInfo.groupKey,
+                avgPrice: avgPrice || null,
+                quantity: quantity || null,
+                sellPrice: sellPrice || null,
+                pnlPerShare: null,
+                totalPnL: null,
+                orderId,
+                soldAt: Date.now(),
+                createdAt: positionInfo.createdAt,
+                stageIndex: positionInfo.stageIndex,
+                lastStopPrice: positionInfo.lastStopPrice,
+                lastLimitPrice: positionInfo.lastLimitPrice
+              };
+              this.recordSoldPosition(symbol, saleRecord);
+              console.log(`💰 StopLimitService: ${symbol} SOLD (Manual, partial info) - marking as sold`);
           }
         } else {
-          console.log(`ℹ️ StopLimitService: Market SELL order ${orderId} for ${symbol} filled, but no position info available to calculate P&L`);
+            // No position info, but position was tracked or doesn't exist - mark as sold anyway
+            const saleRecord = {
+              positionId: state ? state.positionId : null,
+              accountId: state ? state.accountId : null,
+              groupKey: state ? state.groupKey : null,
+              avgPrice: state ? state.avgPrice : null,
+              quantity: state ? state.quantity : null,
+              sellPrice: sellPrice || null,
+              pnlPerShare: null,
+              totalPnL: null,
+              orderId,
+              soldAt: Date.now(),
+              createdAt: state ? state.createdAt : Date.now(),
+              stageIndex: state ? state.stageIndex : -1,
+              lastStopPrice: state ? state.lastStopPrice : null,
+              lastLimitPrice: state ? state.lastLimitPrice : null
+            };
+            this.recordSoldPosition(symbol, saleRecord);
+            console.log(`💰 StopLimitService: ${symbol} SOLD (Manual, no position info) - marking as sold (position ${positionStillExists ? 'exists but tracked' : 'no longer exists'})`);
+          }
+        } else {
+          console.log(`ℹ️ StopLimitService: Market SELL order ${orderId} for ${symbol} filled, but position is not tracked and still exists in cache`);
         }
         
         // Always schedule cleanup to prevent stale tracking
@@ -514,14 +560,20 @@ class StopLimitV2Service {
                           state.orderId === orderId ||
                           (state.stageIndex >= 0); // We're tracking this position, so any StopLimit SELL order for it is ours
         
-        if (isOurOrder && state) {
+        // CRITICAL: Also check if position no longer exists in cache (manually sold or filled)
+        // If position is not in cache or has quantity 0, it was sold
+        const positionStillExists = this.hasActivePosition(symbol);
+        
+        if ((isOurOrder && state) || (!positionStillExists && state)) {
           console.log(`✅ StopLimitService: StopLimit order ${orderId} for ${symbol} filled (status ${status}) – calculating P&L and marking as sold.`);
           
           // Update state to reflect filled status
+          if (state) {
           state.orderId = orderId;
           state.orderStatus = status;
           state.pendingCreate = false;
           state.pendingUpdate = false;
+          }
           
           // Calculate P&L from the filled order
           // For StopLimit orders, prefer FilledPrice then LimitPrice
@@ -533,17 +585,53 @@ class StopLimitV2Service {
             order.Price || 
             leg.Price
           );
-          const quantity = state.quantity || this.parseNumber(leg.ExecQuantity || leg.QuantityRemaining || order.Quantity);
-          const avgPrice = state.avgPrice;
+          const quantity = state ? (state.quantity || this.parseNumber(leg.ExecQuantity || leg.QuantityRemaining || order.Quantity)) : this.parseNumber(leg.ExecQuantity || leg.QuantityRemaining || order.Quantity);
+          const avgPrice = state ? state.avgPrice : null;
+          
+          // If we don't have state but position was sold, try to get info from cache before it's removed
+          if (!state && !avgPrice && this.positionsCache && typeof this.positionsCache.get === 'function') {
+            const cachedPosition = this.positionsCache.get(symbol);
+            if (cachedPosition) {
+              const cachedAvgPrice = this.parseNumber(cachedPosition.AveragePrice);
+              const cachedQuantity = this.parseNumber(cachedPosition.Quantity);
+              if (cachedAvgPrice && cachedQuantity) {
+                // Use cached values for P&L calculation
+                const pnlPerShare = this.roundPrice(sellPrice - cachedAvgPrice);
+                const totalPnL = this.roundPrice(pnlPerShare * cachedQuantity);
+                
+                const saleRecord = {
+                  positionId: cachedPosition.PositionID || null,
+                  accountId: cachedPosition.AccountID || null,
+                  groupKey: this.resolveGroup(cachedAvgPrice),
+                  avgPrice: cachedAvgPrice,
+                  quantity: cachedQuantity,
+                  sellPrice,
+                  pnlPerShare,
+                  totalPnL,
+                  orderId,
+                  soldAt: Date.now(),
+                  createdAt: Date.now(),
+                  stageIndex: -1,
+                  lastStopPrice: null,
+                  lastLimitPrice: null
+                };
+                
+                this.recordSoldPosition(symbol, saleRecord);
+                console.log(`💰 StopLimitService: ${symbol} SOLD (StopLimit, from cache) - Avg: $${cachedAvgPrice.toFixed(2)}, Sell: $${sellPrice.toFixed(2)}, Qty: ${cachedQuantity}, P&L/Share: $${pnlPerShare.toFixed(2)}, Total P&L: $${totalPnL.toFixed(2)}`);
+                this.schedulePostSaleCleanup(symbol);
+                return;
+              }
+            }
+          }
           
           if (sellPrice && avgPrice && quantity) {
             const pnlPerShare = this.roundPrice(sellPrice - avgPrice);
             const totalPnL = this.roundPrice(pnlPerShare * quantity);
             
             const saleRecord = {
-              positionId: state.positionId,
-              accountId: state.accountId,
-              groupKey: state.groupKey,
+              positionId: state ? state.positionId : null,
+              accountId: state ? state.accountId : null,
+              groupKey: state ? state.groupKey : null,
               avgPrice,
               quantity,
               sellPrice,
@@ -551,16 +639,37 @@ class StopLimitV2Service {
               totalPnL,
               orderId,
               soldAt: Date.now(),
-              createdAt: state.createdAt,
-              stageIndex: state.stageIndex,
-              lastStopPrice: state.lastStopPrice,
-              lastLimitPrice: state.lastLimitPrice
+              createdAt: state ? state.createdAt : Date.now(),
+              stageIndex: state ? state.stageIndex : -1,
+              lastStopPrice: state ? state.lastStopPrice : null,
+              lastLimitPrice: state ? state.lastLimitPrice : null
             };
             
             this.recordSoldPosition(symbol, saleRecord);
             console.log(`💰 StopLimitService: ${symbol} SOLD (StopLimit) - Avg: $${avgPrice.toFixed(2)}, Sell: $${sellPrice.toFixed(2)}, Qty: ${quantity}, P&L/Share: $${pnlPerShare.toFixed(2)}, Total P&L: $${totalPnL.toFixed(2)}`);
           } else {
+            // Even if we can't calculate P&L, mark as sold if position doesn't exist
+            if (!positionStillExists) {
+              console.log(`✅ StopLimitService: ${symbol} position no longer exists - marking as sold (order ${orderId} filled)`);
+              this.recordSoldPosition(symbol, {
+                positionId: state ? state.positionId : null,
+                accountId: state ? state.accountId : null,
+                groupKey: state ? state.groupKey : null,
+                avgPrice: avgPrice || null,
+                quantity: quantity || null,
+                sellPrice: sellPrice || null,
+                pnlPerShare: null,
+                totalPnL: null,
+                orderId,
+                soldAt: Date.now(),
+                createdAt: state ? state.createdAt : Date.now(),
+                stageIndex: state ? state.stageIndex : -1,
+                lastStopPrice: state ? state.lastStopPrice : null,
+                lastLimitPrice: state ? state.lastLimitPrice : null
+              });
+          } else {
             console.warn(`⚠️ StopLimitService: Could not calculate P&L for ${symbol} - sellPrice: ${sellPrice}, avgPrice: ${avgPrice}, quantity: ${quantity}`);
+            }
           }
           
           this.schedulePostSaleCleanup(symbol);
@@ -2848,6 +2957,101 @@ class StopLimitV2Service {
       if (this.soldPositions.has(symbol)) {
         symbolsToCleanup.push(symbol);
         continue;
+      }
+
+      // CRITICAL: Check if there's a filled sell order for this position
+      // If a stop limit order OR market sell order is filled, the position should be marked as sold
+      if (this.ordersCache && typeof this.ordersCache.values === 'function') {
+        let hasFilledSellOrder = false;
+        for (const [orderId, order] of this.ordersCache.entries()) {
+          if (!order || !order.Legs) continue;
+          
+          const orderStatus = (order.Status || '').toUpperCase();
+          if (orderStatus !== 'FIL' && orderStatus !== 'FLL') continue;
+          
+          // Check if this is a SELL order for this symbol
+          const sellLeg = order.Legs.find(l => {
+            const legSymbol = (l.Symbol || '').toUpperCase();
+            const legSide = (l.BuyOrSell || '').toUpperCase();
+            return legSymbol === symbol && legSide === 'SELL';
+          });
+          
+          if (sellLeg) {
+            // Check if this is a stop limit order (our order) or market sell (manual sell)
+            const orderType = this.getOrderType(order);
+            const isStopLimit = orderType === 'STOPLIMIT';
+            const isMarketSell = orderType === 'MARKET' && (sellLeg.BuyOrSell || '').toUpperCase() === 'SELL';
+            
+            // If it's our stop limit order, or if it's a market sell and position doesn't exist, mark as sold
+            const isOurOrder = state.orderId === orderId || 
+                              (state.stageIndex >= 0 && isStopLimit) ||
+                              (!this.hasActivePosition(symbol) && (isStopLimit || isMarketSell)) ||
+                              (isMarketSell && state); // Market sell for tracked position
+            
+            if (isOurOrder) {
+              hasFilledSellOrder = true;
+              console.log(`🔍 StopLimitV2Service: Found filled ${isStopLimit ? 'StopLimit' : 'Market'} sell order ${orderId} for ${symbol} during validation - marking as sold`);
+              
+              // Calculate P&L if possible
+              const sellPrice = this.parseNumber(
+                order.FilledPrice || 
+                sellLeg.FilledPrice || 
+                (isStopLimit ? (order.LimitPrice || sellLeg.LimitPrice) : null) ||
+                order.Price || 
+                sellLeg.Price
+              );
+              const quantity = state.quantity || this.parseNumber(sellLeg.ExecQuantity || sellLeg.QuantityRemaining || order.Quantity);
+              const avgPrice = state.avgPrice;
+              
+              if (sellPrice && avgPrice && quantity) {
+                const pnlPerShare = this.roundPrice(sellPrice - avgPrice);
+                const totalPnL = this.roundPrice(pnlPerShare * quantity);
+                
+                this.recordSoldPosition(symbol, {
+                  positionId: state.positionId,
+                  accountId: state.accountId,
+                  groupKey: state.groupKey,
+                  avgPrice,
+                  quantity,
+                  sellPrice,
+                  pnlPerShare,
+                  totalPnL,
+                  orderId,
+                  soldAt: Date.now(),
+                  createdAt: state.createdAt,
+                  stageIndex: state.stageIndex,
+                  lastStopPrice: state.lastStopPrice,
+                  lastLimitPrice: state.lastLimitPrice
+                });
+              } else {
+                // Mark as sold even without P&L calculation
+                this.recordSoldPosition(symbol, {
+                  positionId: state.positionId,
+                  accountId: state.accountId,
+                  groupKey: state.groupKey,
+                  avgPrice: avgPrice || null,
+                  quantity: quantity || null,
+                  sellPrice: sellPrice || null,
+                  pnlPerShare: null,
+                  totalPnL: null,
+                  orderId,
+                  soldAt: Date.now(),
+                  createdAt: state.createdAt,
+                  stageIndex: state.stageIndex,
+                  lastStopPrice: state.lastStopPrice,
+                  lastLimitPrice: state.lastLimitPrice
+                });
+              }
+              
+              symbolsToCleanup.push(symbol);
+              break;
+            }
+          }
+        }
+        
+        if (hasFilledSellOrder) {
+          continue; // Already handled above
+        }
       }
 
       // CRITICAL: Validate position exists in cache and is active
