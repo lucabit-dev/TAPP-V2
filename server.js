@@ -144,7 +144,9 @@ let buyTriggerMode = 'positive'; // 'cross' | 'positive'
 // Track last buy timestamp per ticker to prevent duplicate buys on the same UTC day
 const lastBuyTsByTicker = new Map();
 
-// Cached positions and orders (updated via WebSocket streams)
+// GLOBAL CACHE: Cached positions and orders (updated via WebSocket streams)
+// These caches are SHARED GLOBALLY across all users - not per-user or per-session
+// All users see the same positions and orders data
 const positionsCache = new Map(); // Map<symbol, { PositionID, Symbol, Quantity, ... }>
 const ordersCache = new Map(); // Map<OrderID, { OrderID, Symbol, Status, Legs, ... }>
 

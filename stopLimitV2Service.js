@@ -1000,8 +1000,21 @@ class StopLimitV2Service {
     // Cleanup positions that are no longer in active symbols OR are marked as sold
     if (activeSymbols) {
       for (const symbol of Array.from(this.trackedPositions.keys())) {
-        // CRITICAL: Check if position is sold first
+        // CRITICAL: Check if position is sold, but verify it's actually inactive before removing
         if (this.soldPositions.has(symbol)) {
+          // Check if position has been rebought (re-entry)
+          const cachedPosition = this.positionsCache?.get(symbol);
+          if (cachedPosition) {
+            const cachedQuantity = this.parseNumber(cachedPosition?.Quantity);
+            const cachedLongShort = (cachedPosition?.LongShort || '').toUpperCase();
+            if (cachedQuantity > 0 && cachedLongShort === 'LONG') {
+              // Position has been rebought - remove from soldPositions and continue tracking
+              console.log(`🔄 StopLimitService: Position ${symbol} re-entered - removing from sold list during refresh`);
+              this.soldPositions.delete(symbol);
+              continue;
+            }
+          }
+          // Position is still sold and inactive - remove from tracking
           console.log(`🛑 StopLimitService: Removing ${symbol} during refresh - position is marked as sold`);
           this.cleanupPosition(symbol);
           continue;
@@ -1016,8 +1029,21 @@ class StopLimitV2Service {
     // Validate each remaining tracked position individually
     // This ensures we catch positions that might have closed but weren't removed from cache yet
     for (const [symbol, state] of Array.from(this.trackedPositions.entries())) {
-      // CRITICAL: Check if position is sold
+      // CRITICAL: Check if position is sold, but verify it's actually inactive before removing
       if (this.soldPositions.has(symbol)) {
+        // Check if position has been rebought (re-entry)
+        const cachedPosition = this.positionsCache?.get(symbol);
+        if (cachedPosition) {
+          const cachedQuantity = this.parseNumber(cachedPosition?.Quantity);
+          const cachedLongShort = (cachedPosition?.LongShort || '').toUpperCase();
+          if (cachedQuantity > 0 && cachedLongShort === 'LONG') {
+            // Position has been rebought - remove from soldPositions and continue tracking
+            console.log(`🔄 StopLimitService: Position ${symbol} re-entered - removing from sold list during refresh`);
+            this.soldPositions.delete(symbol);
+            continue;
+          }
+        }
+        // Position is still sold and inactive - remove from tracking
         console.log(`🛑 StopLimitService: Removing ${symbol} during refresh - position is marked as sold`);
         this.cleanupPosition(symbol);
         continue;
@@ -2276,11 +2302,30 @@ class StopLimitV2Service {
         }
       }
 
-      // CRITICAL: Check if position is sold before doing any validation
+      // CRITICAL: Check if position is sold, but verify it's actually inactive before removing
       if (this.soldPositions.has(state.symbol)) {
-        console.log(`🛑 StopLimitService: Removing ${state.symbol} from snapshot validation - position is marked as sold`);
-        symbolsToCleanup.push(state.symbol);
-        continue;
+        // Check if position has been rebought (re-entry)
+        const cachedPosition = this.positionsCache?.get(state.symbol);
+        if (cachedPosition) {
+          const cachedQuantity = this.parseNumber(cachedPosition?.Quantity);
+          const cachedLongShort = (cachedPosition?.LongShort || '').toUpperCase();
+          if (cachedQuantity > 0 && cachedLongShort === 'LONG') {
+            // Position has been rebought - remove from soldPositions and continue tracking
+            console.log(`🔄 StopLimitService: Position ${state.symbol} re-entered - removing from sold list in snapshot`);
+            this.soldPositions.delete(state.symbol);
+            // Continue to include in snapshot
+          } else {
+            // Position is still sold and inactive - remove from snapshot
+            console.log(`🛑 StopLimitService: Removing ${state.symbol} from snapshot validation - position is marked as sold`);
+            symbolsToCleanup.push(state.symbol);
+            continue;
+          }
+        } else {
+          // Position is still sold and not in cache - remove from snapshot
+          console.log(`🛑 StopLimitService: Removing ${state.symbol} from snapshot validation - position is marked as sold`);
+          symbolsToCleanup.push(state.symbol);
+          continue;
+        }
       }
 
       // Quick validation pass - check for any missing order links
