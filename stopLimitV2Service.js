@@ -2644,28 +2644,19 @@ class StopLimitV2Service {
         return 'queued';
       }
       // If we have stageIndex >= 0 but no orderId yet, we're waiting for websocket to link it
+      // CRITICAL: If stageIndex >= 0, order was successfully created - show as active immediately
+      // This ensures positions show as active right after order creation, before WebSocket confirmation
       if (!state.orderId && state.stageIndex >= 0) {
-        // Validate if order exists even without orderId
-        const validation = this.validateExistingStopLimitOrder(state.symbol);
-        if (validation.hasOrder) {
-          return 'active';
-        }
-        return 'awaiting-ack';
+        return 'active';
       }
       
       // CRITICAL: If we have an orderId, verify the order actually exists in the cache
       if (state.orderId) {
         const cachedOrder = this.ordersCache?.get(state.orderId);
         if (!cachedOrder) {
-          // Order doesn't exist in cache - it may have been deleted/cancelled
-          // Use validateExistingStopLimitOrder to check if there's another order for this symbol
-          const validation = this.validateExistingStopLimitOrder(state.symbol);
-          if (validation.hasOrder) {
-            // Found a different order - this shouldn't happen but handle it
-            return 'active';
-          }
-          // No order found - return order-inactive instead of active
-          return 'order-inactive';
+          // Order doesn't exist in cache yet (WebSocket delay) - but stageIndex >= 0 means order was created
+          // Show as active since order creation was successful
+          return 'active';
         }
         // Order exists in cache - use its status instead of state.orderStatus (more accurate)
         const cachedStatus = (cachedOrder.Status || '').toUpperCase();
