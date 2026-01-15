@@ -85,10 +85,10 @@ class StopLimitV2Service {
     
     // CRITICAL: If position is already marked as sold, check if it's a re-entry
     // If quantity > 0 and position exists in cache with valid quantity, it's a new position (re-entry) - allow tracking
+    let isReEntry = false;
     if (this.soldPositions.has(symbol)) {
       // Check if this is a re-entry (new position after being sold)
       // We check the cache directly instead of hasActivePosition because hasActivePosition returns false for sold positions
-      let isReEntry = false;
       if (quantity > 0 && this.positionsCache && typeof this.positionsCache.get === 'function') {
         const cachedPosition = this.positionsCache.get(symbol);
         if (cachedPosition) {
@@ -104,7 +104,7 @@ class StopLimitV2Service {
         // This is a re-entry - remove from sold positions and allow tracking
         console.log(`🔄 StopLimitV2Service: Position ${symbol} re-entered after being sold - removing from sold list and re-tracking`);
         this.soldPositions.delete(symbol);
-        // Continue to track this position
+        // Continue to track this position - isReEntry flag will be used below
       } else {
         // Still sold or invalid - don't track
         console.log(`🛑 StopLimitV2Service: Ignoring position update for ${symbol} - position is already marked as sold`);
@@ -148,10 +148,20 @@ class StopLimitV2Service {
     if (!state) {
       // CRITICAL: Final validation before creating new state
       // This prevents re-adding closed positions that might have passed earlier checks
-      // We check our local hasActivePosition logic which checks caches
-      if (!this.hasActivePosition(symbol)) {
+      // However, if this is a re-entry (previously sold, now rebought), skip hasActivePosition check
+      // because we already validated it's active when we detected the re-entry
+      if (!isReEntry && !this.hasActivePosition(symbol)) {
         console.log(`🧹 StopLimitService: Skipping ${symbol} - position is not active in cache (may have closed)`);
         return;
+      }
+      
+      // For re-entries, double-check the position is still valid
+      if (isReEntry) {
+        if (!quantity || quantity <= 0 || longShort !== 'LONG') {
+          console.log(`🧹 StopLimitService: Re-entry validation failed for ${symbol} - quantity: ${quantity}, longShort: ${longShort}`);
+          return;
+        }
+        console.log(`✅ StopLimitService: Re-entry validated for ${symbol} - proceeding with new state creation`);
       }
 
       // Double-check quantity is still valid
