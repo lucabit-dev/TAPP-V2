@@ -4345,26 +4345,13 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
         let activeSellOrders = findActiveSellOrdersInCache(symbol);
         console.log(`🔍 Found ${activeSellOrders.length} active sell order(s) for ${symbol} in orders cache`);
         
-        // Also check StopLimitService (V1) cache if available
+        // Also check StopLimitService cache if available
         if (stopLimitService) {
           const stopLimitOrders = stopLimitService.findActiveSellOrders(symbol);
-          console.log(`🔍 Found ${stopLimitOrders.length} active sell order(s) for ${symbol} in StopLimitService (V1) cache`);
+          console.log(`🔍 Found ${stopLimitOrders.length} active sell order(s) for ${symbol} in StopLimitService cache`);
           
           // Merge orders from both sources (avoid duplicates)
           for (const slOrder of stopLimitOrders) {
-            if (!activeSellOrders.find(o => o.orderId === slOrder.orderId)) {
-              activeSellOrders.push(slOrder);
-            }
-          }
-        }
-        
-        // CRITICAL: Also check StopLimitV2Service (V2) cache if available
-        if (stopLimitV2Service) {
-          const stopLimitV2Orders = stopLimitV2Service.findActiveSellOrders(symbol);
-          console.log(`🔍 Found ${stopLimitV2Orders.length} active sell order(s) for ${symbol} in StopLimitV2Service (V2) cache`);
-          
-          // Merge orders from both sources (avoid duplicates)
-          for (const slOrder of stopLimitV2Orders) {
             if (!activeSellOrders.find(o => o.orderId === slOrder.orderId)) {
               activeSellOrders.push(slOrder);
             }
@@ -4386,39 +4373,21 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
           await new Promise(resolve => setTimeout(resolve, 1500));
         }
         
-        // Also use StopLimitService (V1) if available (for its own tracking)
+        // Also use StopLimitService if available (for its own tracking)
         if (stopLimitService) {
           try {
             await stopLimitService.deleteExistingSellOrders(symbol);
             await new Promise(resolve => setTimeout(resolve, 500));
           } catch (slErr) {
-            console.warn(`⚠️ StopLimitService (V1) deletion failed for ${symbol}:`, slErr.message);
+            console.warn(`⚠️ StopLimitService deletion failed for ${symbol}:`, slErr.message);
           }
         }
         
-        // CRITICAL: Also use StopLimitV2Service (V2) if available (for its own tracking)
-        if (stopLimitV2Service) {
-          try {
-            await stopLimitV2Service.deleteExistingSellOrders(symbol);
-            await new Promise(resolve => setTimeout(resolve, 500));
-          } catch (slV2Err) {
-            console.warn(`⚠️ StopLimitV2Service (V2) deletion failed for ${symbol}:`, slV2Err.message);
-          }
-        }
-        
-        // Final check - verify no active orders remain (check all caches)
+        // Final check - verify no active orders remain (check both caches)
         let finalCheck = findActiveSellOrdersInCache(symbol);
         if (stopLimitService) {
           const slFinalCheck = stopLimitService.findActiveSellOrders(symbol);
           for (const slOrder of slFinalCheck) {
-            if (!finalCheck.find(o => o.orderId === slOrder.orderId)) {
-              finalCheck.push(slOrder);
-            }
-          }
-        }
-        if (stopLimitV2Service) {
-          const slV2FinalCheck = stopLimitV2Service.findActiveSellOrders(symbol);
-          for (const slOrder of slV2FinalCheck) {
             if (!finalCheck.find(o => o.orderId === slOrder.orderId)) {
               finalCheck.push(slOrder);
             }
@@ -4439,19 +4408,11 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
           
           await new Promise(resolve => setTimeout(resolve, 2000)); // Longer wait after retry
           
-          // Final verification - check all caches one more time
+          // Final verification - check both caches one more time
           let finalRemaining = findActiveSellOrdersInCache(symbol);
           if (stopLimitService) {
             const slFinalRemaining = stopLimitService.findActiveSellOrders(symbol);
             for (const slOrder of slFinalRemaining) {
-              if (!finalRemaining.find(o => o.orderId === slOrder.orderId)) {
-                finalRemaining.push(slOrder);
-              }
-            }
-          }
-          if (stopLimitV2Service) {
-            const slV2FinalRemaining = stopLimitV2Service.findActiveSellOrders(symbol);
-            for (const slOrder of slV2FinalRemaining) {
               if (!finalRemaining.find(o => o.orderId === slOrder.orderId)) {
                 finalRemaining.push(slOrder);
               }
