@@ -97,9 +97,8 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
   const [buyQuantities, setBuyQuantities] = useState<Record<string, number>>({});
   const [editingQuantity, setEditingQuantity] = useState<string | null>(null);
   const [tempQuantity, setTempQuantity] = useState<Record<string, string>>({});
-  const editingStartTimeRef = useRef<number | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const preventBlurRef = useRef<boolean>(false);
+  const justStartedEditingRef = useRef<string | null>(null);
 
   useEffect(() => {
     // Initial load of buys enabled status
@@ -514,38 +513,40 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                             }
                             
                             if (isEditing) {
+                              // Use useEffect to focus after render
+                              React.useEffect(() => {
+                                if (inputRef.current && justStartedEditingRef.current === priceGroup) {
+                                  // Small delay to ensure DOM is ready
+                                  const timer = setTimeout(() => {
+                                    if (inputRef.current) {
+                                      inputRef.current.focus();
+                                      inputRef.current.select();
+                                      justStartedEditingRef.current = null; // Clear flag after focus
+                                    }
+                                  }, 50);
+                                  return () => clearTimeout(timer);
+                                }
+                              }, [isEditing, priceGroup]);
+
                               return (
                                 <div className="flex items-center space-x-1">
                                   <input
-                                    ref={(el) => {
-                                      inputRef.current = el;
-                                      if (el) {
-                                        // Focus and select after a brief delay to ensure it's rendered
-                                        setTimeout(() => {
-                                          el.focus();
-                                          el.select();
-                                          editingStartTimeRef.current = Date.now();
-                                          preventBlurRef.current = false; // Allow blur after focus is established
-                                        }, 10);
-                                      }
-                                    }}
+                                    ref={inputRef}
                                     type="number"
                                     min="1"
                                     value={tempQuantity[priceGroup] ?? currentQuantity}
                                     onChange={(e) => {
                                       setTempQuantity(prev => ({ ...prev, [priceGroup]: e.target.value }));
-                                      // User is actively typing, allow blur now
-                                      preventBlurRef.current = false;
                                     }}
                                     onBlur={(e) => {
-                                      // Prevent blur if we're still in the initial setup phase
-                                      if (preventBlurRef.current) {
-                                        // Re-focus immediately if blur was prevented
+                                      // Only process blur if we're not in the initial setup phase
+                                      if (justStartedEditingRef.current === priceGroup) {
+                                        // Still setting up, ignore blur and refocus
                                         setTimeout(() => {
-                                          if (inputRef.current) {
+                                          if (inputRef.current && editingQuantity === priceGroup) {
                                             inputRef.current.focus();
                                           }
-                                        }, 0);
+                                        }, 10);
                                         return;
                                       }
                                       
@@ -561,33 +562,30 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                                           return next;
                                         });
                                       }
-                                      editingStartTimeRef.current = null;
-                                      preventBlurRef.current = false;
                                     }}
                                     onKeyDown={(e) => {
                                       if (e.key === 'Enter') {
                                         e.preventDefault();
-                                        preventBlurRef.current = false; // Allow blur to save
+                                        justStartedEditingRef.current = null; // Allow blur
                                         e.currentTarget.blur(); // Trigger blur which will save
                                       } else if (e.key === 'Escape') {
                                         e.preventDefault();
-                                        preventBlurRef.current = false;
+                                        justStartedEditingRef.current = null;
                                         setEditingQuantity(null);
                                         setTempQuantity(prev => {
                                           const next = { ...prev };
                                           delete next[priceGroup];
                                           return next;
                                         });
-                                        editingStartTimeRef.current = null;
                                       }
                                     }}
                                     onMouseDown={(e) => {
                                       e.stopPropagation();
-                                      preventBlurRef.current = false; // Allow blur on mouse interactions
+                                      justStartedEditingRef.current = null; // User is interacting, allow blur
                                     }}
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      preventBlurRef.current = false;
+                                      justStartedEditingRef.current = null;
                                     }}
                                     className="w-16 px-1.5 py-0.5 text-[11px] bg-[#0f0e0a] border border-[#4ade80] rounded text-[#eae9e9] focus:outline-none focus:ring-1 focus:ring-[#4ade80]"
                                   />
@@ -598,18 +596,18 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                             
                             return (
                               <button
+                                type="button"
                                 onMouseDown={(e) => {
+                                  e.preventDefault(); // Prevent default to avoid focus issues
                                   e.stopPropagation();
-                                  e.preventDefault(); // Prevent default to avoid focus loss
-                                  // Set editing mode immediately on mousedown
-                                  setEditingQuantity(priceGroup);
-                                  setTempQuantity(prev => ({ ...prev, [priceGroup]: String(currentQuantity || '') }));
-                                  preventBlurRef.current = true; // Prevent blur during initial setup
-                                  editingStartTimeRef.current = null;
                                 }}
                                 onClick={(e) => {
-                                  e.stopPropagation();
                                   e.preventDefault();
+                                  e.stopPropagation();
+                                  // Set editing mode
+                                  setEditingQuantity(priceGroup);
+                                  setTempQuantity(prev => ({ ...prev, [priceGroup]: String(currentQuantity || '') }));
+                                  justStartedEditingRef.current = priceGroup; // Mark that we just started editing
                                 }}
                                 className="px-2 py-0.5 text-[11px] font-semibold rounded transition-colors bg-[#2a2820] text-[#eae9e9] hover:bg-[#3a3830] border border-[#404040]"
                                 title={`Click to edit buy quantity for ${priceGroup} price group`}
