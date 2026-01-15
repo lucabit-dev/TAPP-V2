@@ -4374,6 +4374,11 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
         // Cancel all active sell orders directly
         if (activeSellOrders.length > 0) {
           console.log(`🗑️ Cancelling ${activeSellOrders.length} active sell order(s) for ${symbol}...`);
+          // Log each order being cancelled for debugging
+          for (const order of activeSellOrders) {
+            console.log(`   - Order ${order.orderId} (Status: ${order.status})`);
+          }
+          
           const cancelResults = await Promise.allSettled(
             activeSellOrders.map(order => cancelOrderDirectly(order.orderId))
           );
@@ -4382,8 +4387,11 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
           const failedCount = cancelResults.length - successCount;
           console.log(`✅ Successfully cancelled ${successCount}/${activeSellOrders.length} orders${failedCount > 0 ? `, ${failedCount} failed` : ''}`);
           
-          // Wait for cancellation to propagate
-          await new Promise(resolve => setTimeout(resolve, 1500));
+          // Wait for cancellation to propagate - longer wait for ACK orders
+          const hasAckOrders = activeSellOrders.some(o => (o.status || '').toUpperCase() === 'ACK');
+          const waitTime = hasAckOrders ? 2500 : 1500; // Longer wait if ACK orders were cancelled
+          console.log(`⏳ Waiting ${waitTime}ms for cancellation to propagate${hasAckOrders ? ' (ACK orders detected)' : ''}...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
         }
         
         // Also use StopLimitService (V1) if available (for its own tracking)
@@ -4407,6 +4415,7 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
         }
         
         // Final check - verify no active orders remain (check all caches)
+        // CRITICAL: Re-check the cache after waiting, as orders might have been re-added via WebSocket
         let finalCheck = findActiveSellOrdersInCache(symbol);
         if (stopLimitService) {
           const slFinalCheck = stopLimitService.findActiveSellOrders(symbol);
@@ -4427,17 +4436,28 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
         
         if (finalCheck.length > 0) {
           console.warn(`⚠️ P&L Sell: ${finalCheck.length} active sell order(s) still exist after cancellation attempts. Retrying...`);
+          // Log each remaining order for debugging
+          for (const order of finalCheck) {
+            console.log(`   - Order ${order.orderId} (Status: ${order.status})`);
+          }
           
           // Retry cancellation for remaining orders with individual delays
           for (const order of finalCheck) {
+            console.log(`🔄 Retrying cancellation for order ${order.orderId} (Status: ${order.status})...`);
             const cancelled = await cancelOrderDirectly(order.orderId);
             if (!cancelled) {
               console.warn(`⚠️ Failed to cancel order ${order.orderId} during retry`);
+            } else {
+              console.log(`✅ Successfully cancelled order ${order.orderId} during retry`);
             }
-            await new Promise(resolve => setTimeout(resolve, 300)); // Small delay between cancellations
+            await new Promise(resolve => setTimeout(resolve, 500)); // Longer delay between cancellations
           }
           
-          await new Promise(resolve => setTimeout(resolve, 2000)); // Longer wait after retry
+          // Wait longer after retry, especially for ACK orders
+          const hasAckInRetry = finalCheck.some(o => (o.status || '').toUpperCase() === 'ACK');
+          const retryWaitTime = hasAckInRetry ? 3000 : 2000;
+          console.log(`⏳ Waiting ${retryWaitTime}ms after retry cancellation${hasAckInRetry ? ' (ACK orders detected)' : ''}...`);
+          await new Promise(resolve => setTimeout(resolve, retryWaitTime));
           
           // Final verification - check all caches one more time
           let finalRemaining = findActiveSellOrdersInCache(symbol);
@@ -4488,6 +4508,37 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
       // Log cancellation status
       if (!cancellationSuccessful && cancellationError) {
         console.warn(`⚠️ P&L Sell: Cancellation had issues for ${symbol}, but proceeding with sell attempt: ${cancellationError}`);
+      }
+      
+      // CRITICAL: One final check right before placing the order to catch any orders that were re-added
+      // This is especially important for ACK orders that might be re-added via WebSocket
+      let preOrderCheck = findActiveSellOrdersInCache(symbol);
+      if (stopLimitService) {
+        const slPreCheck = stopLimitService.findActiveSellOrders(symbol);
+        for (const slOrder of slPreCheck) {
+          if (!preOrderCheck.find(o => o.orderId === slOrder.orderId)) {
+            preOrderCheck.push(slOrder);
+          }
+        }
+      }
+      if (stopLimitV2Service && typeof stopLimitV2Service.findActiveSellOrders === 'function') {
+        const slV2PreCheck = stopLimitV2Service.findActiveSellOrders(symbol);
+        for (const slOrder of slV2PreCheck) {
+          if (!preOrderCheck.find(o => o.orderId === slOrder.orderId)) {
+            preOrderCheck.push(slOrder);
+          }
+        }
+      }
+      
+      if (preOrderCheck.length > 0) {
+        console.warn(`⚠️ P&L Sell: Found ${preOrderCheck.length} active sell order(s) right before placing new order. Cancelling immediately...`);
+        for (const order of preOrderCheck) {
+          console.log(`   - Order ${order.orderId} (Status: ${order.status})`);
+          await cancelOrderDirectly(order.orderId);
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
+        // Final wait before placing order
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
     
