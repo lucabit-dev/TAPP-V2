@@ -234,21 +234,45 @@ class StopLimitV2Service {
         }
       }
 
-      // Only reset if order is truly inactive (cancelled, filled, rejected)
-      // Don't reset if we recently created an order (even if orderId extraction failed)
-      // Don't reset if we're waiting for websocket update (orderId set but status null)
+      // CRITICAL: Never reset stageIndex >= 0 unless order is truly inactive
+      // This prevents flickering - once StopLimit is created, keep it active
       const orderStatusUpper = (state.orderStatus || '').toUpperCase();
-      const recentlyCreated = state.lastOrderCreateAttempt && (Date.now() - state.lastOrderCreateAttempt) < 10000; // 10 seconds
+      const recentlyCreated = state.lastOrderCreateAttempt && (Date.now() - state.lastOrderCreateAttempt) < 60000; // 60 seconds (increased from 10)
       
-      let shouldReset = 
-        state.autoSellExecuted || 
-        (state.orderStatus && NON_ACTIVE_STATUSES.has(orderStatusUpper) && !recentlyCreated) ||
-        (!state.orderId && state.stageIndex >= 0 && !recentlyCreated && !state.pendingCreate);
+      let shouldReset = false;
+      
+      // Only reset if order is truly inactive (cancelled, filled, rejected)
+      // Don't reset if we recently created an order or if stageIndex >= 0 (StopLimit was created)
+      if (state.autoSellExecuted) {
+        // Auto sell executed - position is closed, but keep stageIndex to show it was active
+        shouldReset = false;
+      } else if (state.orderStatus && NON_ACTIVE_STATUSES.has(orderStatusUpper) && !recentlyCreated) {
+        // Order status is inactive - but check if there's an active order in cache first
+        if (!activeOrderCheck || NON_ACTIVE_STATUSES.has((activeOrderCheck.order?.Status || '').toUpperCase())) {
+          shouldReset = true;
+        } else {
+          console.log(`⏸️ StopLimitService: Skipping reset for ${symbol} - inactive status but active order found in cache`);
+          shouldReset = false;
+        }
+      } else if (!state.orderId && state.stageIndex >= 0 && !recentlyCreated && !state.pendingCreate) {
+        // No orderId but stageIndex >= 0 - check if there's an active order in cache
+        if (!activeOrderCheck) {
+          // No active order found - but only reset if we're sure it's not just delayed
+          // Wait longer for ACK orders to propagate (already checked recentlyCreated which is 60s)
+          shouldReset = true;
+        } else {
+          // Active order found - link it but don't reset
+          shouldReset = false;
+        }
+      }
 
       // CRITICAL: Don't reset if we just found and linked an active ACK order above
-      if (shouldReset && activeOrderCheck && (activeOrderCheck.order?.Status || '').toUpperCase() === 'ACK') {
-        console.log(`⏸️ StopLimitService: Skipping reset for ${symbol} - active ACK order found and linked`);
-        shouldReset = false;
+      if (shouldReset && activeOrderCheck) {
+        const activeStatus = (activeOrderCheck.order?.Status || '').toUpperCase();
+        if (activeStatus === 'ACK' || ACTIVE_ORDER_STATUSES.has(activeStatus) || this.isQueuedStatus(activeStatus)) {
+          console.log(`⏸️ StopLimitService: Skipping reset for ${symbol} - active ${activeStatus} order found and linked`);
+          shouldReset = false;
+        }
       }
 
       // CRITICAL: If order was rejected, only reset (retry) if there are NO other active sell orders
@@ -256,10 +280,16 @@ class StopLimitV2Service {
         if (this.hasActiveSellOrder(symbol)) {
           console.log(`🛑 StopLimitService: Order rejected for ${symbol}, but active sell order exists. NOT retrying.`);
           shouldReset = false;
-          // Optionally update status to indicate manual intervention needed or just keep as REJ
         } else {
           console.log(`⚠️ StopLimitService: Order rejected for ${symbol} and no active sell order found. Retrying...`);
         }
+      }
+
+      // CRITICAL: Never reset if stageIndex >= 0 - this is the key to preventing flickering
+      // Once StopLimit is created, keep it active unless order is truly inactive
+      if (shouldReset && state.stageIndex >= 0) {
+        console.log(`⏸️ StopLimitService: Skipping reset for ${symbol} - StopLimit was created (stageIndex=${state.stageIndex}), keeping active`);
+        shouldReset = false;
       }
 
       if (shouldReset) {
@@ -2430,6 +2460,19 @@ class StopLimitV2Service {
         continue;
       }
       
+      // CRITICAL: If stageIndex >= 0, StopLimit was created - ALWAYS include in snapshot
+      // This ensures positions with StopLimit don't flicker out
+      if (state.stageIndex >= 0) {
+        // Only verify position is still active in cache
+        if (!activeSymbolsFromCache.has(state.symbol) || !this.hasActivePosition(state.symbol)) {
+          console.log(`⚠️ StopLimitService: Skipping ${state.symbol} in snapshot - position no longer active (but had StopLimit)`);
+          continue;
+        }
+        // Include in snapshot - StopLimit is active
+        rows.push(this.toSnapshot(state));
+        continue;
+      }
+      
       // Final triple-check before adding to snapshot
       // Only include if symbol is in activeSymbolsFromCache AND hasActivePosition returns true
       if (!activeSymbolsFromCache.has(state.symbol) || !this.hasActivePosition(state.symbol)) {
@@ -2697,44 +2740,33 @@ class StopLimitV2Service {
       return 'closed';
     }
 
-    const orderStatus = (state.orderStatus || '').toUpperCase();
-    if (state.autoSellExecuted) return 'auto-sell-executed';
-    
-    // CRITICAL: Check if StopLimit order is filled - position should show as closed
-    if (orderStatus === 'FLL' || orderStatus === 'FIL') {
-      return 'closed';
-    }
-    
-    // CRITICAL: Check for rejected orders - they should show as rejected, not active
-    if (orderStatus === 'REJ') {
-      return 'order-rejected';
-    }
-    
-    // CRITICAL: Check for active ACK order in cache even if not linked in state
-    // This prevents flickering when order exists but state hasn't been updated yet
-    const activeOrder = this.findActiveStopLimitOrder(state.symbol);
-    if (activeOrder) {
-      const activeStatus = (activeOrder.order?.Status || '').toUpperCase();
-      if (activeStatus === 'ACK' || ACTIVE_ORDER_STATUSES.has(activeStatus) || this.isQueuedStatus(activeStatus)) {
-        // Order exists and is active - ensure it's linked to state
-        if (!state.orderId || state.orderId !== activeOrder.orderId) {
-          this.updateStateFromOrder(state, activeOrder.orderId, activeOrder.order, activeOrder.leg, activeStatus);
-        }
-        if (activeStatus === 'DON' || activeStatus === 'QUE' || activeStatus === 'QUEUED') {
-          return 'queued';
-        }
-        return 'active';
-      }
-    }
-    
-    // If stageIndex >= 0, we've created an order - show as active immediately
-    // This ensures positions show as active right after order creation, before WebSocket confirmation
+    // CRITICAL: If stageIndex >= 0, StopLimit order was created - show as active by default
+    // This is the PRIMARY check to prevent flickering
+    // Only override if order is filled/rejected/closed
     if (state.stageIndex >= 0) {
+      // Check for terminal states that override active
+      if (state.autoSellExecuted) {
+        return 'auto-sell-executed';
+      }
+      
+      const orderStatus = (state.orderStatus || '').toUpperCase();
+      
+      // CRITICAL: Check if StopLimit order is filled - position should show as closed
+      if (orderStatus === 'FLL' || orderStatus === 'FIL') {
+        return 'closed';
+      }
+      
+      // CRITICAL: Check for rejected orders - they should show as rejected, not active
+      if (orderStatus === 'REJ') {
+        return 'order-rejected';
+      }
+      
       // Check for queued status
       if (orderStatus === 'DON' || orderStatus === 'QUE' || orderStatus === 'QUEUED') {
         return 'queued';
       }
-      // If we have an orderId, check cached order status
+      
+      // If we have an orderId, check cached order status for terminal states
       if (state.orderId) {
         const cachedOrder = this.ordersCache?.get(state.orderId);
         if (cachedOrder) {
@@ -2747,17 +2779,36 @@ class StopLimitV2Service {
           if (cachedStatus === 'DON' || cachedStatus === 'QUE' || cachedStatus === 'QUEUED') {
             return 'queued';
           }
-          // If order is active (including ACK), show active
-          if (ACTIVE_ORDER_STATUSES.has(cachedStatus) || this.isQueuedStatus(cachedStatus) || cachedStatus === 'ACK') {
-            return 'active';
-          }
           // If order is rejected, show rejected
           if (cachedStatus === 'REJ') {
             return 'order-rejected';
           }
+          // Any other active status (ACK, REC, etc.) means active
+          if (ACTIVE_ORDER_STATUSES.has(cachedStatus) || cachedStatus === 'ACK') {
+            return 'active';
+          }
         }
       }
-      // stageIndex >= 0 means order was created - show as active
+      
+      // CRITICAL: Check for active ACK order in cache even if not linked in state
+      // This prevents flickering when order exists but state hasn't been updated yet
+      const activeOrder = this.findActiveStopLimitOrder(state.symbol);
+      if (activeOrder) {
+        const activeStatus = (activeOrder.order?.Status || '').toUpperCase();
+        if (activeStatus === 'ACK' || ACTIVE_ORDER_STATUSES.has(activeStatus) || this.isQueuedStatus(activeStatus)) {
+          // Order exists and is active - ensure it's linked to state
+          if (!state.orderId || state.orderId !== activeOrder.orderId) {
+            this.updateStateFromOrder(state, activeOrder.orderId, activeOrder.order, activeOrder.leg, activeStatus);
+          }
+          if (activeStatus === 'DON' || activeStatus === 'QUE' || activeStatus === 'QUEUED') {
+            return 'queued';
+          }
+          return 'active';
+        }
+      }
+      
+      // stageIndex >= 0 means order was created - DEFAULT to active
+      // This is the key to preventing flickering
       return 'active';
     }
     
