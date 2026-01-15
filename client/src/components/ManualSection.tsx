@@ -518,23 +518,29 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                                     min="1"
                                     value={tempQuantity[priceGroup] ?? currentQuantity}
                                     onChange={(e) => setTempQuantity(prev => ({ ...prev, [priceGroup]: e.target.value }))}
-                                    onBlur={() => {
-                                      const value = tempQuantity[priceGroup];
-                                      if (value && parseInt(value) > 0) {
-                                        handleQuantityChange(priceGroup, value);
-                                      } else {
-                                        setEditingQuantity(null);
-                                        setTempQuantity(prev => {
-                                          const next = { ...prev };
-                                          delete next[priceGroup];
-                                          return next;
-                                        });
-                                      }
+                                    onBlur={(e) => {
+                                      // Use setTimeout to allow click events to process first
+                                      setTimeout(() => {
+                                        const value = tempQuantity[priceGroup];
+                                        const numValue = parseInt(value);
+                                        if (value && numValue > 0 && numValue !== currentQuantity) {
+                                          handleQuantityChange(priceGroup, value);
+                                        } else {
+                                          setEditingQuantity(null);
+                                          setTempQuantity(prev => {
+                                            const next = { ...prev };
+                                            delete next[priceGroup];
+                                            return next;
+                                          });
+                                        }
+                                      }, 200);
                                     }}
                                     onKeyDown={(e) => {
                                       if (e.key === 'Enter') {
+                                        e.preventDefault();
                                         const value = tempQuantity[priceGroup];
-                                        if (value && parseInt(value) > 0) {
+                                        const numValue = parseInt(value);
+                                        if (value && numValue > 0) {
                                           handleQuantityChange(priceGroup, value);
                                         } else {
                                           setEditingQuantity(null);
@@ -545,6 +551,7 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                                           });
                                         }
                                       } else if (e.key === 'Escape') {
+                                        e.preventDefault();
                                         setEditingQuantity(null);
                                         setTempQuantity(prev => {
                                           const next = { ...prev };
@@ -553,6 +560,8 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                                         });
                                       }
                                     }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    onFocus={(e) => e.target.select()}
                                     autoFocus
                                     className="w-16 px-1.5 py-0.5 text-[11px] bg-[#0f0e0a] border border-[#4ade80] rounded text-[#eae9e9] focus:outline-none focus:ring-1 focus:ring-[#4ade80]"
                                   />
@@ -565,8 +574,12 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setEditingQuantity(priceGroup);
-                                  setTempQuantity(prev => ({ ...prev, [priceGroup]: String(currentQuantity) }));
+                                  e.preventDefault();
+                                  // Use setTimeout to ensure the button click doesn't interfere with input focus
+                                  setTimeout(() => {
+                                    setEditingQuantity(priceGroup);
+                                    setTempQuantity(prev => ({ ...prev, [priceGroup]: String(currentQuantity || '') }));
+                                  }, 0);
                                 }}
                                 className="px-2 py-0.5 text-[11px] font-semibold rounded transition-colors bg-[#2a2820] text-[#eae9e9] hover:bg-[#3a3830] border border-[#404040]"
                                 title={`Click to edit buy quantity for ${priceGroup} price group`}
