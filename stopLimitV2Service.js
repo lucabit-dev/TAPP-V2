@@ -1895,22 +1895,29 @@ class StopLimitV2Service {
     }
 
     // Check 2: Any StopLimit order in cache (including queued/acknowledged)
+    // CRITICAL: Only check for ACTIVE orders, not filled/cancelled ones (which are historical)
     for (const [orderId, order] of this.ordersCache.entries()) {
       if (!order || !order.Legs) continue;
       if ((order.OrderType || '').toUpperCase() !== 'STOPLIMIT') continue;
       
+      const status = (order.Status || '').toUpperCase();
+      // CRITICAL: Only accept truly active statuses - exclude filled/cancelled orders (historical)
+      // This prevents old order history from interfering with new positions
+      if (NON_ACTIVE_STATUSES.has(status)) {
+        continue; // Skip filled/cancelled/expired orders
+      }
+      
       for (const leg of order.Legs) {
         if ((leg.Symbol || '').toUpperCase() === normalized && (leg.BuyOrSell || '').toUpperCase() === 'SELL') {
-          const status = (order.Status || '').toUpperCase();
-          // Accept any status that's not definitively cancelled/filled
-          if (status !== 'CAN' && status !== 'FIL' && status !== 'FLL' && status !== 'EXP') {
+          // Only accept active or queued statuses
+          if (ACTIVE_ORDER_STATUSES.has(status) || this.isQueuedStatus(status) || status === 'ACK') {
             results.hasOrder = true;
             results.orderId = orderId;
             results.order = order;
             results.leg = leg;
             results.status = status;
             results.source = 'any-cache';
-            results.checks.push(`Found StopLimit order ${orderId} with status ${status} (not cancelled/filled)`);
+            results.checks.push(`Found StopLimit order ${orderId} with status ${status} (active/queued)`);
             return results;
           }
         }
@@ -1944,12 +1951,17 @@ class StopLimitV2Service {
     for (const [orderId, order] of this.ordersCache.entries()) {
       if (!order || !order.Legs) continue;
       const status = (order.Status || '').toUpperCase();
+      
+      // CRITICAL: Only consider ACTIVE orders, not filled/cancelled ones (historical)
+      // This prevents old order history from interfering with new positions
+      if (NON_ACTIVE_STATUSES.has(status)) {
+        continue; // Skip filled/cancelled/expired orders
+      }
+      
       const consideredStatus =
         ACTIVE_ORDER_STATUSES.has(status) ||
         this.isQueuedStatus(status) ||
-        status === 'ACK' ||
-        status === 'FLL' ||
-        status === 'FIL';
+        status === 'ACK';
 
       if (!consideredStatus) continue;
 
