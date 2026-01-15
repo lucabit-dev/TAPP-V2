@@ -97,8 +97,6 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
   const [buyQuantities, setBuyQuantities] = useState<Record<string, number>>({});
   const [editingQuantity, setEditingQuantity] = useState<string | null>(null);
   const [tempQuantity, setTempQuantity] = useState<Record<string, string>>({});
-  const inputRef = useRef<HTMLInputElement | null>(null);
-  const justStartedEditingRef = useRef<string | null>(null);
 
   useEffect(() => {
     // Initial load of buys enabled status
@@ -290,6 +288,10 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
     const num = parseInt(quantity) || 0;
     if (num <= 0) return;
     
+    // Close all editing states for this price group (all symbols in the same price group)
+    // This ensures when one row saves, all other rows with the same price group exit edit mode
+    setEditingQuantity(null);
+    
     try {
       const resp = await fetch(`${API_BASE_URL}/manual/buy-quantities`, {
         method: 'POST',
@@ -301,7 +303,6 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
       if (data.success) {
         setBuyQuantities(prev => ({ ...prev, ...data.data }));
         addNotification(`Buy quantity for ${priceGroup} updated to ${num}`, 'success');
-        setEditingQuantity(null);
       } else {
         addNotification(`Failed to update buy quantity: ${data.error || 'Unknown error'}`, 'error');
       }
@@ -502,9 +503,11 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                           
                           {(() => {
                             const symbolVal = stock.symbol;
+                            const cleanSymbol = String(symbolVal).trim().toUpperCase();
                             const priceGroup = getPriceGroup(stock.price);
                             const currentQuantity = priceGroup ? getQuantityForPrice(stock.price) : 0;
-                            const isEditing = editingQuantity === priceGroup;
+                            // Use symbol as the editing key so each row can edit independently
+                            const isEditing = editingQuantity === cleanSymbol;
                             
                             if (!priceGroup) {
                               return (
@@ -513,80 +516,60 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                             }
                             
                             if (isEditing) {
-                              // Use useEffect to focus after render
-                              React.useEffect(() => {
-                                if (inputRef.current && justStartedEditingRef.current === priceGroup) {
-                                  // Small delay to ensure DOM is ready
-                                  const timer = setTimeout(() => {
-                                    if (inputRef.current) {
-                                      inputRef.current.focus();
-                                      inputRef.current.select();
-                                      justStartedEditingRef.current = null; // Clear flag after focus
-                                    }
-                                  }, 50);
-                                  return () => clearTimeout(timer);
-                                }
-                              }, [isEditing, priceGroup]);
-
                               return (
-                                <div className="flex items-center space-x-1">
+                                <div className="flex items-center space-x-1" onClick={(e) => e.stopPropagation()}>
                                   <input
-                                    ref={inputRef}
                                     type="number"
                                     min="1"
-                                    value={tempQuantity[priceGroup] ?? currentQuantity}
+                                    value={tempQuantity[cleanSymbol] ?? currentQuantity}
                                     onChange={(e) => {
-                                      setTempQuantity(prev => ({ ...prev, [priceGroup]: e.target.value }));
+                                      e.stopPropagation();
+                                      setTempQuantity(prev => ({ ...prev, [cleanSymbol]: e.target.value }));
                                     }}
                                     onBlur={(e) => {
-                                      // Only process blur if we're not in the initial setup phase
-                                      if (justStartedEditingRef.current === priceGroup) {
-                                        // Still setting up, ignore blur and refocus
-                                        setTimeout(() => {
-                                          if (inputRef.current && editingQuantity === priceGroup) {
-                                            inputRef.current.focus();
-                                          }
-                                        }, 10);
-                                        return;
-                                      }
-                                      
-                                      const value = tempQuantity[priceGroup];
-                                      const numValue = parseInt(value);
-                                      if (value && numValue > 0 && numValue !== currentQuantity) {
+                                      e.stopPropagation();
+                                      const value = tempQuantity[cleanSymbol];
+                                      const numValue = parseInt(value || '0');
+                                      if (value && numValue > 0) {
                                         handleQuantityChange(priceGroup, value);
                                       } else {
                                         setEditingQuantity(null);
                                         setTempQuantity(prev => {
                                           const next = { ...prev };
-                                          delete next[priceGroup];
+                                          delete next[cleanSymbol];
                                           return next;
                                         });
                                       }
                                     }}
                                     onKeyDown={(e) => {
+                                      e.stopPropagation();
                                       if (e.key === 'Enter') {
                                         e.preventDefault();
-                                        justStartedEditingRef.current = null; // Allow blur
-                                        e.currentTarget.blur(); // Trigger blur which will save
+                                        const value = tempQuantity[cleanSymbol];
+                                        const numValue = parseInt(value || '0');
+                                        if (value && numValue > 0) {
+                                          handleQuantityChange(priceGroup, value);
+                                        } else {
+                                          setEditingQuantity(null);
+                                          setTempQuantity(prev => {
+                                            const next = { ...prev };
+                                            delete next[cleanSymbol];
+                                            return next;
+                                          });
+                                        }
                                       } else if (e.key === 'Escape') {
                                         e.preventDefault();
-                                        justStartedEditingRef.current = null;
                                         setEditingQuantity(null);
                                         setTempQuantity(prev => {
                                           const next = { ...prev };
-                                          delete next[priceGroup];
+                                          delete next[cleanSymbol];
                                           return next;
                                         });
                                       }
                                     }}
-                                    onMouseDown={(e) => {
-                                      e.stopPropagation();
-                                      justStartedEditingRef.current = null; // User is interacting, allow blur
-                                    }}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      justStartedEditingRef.current = null;
-                                    }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    onMouseDown={(e) => e.stopPropagation()}
+                                    autoFocus
                                     className="w-16 px-1.5 py-0.5 text-[11px] bg-[#0f0e0a] border border-[#4ade80] rounded text-[#eae9e9] focus:outline-none focus:ring-1 focus:ring-[#4ade80]"
                                   />
                                   <span className="text-[10px] text-[#808080]">({priceGroup})</span>
@@ -597,20 +580,18 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                             return (
                               <button
                                 type="button"
-                                onMouseDown={(e) => {
-                                  e.preventDefault(); // Prevent default to avoid focus issues
-                                  e.stopPropagation();
-                                }}
                                 onClick={(e) => {
                                   e.preventDefault();
                                   e.stopPropagation();
-                                  // Set editing mode
-                                  setEditingQuantity(priceGroup);
-                                  setTempQuantity(prev => ({ ...prev, [priceGroup]: String(currentQuantity || '') }));
-                                  justStartedEditingRef.current = priceGroup; // Mark that we just started editing
+                                  setEditingQuantity(cleanSymbol);
+                                  setTempQuantity(prev => ({ ...prev, [cleanSymbol]: String(currentQuantity) }));
+                                }}
+                                onMouseDown={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
                                 }}
                                 className="px-2 py-0.5 text-[11px] font-semibold rounded transition-colors bg-[#2a2820] text-[#eae9e9] hover:bg-[#3a3830] border border-[#404040]"
-                                title={`Click to edit buy quantity for ${priceGroup} price group`}
+                                title={`Click to edit buy quantity for ${priceGroup} price group (affects all stocks in this price range)`}
                               >
                                 {currentQuantity > 0 ? currentQuantity : 'Set'} ({priceGroup})
                               </button>
