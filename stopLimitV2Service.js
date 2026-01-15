@@ -1899,10 +1899,24 @@ class StopLimitV2Service {
     const normalized = symbol.toUpperCase();
     const orders = [];
 
-    for (const [orderId, order] of this.ordersCache.entries()) {
+    // CRITICAL: Orders are ordered with most recent last
+    // Iterate in reverse to prioritize most recent orders
+    const ordersArray = Array.from(this.ordersCache.entries());
+    
+    // Iterate from last to first (most recent to oldest)
+    for (let i = ordersArray.length - 1; i >= 0; i--) {
+      const [orderId, order] = ordersArray[i];
+      
       if (!order || !order.Legs) continue;
       const status = (order.Status || '').toUpperCase();
-      if (ACTIVE_ORDER_STATUSES.has(status) === false || status === 'OUT' || status === 'REJ' || status === 'FLL') continue;
+      
+      // CRITICAL: Completely ignore REJ (rejected) orders - they don't affect the position
+      if (status === 'REJ') {
+        continue;
+      }
+      
+      if (ACTIVE_ORDER_STATUSES.has(status) === false || status === 'OUT' || status === 'FLL') continue;
+      
       for (const leg of order.Legs) {
         if ((leg.Symbol || '').toUpperCase() !== normalized) continue;
         if ((leg.BuyOrSell || '').toUpperCase() !== 'SELL') continue;
@@ -1916,45 +1930,45 @@ class StopLimitV2Service {
 
   findActiveStopLimitOrder(symbol) {
     const normalized = symbol.toUpperCase();
-    for (const [orderId, order] of this.ordersCache.entries()) {
+    
+    // CRITICAL: Orders are ordered with most recent last
+    // Iterate in reverse to prioritize most recent orders
+    const ordersArray = Array.from(this.ordersCache.entries());
+    
+    // Iterate from last to first (most recent to oldest)
+    for (let i = ordersArray.length - 1; i >= 0; i--) {
+      const [orderId, order] = ordersArray[i];
+      
       if (!order || !order.Legs) continue;
       if ((order.OrderType || '').toUpperCase() !== 'STOPLIMIT') continue;
       
-      // Check for SELL leg first (most specific)
-      let hasSellLeg = false;
-      for (const leg of order.Legs) {
-        if ((leg.Symbol || '').toUpperCase() === normalized && (leg.BuyOrSell || '').toUpperCase() === 'SELL') {
-          hasSellLeg = true;
-          break;
-        }
-      }
-      if (!hasSellLeg) continue;
-      
-      // CRITICAL: Check status - ACK means active, period
       const status = (order.Status || '').toUpperCase();
       
-      // If status is ACK, this order makes the position active
-      if (status === 'ACK') {
-        const leg = order.Legs.find(l => 
-          (l.Symbol || '').toUpperCase() === normalized && 
-          (l.BuyOrSell || '').toUpperCase() === 'SELL'
-        );
-        if (leg) {
-          return { orderId, order, leg };
-        }
+      // CRITICAL: Completely ignore REJ (rejected) orders - they don't affect the position
+      if (status === 'REJ') {
+        continue;
       }
       
-      // Also check other active statuses
-      if (ACTIVE_ORDER_STATUSES.has(status) && status !== 'OUT' && status !== 'REJ' && status !== 'FLL') {
-        const leg = order.Legs.find(l => 
-          (l.Symbol || '').toUpperCase() === normalized && 
-          (l.BuyOrSell || '').toUpperCase() === 'SELL'
-        );
-        if (leg) {
-          return { orderId, order, leg };
-        }
+      // Check for SELL leg
+      const leg = order.Legs.find(l => 
+        (l.Symbol || '').toUpperCase() === normalized && 
+        (l.BuyOrSell || '').toUpperCase() === 'SELL'
+      );
+      
+      if (!leg) continue;
+      
+      // CRITICAL: Prioritize ACK status - if we find ACK, return immediately
+      // ACK means active, period
+      if (status === 'ACK') {
+        return { orderId, order, leg };
+      }
+      
+      // Also check other active statuses (but prioritize ACK first)
+      if (ACTIVE_ORDER_STATUSES.has(status) && status !== 'OUT' && status !== 'FLL') {
+        return { orderId, order, leg };
       }
     }
+    
     return null;
   }
 
@@ -1990,11 +2004,23 @@ class StopLimitV2Service {
 
     // Check 2: Any StopLimit order in cache (including queued/acknowledged)
     // CRITICAL: Only check for ACTIVE orders, not filled/cancelled ones (which are historical)
-    for (const [orderId, order] of this.ordersCache.entries()) {
+    // CRITICAL: Orders are ordered with most recent last - iterate in reverse to prioritize most recent
+    const ordersArray = Array.from(this.ordersCache.entries());
+    
+    // Iterate from last to first (most recent to oldest)
+    for (let i = ordersArray.length - 1; i >= 0; i--) {
+      const [orderId, order] = ordersArray[i];
+      
       if (!order || !order.Legs) continue;
       if ((order.OrderType || '').toUpperCase() !== 'STOPLIMIT') continue;
       
       const status = (order.Status || '').toUpperCase();
+      
+      // CRITICAL: Completely ignore REJ (rejected) orders - they don't affect the position
+      if (status === 'REJ') {
+        continue;
+      }
+      
       // CRITICAL: Only accept truly active statuses - exclude filled/cancelled orders (historical)
       // This prevents old order history from interfering with new positions
       if (NON_ACTIVE_STATUSES.has(status)) {
@@ -2040,11 +2066,22 @@ class StopLimitV2Service {
 
   findLatestRelevantOrder(symbol) {
     const normalized = symbol.toUpperCase();
-    let fallback = null;
 
-    for (const [orderId, order] of this.ordersCache.entries()) {
+    // CRITICAL: Orders are ordered with most recent last
+    // Iterate in reverse to prioritize most recent orders
+    const ordersArray = Array.from(this.ordersCache.entries());
+    
+    // Iterate from last to first (most recent to oldest)
+    for (let i = ordersArray.length - 1; i >= 0; i--) {
+      const [orderId, order] = ordersArray[i];
+      
       if (!order || !order.Legs) continue;
       const status = (order.Status || '').toUpperCase();
+      
+      // CRITICAL: Completely ignore REJ (rejected) orders - they don't affect the position
+      if (status === 'REJ') {
+        continue;
+      }
       
       // CRITICAL: Only consider ACTIVE orders, not filled/cancelled ones (historical)
       // This prevents old order history from interfering with new positions
@@ -2059,24 +2096,25 @@ class StopLimitV2Service {
 
       if (!consideredStatus) continue;
 
+      // Check for matching SELL leg
       for (const leg of order.Legs) {
         if ((leg.Symbol || '').toUpperCase() !== normalized) continue;
         if ((leg.BuyOrSell || '').toUpperCase() !== 'SELL') continue;
 
+        // Found matching leg - since we're iterating in reverse (most recent first), 
+        // return immediately to get the most recent active order
         const updatedAt = order.lastUpdated || order.TimeStamp || order.Timestamp || Date.now();
-        if (!fallback || updatedAt > fallback.updatedAt) {
-          fallback = {
-            orderId,
-            order,
-            leg,
-            status,
-            updatedAt
-          };
-        }
+        return {
+          orderId,
+          order,
+          leg,
+          status,
+          updatedAt
+        };
       }
     }
 
-    return fallback;
+    return null;
   }
 
   calculateStopAndLimit(avgPrice, stopOffset) {
