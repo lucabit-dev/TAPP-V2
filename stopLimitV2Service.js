@@ -1919,12 +1919,38 @@ class StopLimitV2Service {
     for (const [orderId, order] of this.ordersCache.entries()) {
       if (!order || !order.Legs) continue;
       if ((order.OrderType || '').toUpperCase() !== 'STOPLIMIT') continue;
-      const status = (order.Status || '').toUpperCase();
-      if (!ACTIVE_ORDER_STATUSES.has(status)) continue;
-      if (status === 'OUT' || status === 'REJ' || status === 'FLL') continue;
-
+      
+      // Check for SELL leg first (most specific)
+      let hasSellLeg = false;
       for (const leg of order.Legs) {
         if ((leg.Symbol || '').toUpperCase() === normalized && (leg.BuyOrSell || '').toUpperCase() === 'SELL') {
+          hasSellLeg = true;
+          break;
+        }
+      }
+      if (!hasSellLeg) continue;
+      
+      // CRITICAL: Check status - ACK means active, period
+      const status = (order.Status || '').toUpperCase();
+      
+      // If status is ACK, this order makes the position active
+      if (status === 'ACK') {
+        const leg = order.Legs.find(l => 
+          (l.Symbol || '').toUpperCase() === normalized && 
+          (l.BuyOrSell || '').toUpperCase() === 'SELL'
+        );
+        if (leg) {
+          return { orderId, order, leg };
+        }
+      }
+      
+      // Also check other active statuses
+      if (ACTIVE_ORDER_STATUSES.has(status) && status !== 'OUT' && status !== 'REJ' && status !== 'FLL') {
+        const leg = order.Legs.find(l => 
+          (l.Symbol || '').toUpperCase() === normalized && 
+          (l.BuyOrSell || '').toUpperCase() === 'SELL'
+        );
+        if (leg) {
           return { orderId, order, leg };
         }
       }
@@ -2460,8 +2486,34 @@ class StopLimitV2Service {
         continue;
       }
       
-      // CRITICAL: If stageIndex >= 0, StopLimit was created - ALWAYS include in snapshot
-      // This ensures positions with StopLimit don't flicker out
+      // CRITICAL: PRIMARY CHECK - If there's an ACK SELL StopLimit order, position is active
+      // This is the most reliable check - directly querying the orders cache
+      const activeOrder = this.findActiveStopLimitOrder(state.symbol);
+      if (activeOrder) {
+        const activeStatus = (activeOrder.order?.Status || '').toUpperCase();
+        // ACK or any active status means position is active with StopLimit
+        if (activeStatus === 'ACK' || ACTIVE_ORDER_STATUSES.has(activeStatus)) {
+          // Only verify position is still active in cache
+          if (!activeSymbolsFromCache.has(state.symbol) || !this.hasActivePosition(state.symbol)) {
+            console.log(`⚠️ StopLimitService: Skipping ${state.symbol} in snapshot - position no longer active (but has ACK order)`);
+            continue;
+          }
+          // Ensure state is linked to this order
+          if (!state.orderId || state.orderId !== activeOrder.orderId) {
+            this.updateStateFromOrder(state, activeOrder.orderId, activeOrder.order, activeOrder.leg, activeStatus);
+          }
+          // Ensure stageIndex is set
+          if (state.stageIndex < 0) {
+            state.stageIndex = 0;
+          }
+          // Include in snapshot - StopLimit is active
+          rows.push(this.toSnapshot(state));
+          continue;
+        }
+      }
+      
+      // SECONDARY CHECK: If stageIndex >= 0, StopLimit was created - include in snapshot
+      // This handles cases where order was created but not yet in cache
       if (state.stageIndex >= 0) {
         // Only verify position is still active in cache
         if (!activeSymbolsFromCache.has(state.symbol) || !this.hasActivePosition(state.symbol)) {
@@ -2740,9 +2792,60 @@ class StopLimitV2Service {
       return 'closed';
     }
 
-    // CRITICAL: If stageIndex >= 0, StopLimit order was created - show as active by default
-    // This is the PRIMARY check to prevent flickering
-    // Only override if order is filled/rejected/closed
+    // CRITICAL: PRIMARY CHECK - If there's an ACK SELL StopLimit order in cache, position is ACTIVE
+    // This is the most reliable check - directly querying the orders cache
+    // Don't rely on state.orderId or state.orderStatus - check the actual cache
+    const activeOrder = this.findActiveStopLimitOrder(state.symbol);
+    if (activeOrder) {
+      const activeStatus = (activeOrder.order?.Status || '').toUpperCase();
+      
+      // If order is filled, position is closed
+      if (activeStatus === 'FLL' || activeStatus === 'FIL') {
+        return 'closed';
+      }
+      
+      // If order is rejected, show rejected (but check if there's another active order first)
+      if (activeStatus === 'REJ') {
+        // Check if there's another active order (might have been replaced)
+        const allActiveOrders = this.findActiveSellOrders(state.symbol);
+        const otherActiveOrder = allActiveOrders.find(o => 
+          o.orderId !== activeOrder.orderId && 
+          (o.order?.OrderType || '').toUpperCase() === 'STOPLIMIT' &&
+          ((o.order?.Status || '').toUpperCase() === 'ACK' || ACTIVE_ORDER_STATUSES.has((o.order?.Status || '').toUpperCase()))
+        );
+        if (otherActiveOrder) {
+          // Found another active order - use that one
+          const otherStatus = (otherActiveOrder.order?.Status || '').toUpperCase();
+          if (otherStatus === 'DON' || otherStatus === 'QUE' || otherStatus === 'QUEUED') {
+            return 'queued';
+          }
+          return 'active';
+        }
+        return 'order-rejected';
+      }
+      
+      // If order is queued, show queued
+      if (activeStatus === 'DON' || activeStatus === 'QUE' || activeStatus === 'QUEUED') {
+        return 'queued';
+      }
+      
+      // ACK or any other active status means ACTIVE
+      // This is the key: if there's an ACK order, position is active
+      if (activeStatus === 'ACK' || ACTIVE_ORDER_STATUSES.has(activeStatus) || this.isQueuedStatus(activeStatus)) {
+        // Order exists and is active - ensure it's linked to state
+        if (!state.orderId || state.orderId !== activeOrder.orderId) {
+          this.updateStateFromOrder(state, activeOrder.orderId, activeOrder.order, activeOrder.leg, activeStatus);
+        }
+        // Ensure stageIndex is set if we found an active order
+        if (state.stageIndex < 0) {
+          state.stageIndex = 0;
+        }
+        return 'active';
+      }
+    }
+
+    // SECONDARY CHECK: If stageIndex >= 0, StopLimit order was created - show as active
+    // This handles cases where order was created but not yet in cache
     if (state.stageIndex >= 0) {
       // Check for terminal states that override active
       if (state.autoSellExecuted) {
@@ -2756,7 +2859,7 @@ class StopLimitV2Service {
         return 'closed';
       }
       
-      // CRITICAL: Check for rejected orders - they should show as rejected, not active
+      // CRITICAL: Check for rejected orders - but only if no active order found above
       if (orderStatus === 'REJ') {
         return 'order-rejected';
       }
@@ -2766,49 +2869,8 @@ class StopLimitV2Service {
         return 'queued';
       }
       
-      // If we have an orderId, check cached order status for terminal states
-      if (state.orderId) {
-        const cachedOrder = this.ordersCache?.get(state.orderId);
-        if (cachedOrder) {
-          const cachedStatus = (cachedOrder.Status || '').toUpperCase();
-          // If order is filled, position is closed
-          if (cachedStatus === 'FLL' || cachedStatus === 'FIL') {
-            return 'closed';
-          }
-          // If order is queued, show queued
-          if (cachedStatus === 'DON' || cachedStatus === 'QUE' || cachedStatus === 'QUEUED') {
-            return 'queued';
-          }
-          // If order is rejected, show rejected
-          if (cachedStatus === 'REJ') {
-            return 'order-rejected';
-          }
-          // Any other active status (ACK, REC, etc.) means active
-          if (ACTIVE_ORDER_STATUSES.has(cachedStatus) || cachedStatus === 'ACK') {
-            return 'active';
-          }
-        }
-      }
-      
-      // CRITICAL: Check for active ACK order in cache even if not linked in state
-      // This prevents flickering when order exists but state hasn't been updated yet
-      const activeOrder = this.findActiveStopLimitOrder(state.symbol);
-      if (activeOrder) {
-        const activeStatus = (activeOrder.order?.Status || '').toUpperCase();
-        if (activeStatus === 'ACK' || ACTIVE_ORDER_STATUSES.has(activeStatus) || this.isQueuedStatus(activeStatus)) {
-          // Order exists and is active - ensure it's linked to state
-          if (!state.orderId || state.orderId !== activeOrder.orderId) {
-            this.updateStateFromOrder(state, activeOrder.orderId, activeOrder.order, activeOrder.leg, activeStatus);
-          }
-          if (activeStatus === 'DON' || activeStatus === 'QUE' || activeStatus === 'QUEUED') {
-            return 'queued';
-          }
-          return 'active';
-        }
-      }
-      
       // stageIndex >= 0 means order was created - DEFAULT to active
-      // This is the key to preventing flickering
+      // This prevents flickering while waiting for order to appear in cache
       return 'active';
     }
     
