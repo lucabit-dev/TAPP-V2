@@ -94,6 +94,9 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
   const [notifications, setNotifications] = useState<NotificationProps[]>([]);
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [showStopLimitConfigModal, setShowStopLimitConfigModal] = useState(false);
+  const [buyQuantities, setBuyQuantities] = useState<Record<string, number>>({});
+  const [editingQuantity, setEditingQuantity] = useState<string | null>(null);
+  const [tempQuantity, setTempQuantity] = useState<Record<string, string>>({});
 
   useEffect(() => {
     // Initial load of buys enabled status
@@ -107,6 +110,18 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
       }
     };
     loadBuysStatus();
+    
+    // Load buy quantities
+    const loadBuyQuantities = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/manual/buy-quantities`);
+        const data = await res.json();
+        if (data.success) setBuyQuantities(data.data || {});
+      } catch (e) {
+        console.error("Failed to load buy quantities", e);
+      }
+    };
+    loadBuyQuantities();
   }, []);
 
   useEffect(() => {
@@ -259,86 +274,45 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
     }
   };
 
-  const handleSellClick = async (symbol: string | null | undefined) => {
-    if (!symbol) return;
-    
-    const cleanSymbol = String(symbol).trim().toUpperCase();
-    if (sellingSymbols.has(cleanSymbol)) return; // Prevent duplicate clicks
-    
-    setSellingSymbols(prev => new Set(prev).add(cleanSymbol));
-    setSellStatuses(prev => ({ ...prev, [cleanSymbol]: null }));
+  // Helper function to get price group from price
+  const getPriceGroup = (price: number): string | null => {
+    if (price > 0 && price <= 5) return '0-5';
+    if (price > 5 && price <= 10) return '5-10';
+    if (price > 10 && price <= 12) return '10-12';
+    if (price > 12 && price <= 20) return '12-20';
+    if (price > 20 && price <= 30) return '20-30';
+    return null;
+  };
+
+  const handleQuantityChange = async (priceGroup: string, quantity: string) => {
+    const num = parseInt(quantity) || 0;
+    if (num <= 0) return;
     
     try {
-      const resp = await fetchWithAuth(`${API_BASE_URL}/sells/test`, {
+      const resp = await fetch(`${API_BASE_URL}/manual/buy-quantities`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol: cleanSymbol })
+        body: JSON.stringify({ buyQuantities: { [priceGroup]: num } })
       });
       
-      if (!resp.ok) {
-        // HTTP error (500, etc) - try to get error message
-        const errorData = await resp.json().catch(() => ({ error: `HTTP ${resp.status}: ${resp.statusText}` }));
-        const errorMsg = errorData.error || `HTTP ${resp.status}`;
-        addNotification(`Failed to sell ${cleanSymbol}: ${errorMsg}`, 'error');
-        setSellStatuses(prev => ({ ...prev, [cleanSymbol]: 'error' }));
-        setTimeout(() => {
-          setSellStatuses(prev => {
-            const next = { ...prev };
-            delete next[cleanSymbol];
-            return next;
-          });
-        }, 3000);
-        return;
-      }
-      
-      const data = await resp.json().catch(() => ({}));
-      
-      if (data?.success) {
-        const quantity = data.data?.quantity || 'N/A';
-        const limitPrice = data.data?.limitPrice ? `$${parseFloat(data.data.limitPrice).toFixed(2)}` : 'N/A';
-        console.log(`✅ Sell signal sent for ${cleanSymbol}:`, data.data?.notifyStatus);
-        addNotification(`Sell order sent successfully for ${quantity} ${cleanSymbol} at ${limitPrice}`, 'success');
-        setSellStatuses(prev => ({ ...prev, [cleanSymbol]: 'success' }));
-        // Clear status after 3 seconds
-        setTimeout(() => {
-          setSellStatuses(prev => {
-            const next = { ...prev };
-            delete next[cleanSymbol];
-            return next;
-          });
-        }, 3000);
+      const data = await resp.json();
+      if (data.success) {
+        setBuyQuantities(prev => ({ ...prev, ...data.data }));
+        addNotification(`Buy quantity for ${priceGroup} updated to ${num}`, 'success');
+        setEditingQuantity(null);
       } else {
-        const errorMsg = data.error || data.data?.notifyStatus || 'Unknown error';
-        console.error(`❌ Failed to send sell signal for ${cleanSymbol}:`, errorMsg);
-        addNotification(`Failed to sell ${cleanSymbol}: ${errorMsg}`, 'error');
-        setSellStatuses(prev => ({ ...prev, [cleanSymbol]: 'error' }));
-        setTimeout(() => {
-          setSellStatuses(prev => {
-            const next = { ...prev };
-            delete next[cleanSymbol];
-            return next;
-          });
-        }, 3000);
+        addNotification(`Failed to update buy quantity: ${data.error || 'Unknown error'}`, 'error');
       }
     } catch (error: any) {
-      const errorMsg = error.message || 'Unknown error';
-      console.error(`❌ Error sending sell signal for ${cleanSymbol}:`, error);
-      addNotification(`Error selling ${cleanSymbol}: ${errorMsg}`, 'error');
-      setSellStatuses(prev => ({ ...prev, [cleanSymbol]: 'error' }));
-      setTimeout(() => {
-        setSellStatuses(prev => {
-          const next = { ...prev };
-          delete next[cleanSymbol];
-          return next;
-        });
-      }, 3000);
-    } finally {
-      setSellingSymbols(prev => {
-        const next = new Set(prev);
-        next.delete(cleanSymbol);
-        return next;
-      });
+      console.error('Error updating buy quantity:', error);
+      addNotification(`Error updating buy quantity: ${error.message || 'Unknown error'}`, 'error');
     }
+  };
+
+  const getQuantityForPrice = (price: number): number => {
+    const priceGroup = getPriceGroup(price);
+    if (!priceGroup) return 0;
+    return buyQuantities[priceGroup] || 0;
   };
 
   const { qualified: scoredStocks, nonQualified, analyzing } = manualList;
@@ -526,45 +500,78 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                           
                           {(() => {
                             const symbolVal = stock.symbol;
-                            const cleanSymbol = String(symbolVal).trim().toUpperCase();
-                            const isSelling = sellingSymbols.has(cleanSymbol);
-                            const status = sellStatuses[cleanSymbol];
-                            const isDisabled = isSelling;
+                            const priceGroup = getPriceGroup(stock.price);
+                            const currentQuantity = priceGroup ? getQuantityForPrice(stock.price) : 0;
+                            const isEditing = editingQuantity === priceGroup;
                             
-                            let buttonClass = 'px-2 py-0.5 text-[11px] font-semibold rounded transition-colors';
-                            let buttonText = 'SELL';
-                            let buttonTitle = `Send sell signal for ${symbolVal}`;
+                            if (!priceGroup) {
+                              return (
+                                <span className="text-[10px] text-[#808080] px-2">N/A</span>
+                              );
+                            }
                             
-                            if (isSelling) {
-                              buttonClass += ' bg-[#2a2820] cursor-not-allowed opacity-50';
-                              buttonText = '...';
-                              buttonTitle = `Sending sell signal for ${symbolVal}...`;
-                            } else if (status === 'success') {
-                              buttonClass += ' bg-[#f87171] text-[#14130e]';
-                              buttonText = '✓';
-                              buttonTitle = `Sell signal sent successfully for ${symbolVal}`;
-                            } else if (status === 'error') {
-                              buttonClass += ' bg-[#f87171] text-[#14130e]';
-                              buttonText = '✗';
-                              buttonTitle = `Failed to send sell signal for ${symbolVal}`;
-                            } else {
-                              // Default style for SELL button
-                              buttonClass += ' bg-[#f87171] text-[#14130e] hover:bg-[#ef4444]';
+                            if (isEditing) {
+                              return (
+                                <div className="flex items-center space-x-1">
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    value={tempQuantity[priceGroup] ?? currentQuantity}
+                                    onChange={(e) => setTempQuantity(prev => ({ ...prev, [priceGroup]: e.target.value }))}
+                                    onBlur={() => {
+                                      const value = tempQuantity[priceGroup];
+                                      if (value && parseInt(value) > 0) {
+                                        handleQuantityChange(priceGroup, value);
+                                      } else {
+                                        setEditingQuantity(null);
+                                        setTempQuantity(prev => {
+                                          const next = { ...prev };
+                                          delete next[priceGroup];
+                                          return next;
+                                        });
+                                      }
+                                    }}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        const value = tempQuantity[priceGroup];
+                                        if (value && parseInt(value) > 0) {
+                                          handleQuantityChange(priceGroup, value);
+                                        } else {
+                                          setEditingQuantity(null);
+                                          setTempQuantity(prev => {
+                                            const next = { ...prev };
+                                            delete next[priceGroup];
+                                            return next;
+                                          });
+                                        }
+                                      } else if (e.key === 'Escape') {
+                                        setEditingQuantity(null);
+                                        setTempQuantity(prev => {
+                                          const next = { ...prev };
+                                          delete next[priceGroup];
+                                          return next;
+                                        });
+                                      }
+                                    }}
+                                    autoFocus
+                                    className="w-16 px-1.5 py-0.5 text-[11px] bg-[#0f0e0a] border border-[#4ade80] rounded text-[#eae9e9] focus:outline-none focus:ring-1 focus:ring-[#4ade80]"
+                                  />
+                                  <span className="text-[10px] text-[#808080]">({priceGroup})</span>
+                                </div>
+                              );
                             }
                             
                             return (
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  if (!isDisabled) {
-                                    handleSellClick(symbolVal);
-                                  }
+                                  setEditingQuantity(priceGroup);
+                                  setTempQuantity(prev => ({ ...prev, [priceGroup]: String(currentQuantity) }));
                                 }}
-                                disabled={isDisabled}
-                                className={buttonClass}
-                                title={buttonTitle}
+                                className="px-2 py-0.5 text-[11px] font-semibold rounded transition-colors bg-[#2a2820] text-[#eae9e9] hover:bg-[#3a3830] border border-[#404040]"
+                                title={`Click to edit buy quantity for ${priceGroup} price group`}
                               >
-                                {buttonText}
+                                {currentQuantity > 0 ? currentQuantity : 'Set'} ({priceGroup})
                               </button>
                             );
                           })()}

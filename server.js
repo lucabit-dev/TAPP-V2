@@ -2451,6 +2451,46 @@ app.post('/api/manual/weights', async (req, res) => {
   });
 });
 
+// Manual Buy Quantities Configuration endpoints
+app.get('/api/manual/buy-quantities', (req, res) => {
+  res.json({ 
+    success: true, 
+    data: MANUAL_BUY_QUANTITIES,
+    source: isDbConnected() ? 'database' : 'memory'
+  });
+});
+
+app.post('/api/manual/buy-quantities', async (req, res) => {
+  const { buyQuantities } = req.body;
+  if (!buyQuantities || typeof buyQuantities !== 'object') {
+    return res.status(400).json({ success: false, error: 'Missing buyQuantities' });
+  }
+
+  // Validate and normalize buy quantities
+  const newBuyQuantities = {};
+  for (const [group, quantity] of Object.entries(buyQuantities)) {
+    const num = Number(quantity);
+    if (!Number.isNaN(num) && num > 0) {
+      newBuyQuantities[group] = Math.round(num);
+    }
+  }
+
+  if (Object.keys(newBuyQuantities).length === 0) {
+    return res.status(400).json({ success: false, error: 'No valid buy quantities provided' });
+  }
+
+  MANUAL_BUY_QUANTITIES = { ...MANUAL_BUY_QUANTITIES, ...newBuyQuantities };
+  
+  const persisted = await persistManualBuyQuantities(MANUAL_BUY_QUANTITIES);
+
+  res.json({ 
+    success: true, 
+    data: MANUAL_BUY_QUANTITIES,
+    persisted,
+    warning: persisted ? undefined : 'Database not connected; changes are kept in memory only'
+  });
+});
+
 // StopLimit Configuration endpoints
 app.get('/api/stoplimit/config', (req, res) => {
   try {
@@ -2660,28 +2700,33 @@ async function sendBuyOrder(symbol, configId = null, groupKey = null) {
       };
     }
     
-    // Calculate quantity based on price ranges
-    // 2002 if price is between 0 and 5
-    // 1001 if price is between 5 and 10
-    // 757 if price is between 10 and 12
-    let quantity;
-    if (currentPrice > 0 && currentPrice <= 5) {
-      quantity = 2002;
-    } else if (currentPrice > 5 && currentPrice <= 10) {
-      quantity = 1001;
-    } else if (currentPrice > 10 && currentPrice <= 12) {
-      quantity = 757;
-    } else {
+    // Calculate quantity based on price ranges (using configured buy quantities)
+    const priceGroup = getPriceGroup(currentPrice);
+    if (!priceGroup) {
       // Price outside supported range - skip buy
-      console.warn(`⚠️ Skipping buy for ${symbol}: price ${currentPrice} is outside supported range (0-12)`);
+      console.warn(`⚠️ Skipping buy for ${symbol}: price ${currentPrice} is outside supported range (0-30)`);
       return {
         success: false,
-        notifyStatus: `ERROR: Price ${currentPrice} outside supported range (0-12)`,
+        notifyStatus: `ERROR: Price ${currentPrice} outside supported range (0-30)`,
         responseData: null,
-        errorMessage: `Price ${currentPrice} is outside supported range (0-12). Only prices between 0-12 are supported.`,
+        errorMessage: `Price ${currentPrice} is outside supported range (0-30). Only prices between 0-30 are supported.`,
         quantity: 0,
         limitPrice: currentPrice
       };
+    }
+    
+    // Get quantity from configured buy quantities, or use default
+    let quantity = MANUAL_BUY_QUANTITIES[priceGroup];
+    if (!quantity || quantity <= 0) {
+      // Fallback to defaults if not configured
+      const defaults = {
+        '0-5': 2002,
+        '5-10': 1001,
+        '10-12': 757,
+        '12-20': 500,
+        '20-30': 333
+      };
+      quantity = defaults[priceGroup] || 500;
     }
     
     // Build order body according to Sections Bot API documentation
@@ -5526,6 +5571,25 @@ let MANUAL_WEIGHTS = {
   dailyVol: 0.05
 };
 
+// Default buy quantities per price group
+let MANUAL_BUY_QUANTITIES = {
+  '0-5': 2002,
+  '5-10': 1001,
+  '10-12': 757,
+  '12-20': 500,
+  '20-30': 333
+};
+
+// Helper function to get price group from price
+function getPriceGroup(price) {
+  if (price > 0 && price <= 5) return '0-5';
+  if (price > 5 && price <= 10) return '5-10';
+  if (price > 10 && price <= 12) return '10-12';
+  if (price > 12 && price <= 20) return '12-20';
+  if (price > 20 && price <= 30) return '20-30';
+  return null;
+}
+
 let manualListRows = [];
 const manualListIndicators = new Map(); // symbol -> indicators
 let manualUpdateTimeout = null;
@@ -5552,11 +5616,26 @@ async function loadManualWeightsFromDb() {
       MANUAL_WEIGHTS = { ...MANUAL_WEIGHTS, ...normalized };
       console.log('✅ Loaded MANUAL weights from database');
       broadcastManualUpdate();
-    } else if (!doc) {
+    }
+    
+    // Load buy quantities
+    const rawBuyQuantities = doc?.buyQuantities instanceof Map ? Object.fromEntries(doc.buyQuantities) : doc?.buyQuantities || {};
+    const normalizedBuyQuantities = {};
+    for (const [key, val] of Object.entries(rawBuyQuantities)) {
+      const num = Number(val);
+      if (!Number.isNaN(num) && num > 0) normalizedBuyQuantities[key] = num;
+    }
+    
+    if (Object.keys(normalizedBuyQuantities).length > 0) {
+      MANUAL_BUY_QUANTITIES = { ...MANUAL_BUY_QUANTITIES, ...normalizedBuyQuantities };
+      console.log('✅ Loaded MANUAL buy quantities from database');
+    }
+    
+    if (!doc) {
       // Seed document so next writes succeed without race
       await ManualConfig.findByIdAndUpdate(
         MANUAL_CONFIG_ID,
-        { weights: MANUAL_WEIGHTS },
+        { weights: MANUAL_WEIGHTS, buyQuantities: MANUAL_BUY_QUANTITIES },
         { upsert: true, setDefaultsOnInsert: true }
       );
     }
@@ -5583,6 +5662,25 @@ async function persistManualWeights(weights) {
     return true;
   } catch (err) {
     console.warn('⚠️ Failed to persist MANUAL weights:', err.message);
+    return false;
+  }
+}
+
+async function persistManualBuyQuantities(buyQuantities) {
+  if (!isDbConnected()) {
+    console.warn('⚠️ MongoDB not connected; MANUAL buy quantities kept in memory only');
+    return false;
+  }
+
+  try {
+    await ManualConfig.findByIdAndUpdate(
+      MANUAL_CONFIG_ID,
+      { buyQuantities, updatedAt: new Date() },
+      { upsert: true, setDefaultsOnInsert: true }
+    );
+    return true;
+  } catch (err) {
+    console.warn('⚠️ Failed to persist MANUAL buy quantities:', err.message);
     return false;
   }
 }

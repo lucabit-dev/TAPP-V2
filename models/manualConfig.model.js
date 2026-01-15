@@ -12,6 +12,11 @@ const ManualConfigSchema = new mongoose.Schema(
       type: Map,
       of: Number,
       default: {}
+    },
+    buyQuantities: {
+      type: Map,
+      of: Number,
+      default: {}
     }
   },
   {
