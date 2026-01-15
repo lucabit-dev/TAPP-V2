@@ -215,6 +215,25 @@ class StopLimitV2Service {
       state.lastUnrealizedQty = unrealizedQty;
       state.updatedAt = Date.now();
 
+      // CRITICAL: Before any reset logic, check if there's an active ACK order in cache
+      // This prevents resetting state when an ACK order exists but isn't linked yet
+      const activeOrderCheck = this.findActiveStopLimitOrder(symbol);
+      if (activeOrderCheck) {
+        const activeStatus = (activeOrderCheck.order?.Status || '').toUpperCase();
+        // If we found an active ACK or active order, link it immediately
+        if (activeStatus === 'ACK' || ACTIVE_ORDER_STATUSES.has(activeStatus) || this.isQueuedStatus(activeStatus)) {
+          if (!state.orderId || state.orderId !== activeOrderCheck.orderId) {
+            console.log(`🔗 StopLimitService: Auto-linking active ${activeStatus} order ${activeOrderCheck.orderId} to ${symbol} during position update`);
+            this.updateStateFromOrder(state, activeOrderCheck.orderId, activeOrderCheck.order, activeOrderCheck.leg, activeStatus);
+          }
+          // Ensure stageIndex is set if order is active
+          if (state.stageIndex < 0) {
+            state.stageIndex = 0;
+            console.log(`✅ StopLimitService: Setting stageIndex=0 for ${symbol} (found active ${activeStatus} order)`);
+          }
+        }
+      }
+
       // Only reset if order is truly inactive (cancelled, filled, rejected)
       // Don't reset if we recently created an order (even if orderId extraction failed)
       // Don't reset if we're waiting for websocket update (orderId set but status null)
@@ -225,6 +244,12 @@ class StopLimitV2Service {
         state.autoSellExecuted || 
         (state.orderStatus && NON_ACTIVE_STATUSES.has(orderStatusUpper) && !recentlyCreated) ||
         (!state.orderId && state.stageIndex >= 0 && !recentlyCreated && !state.pendingCreate);
+
+      // CRITICAL: Don't reset if we just found and linked an active ACK order above
+      if (shouldReset && activeOrderCheck && (activeOrderCheck.order?.Status || '').toUpperCase() === 'ACK') {
+        console.log(`⏸️ StopLimitService: Skipping reset for ${symbol} - active ACK order found and linked`);
+        shouldReset = false;
+      }
 
       // CRITICAL: If order was rejected, only reset (retry) if there are NO other active sell orders
       if (orderStatusUpper === 'REJ' && shouldReset) {
@@ -1092,6 +1117,19 @@ class StopLimitV2Service {
 
       // Position is valid, realign with orders
       this.realignStateWithOrders(state);
+      
+      // CRITICAL: Also check for ACK orders that might not be linked yet
+      // This ensures ACK orders are immediately linked during position updates
+      if (state.stageIndex >= 0 && !state.orderId) {
+        const activeOrder = this.findActiveStopLimitOrder(state.symbol);
+        if (activeOrder) {
+          const activeStatus = (activeOrder.order?.Status || '').toUpperCase();
+          if (activeStatus === 'ACK' || ACTIVE_ORDER_STATUSES.has(activeStatus)) {
+            console.log(`🔗 StopLimitService: Auto-linking ${activeStatus} order ${activeOrder.orderId} to ${state.symbol} during refresh`);
+            this.updateStateFromOrder(state, activeOrder.orderId, activeOrder.order, activeOrder.leg, activeStatus);
+          }
+        }
+      }
     }
   }
 
@@ -2350,15 +2388,29 @@ class StopLimitV2Service {
         }
       }
 
-      // Quick validation pass - check for any missing order links
+      // CRITICAL: Quick validation pass - check for any missing order links
       // If we have stageIndex >= 0 but no orderId, try to find and link the order
+      // This is especially important for ACK orders that might not be linked yet
       if (state.stageIndex >= 0 && !state.orderId && !state.pendingCreate) {
         const validation = this.validateExistingStopLimitOrder(state.symbol);
         if (validation.hasOrder) {
-          console.log(`🔧 StopLimitService: Quick validation - Linking order ${validation.orderId} to ${state.symbol} in snapshot`);
+          console.log(`🔧 StopLimitService: Quick validation - Linking order ${validation.orderId} to ${state.symbol} in snapshot (status: ${validation.status})`);
           this.updateStateFromOrder(state, validation.orderId, validation.order, validation.leg, validation.status);
+        } else {
+          // Also try findActiveStopLimitOrder as a fallback - it specifically looks for ACK orders
+          const activeOrder = this.findActiveStopLimitOrder(state.symbol);
+          if (activeOrder) {
+            const activeStatus = (activeOrder.order?.Status || '').toUpperCase();
+            if (activeStatus === 'ACK' || ACTIVE_ORDER_STATUSES.has(activeStatus)) {
+              console.log(`🔧 StopLimitService: Quick validation fallback - Linking ACK order ${activeOrder.orderId} to ${state.symbol} in snapshot`);
+              this.updateStateFromOrder(state, activeOrder.orderId, activeOrder.order, activeOrder.leg, activeStatus);
+            }
+          }
         }
       }
+      
+      // CRITICAL: Also realign state with orders to ensure ACK orders are linked
+      this.realignStateWithOrders(state);
     }
 
     // Cleanup inactive positions immediately
@@ -2658,6 +2710,23 @@ class StopLimitV2Service {
       return 'order-rejected';
     }
     
+    // CRITICAL: Check for active ACK order in cache even if not linked in state
+    // This prevents flickering when order exists but state hasn't been updated yet
+    const activeOrder = this.findActiveStopLimitOrder(state.symbol);
+    if (activeOrder) {
+      const activeStatus = (activeOrder.order?.Status || '').toUpperCase();
+      if (activeStatus === 'ACK' || ACTIVE_ORDER_STATUSES.has(activeStatus) || this.isQueuedStatus(activeStatus)) {
+        // Order exists and is active - ensure it's linked to state
+        if (!state.orderId || state.orderId !== activeOrder.orderId) {
+          this.updateStateFromOrder(state, activeOrder.orderId, activeOrder.order, activeOrder.leg, activeStatus);
+        }
+        if (activeStatus === 'DON' || activeStatus === 'QUE' || activeStatus === 'QUEUED') {
+          return 'queued';
+        }
+        return 'active';
+      }
+    }
+    
     // If stageIndex >= 0, we've created an order - show as active immediately
     // This ensures positions show as active right after order creation, before WebSocket confirmation
     if (state.stageIndex >= 0) {
@@ -2678,7 +2747,7 @@ class StopLimitV2Service {
           if (cachedStatus === 'DON' || cachedStatus === 'QUE' || cachedStatus === 'QUEUED') {
             return 'queued';
           }
-          // If order is active, show active
+          // If order is active (including ACK), show active
           if (ACTIVE_ORDER_STATUSES.has(cachedStatus) || this.isQueuedStatus(cachedStatus) || cachedStatus === 'ACK') {
             return 'active';
           }
