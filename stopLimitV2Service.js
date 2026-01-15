@@ -2640,6 +2640,11 @@ class StopLimitV2Service {
       return 'analysis-disabled';
     }
 
+    // CRITICAL: First check if position is marked as sold - if so, it's closed
+    if (this.soldPositions.has(state.symbol)) {
+      return 'closed';
+    }
+
     const orderStatus = (state.orderStatus || '').toUpperCase();
     if (state.autoSellExecuted) return 'auto-sell-executed';
     
@@ -2648,74 +2653,55 @@ class StopLimitV2Service {
       return 'closed';
     }
     
-    // CRITICAL: Check for rejected orders first - they should show as rejected, not active
+    // CRITICAL: Check for rejected orders - they should show as rejected, not active
     if (orderStatus === 'REJ') {
       return 'order-rejected';
     }
     
-    // If stageIndex >= 0, we've created an order - don't show "creating" even if pendingCreate is true
-    // (pendingCreate might be true during the async operation, but order is already created)
-    if (state.pendingCreate && state.stageIndex < 0) {
-      return 'creating-order';
-    }
-    if (state.pendingUpdate) return 'updating-order';
-    
-    // If we have an orderId or stageIndex >= 0, check the order status
-    if (state.orderId || state.stageIndex >= 0) {
+    // If stageIndex >= 0, we've created an order - show as active immediately
+    // This ensures positions show as active right after order creation, before WebSocket confirmation
+    if (state.stageIndex >= 0) {
+      // Check for queued status
       if (orderStatus === 'DON' || orderStatus === 'QUE' || orderStatus === 'QUEUED') {
         return 'queued';
       }
-      // If we have stageIndex >= 0 but no orderId yet, we're waiting for websocket to link it
-      // CRITICAL: If stageIndex >= 0, order was successfully created - show as active immediately
-      // This ensures positions show as active right after order creation, before WebSocket confirmation
-      if (!state.orderId && state.stageIndex >= 0) {
-        return 'active';
-      }
-      
-      // CRITICAL: If we have an orderId, verify the order actually exists in the cache
+      // If we have an orderId, check cached order status
       if (state.orderId) {
         const cachedOrder = this.ordersCache?.get(state.orderId);
-        if (!cachedOrder) {
-          // Order doesn't exist in cache yet (WebSocket delay) - but stageIndex >= 0 means order was created
-          // Show as active since order creation was successful
-          return 'active';
+        if (cachedOrder) {
+          const cachedStatus = (cachedOrder.Status || '').toUpperCase();
+          // If order is filled, position is closed
+          if (cachedStatus === 'FLL' || cachedStatus === 'FIL') {
+            return 'closed';
+          }
+          // If order is queued, show queued
+          if (cachedStatus === 'DON' || cachedStatus === 'QUE' || cachedStatus === 'QUEUED') {
+            return 'queued';
+          }
+          // If order is active, show active
+          if (ACTIVE_ORDER_STATUSES.has(cachedStatus) || this.isQueuedStatus(cachedStatus) || cachedStatus === 'ACK') {
+            return 'active';
+          }
+          // If order is rejected, show rejected
+          if (cachedStatus === 'REJ') {
+            return 'order-rejected';
+          }
         }
-        // Order exists in cache - use its status instead of state.orderStatus (more accurate)
-        const cachedStatus = (cachedOrder.Status || '').toUpperCase();
-        if (ACTIVE_ORDER_STATUSES.has(cachedStatus) || this.isQueuedStatus(cachedStatus) || cachedStatus === 'ACK') {
-          return 'active';
-        }
-        if (NON_ACTIVE_STATUSES.has(cachedStatus)) {
-          return 'order-inactive';
-        }
-        // Unknown status - treat as inactive
-        return 'order-inactive';
       }
-      
-      // Only return 'active' if order status is actually active (when orderId doesn't exist but orderStatus does)
-      if (ACTIVE_ORDER_STATUSES.has(orderStatus) || this.isQueuedStatus(orderStatus) || orderStatus === 'ACK') {
-        return 'active';
-      }
-      // If order status is non-active but not REJ (already handled) and not FLL/FIL (already handled), show as inactive
-      if (NON_ACTIVE_STATUSES.has(orderStatus)) {
-        return 'order-inactive';
-      }
-      
-      // Default: if orderStatus is empty/null, validate order exists before returning active
-      if (!orderStatus || orderStatus === '') {
-        const validation = this.validateExistingStopLimitOrder(state.symbol);
-        if (validation.hasOrder) {
-          return 'active';
-        }
-        return 'order-inactive';
-      }
-      
-      // Unknown status - return inactive
-      return 'order-inactive';
+      // stageIndex >= 0 means order was created - show as active
+      return 'active';
+    }
+    
+    // Order not created yet
+    if (state.pendingCreate) {
+      return 'creating-order';
+    }
+    if (state.pendingUpdate) {
+      return 'updating-order';
     }
     
     // No order yet
-    return state.stageIndex <= 0 ? 'awaiting-stoplimit' : 'awaiting-ack';
+    return 'awaiting-stoplimit';
   }
 
   getStatusLabel(status) {
