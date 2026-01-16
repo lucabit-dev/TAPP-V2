@@ -558,13 +558,60 @@ class StopLimitV2Service {
     if (NON_ACTIVE_STATUSES.has(status)) {
       // CRITICAL: Handle REJ status even if order wasn't previously linked (newly created orders)
       if (status === 'REJ' && isStopLimit) {
+        // CRITICAL: BEFORE processing REJ, check if there's an ACK order in cache
+        // If an ACK order exists, ignore this REJ order completely (ACK is the authoritative status)
+        const ackOrderCheck = this.findActiveStopLimitOrder(symbol);
+        if (ackOrderCheck) {
+          const ackStatus = (ackOrderCheck.order?.Status || '').toUpperCase();
+          if (ackStatus === 'ACK') {
+            // ACK order exists - this REJ is stale/duplicate, ignore it
+            console.log(`🛡️ StopLimitService: Ignoring REJ order ${orderId} for ${symbol} - ACK order ${ackOrderCheck.orderId} already exists and is active`);
+            // Link ACK order if not already linked
+            if (!state.orderId || state.orderId !== ackOrderCheck.orderId) {
+              this.updateStateFromOrder(state, ackOrderCheck.orderId, ackOrderCheck.order, ackOrderCheck.leg, 'ACK');
+            }
+            if (state.stageIndex < 0) {
+              state.stageIndex = 0;
+            }
+            return; // Ignore REJ completely
+          }
+        }
+        
         // Check if this order matches our tracked order (by orderId or by symbol if we're waiting for it)
         const isOurOrder = previousOrderId === orderId || 
                           (state.stageIndex >= 0 && !state.orderId && state.pendingCreate) ||
                           (state.orderId === orderId);
         
         if (isOurOrder) {
-          console.log(`❌ StopLimitService: StopLimit order ${orderId} for ${symbol} was REJECTED. Resetting state to allow retry.`);
+          // CRITICAL: Before resetting state, check again for ACK orders (race condition protection)
+          const finalAckCheck = this.findActiveStopLimitOrder(symbol);
+          if (finalAckCheck && (finalAckCheck.order?.Status || '').toUpperCase() === 'ACK') {
+            console.log(`🛡️ StopLimitService: Ignoring REJ order ${orderId} for ${symbol} - ACK order ${finalAckCheck.orderId} found during processing. NOT resetting state.`);
+            // Link ACK order if not already linked
+            if (!state.orderId || state.orderId !== finalAckCheck.orderId) {
+              this.updateStateFromOrder(state, finalAckCheck.orderId, finalAckCheck.order, finalAckCheck.leg, 'ACK');
+            }
+            if (state.stageIndex < 0) {
+              state.stageIndex = 0;
+            }
+            return; // Ignore REJ completely
+          }
+          
+          console.log(`❌ StopLimitService: StopLimit order ${orderId} for ${symbol} was REJECTED. Checking for other active orders before resetting.`);
+          
+          // CRITICAL: Check if there are other active sell orders (including ACK)
+          if (this.hasActiveSellOrder(symbol)) {
+            console.log(`🛑 StopLimitService: Order ${orderId} rejected for ${symbol}, but active sell order exists. NOT resetting state.`);
+            // Don't reset - another order is active
+            state.orderStatus = 'REJ'; // Update status but don't reset
+            state.pendingCreate = false;
+            state.pendingUpdate = false;
+            state.updatedAt = Date.now();
+            return;
+          }
+          
+          // No active orders found - safe to reset and retry
+          console.log(`⚠️ StopLimitService: Order ${orderId} rejected for ${symbol} and no active orders found. Resetting state to allow retry.`);
           
           // Update state to reflect rejection
           state.orderStatus = 'REJ';
@@ -2530,9 +2577,22 @@ class StopLimitV2Service {
     if (!this.ordersCache) return false;
     const targetSymbol = symbol.toUpperCase();
     
+    // CRITICAL: Use findActiveStopLimitOrder which properly checks for ACK orders
+    // This is more reliable than iterating through cache
+    const activeOrder = this.findActiveStopLimitOrder(targetSymbol);
+    if (activeOrder) {
+      const status = (activeOrder.order?.Status || '').toUpperCase();
+      // ACK status means order is active
+      if (status === 'ACK' || ACTIVE_ORDER_STATUSES.has(status) || this.isQueuedStatus(status)) {
+        return true;
+      }
+    }
+    
+    // Fallback: Also check cache for other active sell orders (non-StopLimit)
     for (const order of this.ordersCache.values()) {
-      // Check status
-      if (!ACTIVE_ORDER_STATUSES.has((order.Status || '').toUpperCase())) continue;
+      // Check status - include ACK explicitly
+      const orderStatus = (order.Status || '').toUpperCase();
+      if (orderStatus !== 'ACK' && !ACTIVE_ORDER_STATUSES.has(orderStatus)) continue;
       
       // Check legs for SELL on symbol
       if (order.Legs && Array.isArray(order.Legs)) {
