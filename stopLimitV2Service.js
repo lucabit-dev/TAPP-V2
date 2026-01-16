@@ -218,16 +218,15 @@ class StopLimitV2Service {
       };
       this.trackedPositions.set(symbol, state);
       console.log(`✅ StopLimitService: Started tracking ${symbol} (quantity: ${quantity}, avgPrice: ${avgPrice})`);
-    } else {
+    } else if (isReEntry) {
       // CRITICAL: If this is a re-entry and we have existing state, force complete reset
       // This prevents stale state (old orderId, stageIndex) from the previous position
-      if (isReEntry) {
-        console.log(`🔄 StopLimitService: Re-entry detected for ${symbol} but state still exists - forcing complete state reset to prevent stale data`);
-        // Delete the old state completely - we'll create a fresh one
-        this.trackedPositions.delete(symbol);
-        // Set state to null so we create a fresh one below
-        state = null;
-      } else {
+      console.log(`🔄 StopLimitService: Re-entry detected for ${symbol} but state still exists - forcing complete state reset to prevent stale data`);
+      // Delete the old state completely - we'll create a fresh one
+      this.trackedPositions.delete(symbol);
+      // Set state to null so we create a fresh one below
+      state = null;
+    } else {
         // CRITICAL: Double-check position is still active before updating state
         // This handles cases where position closes between updates
         if (!this.hasActivePosition(symbol)) {
@@ -319,7 +318,10 @@ class StopLimitV2Service {
           console.log(`✅ StopLimitService: ACK order ${reEntryAckCheck.orderId} found immediately for re-entry ${symbol}. Order is ACTIVE and linked.`);
         }
       }
-    } else {
+    }
+    
+    // If state exists (not re-entry or already tracked), handle updates
+    if (state) {
       // CRITICAL: Before any reset logic, check if there's an active ACK order in cache
       // This prevents resetting state when an ACK order exists but isn't linked yet
       const activeOrderCheck = this.findActiveStopLimitOrder(symbol);
@@ -412,9 +414,12 @@ class StopLimitV2Service {
       // Don't reset stageIndex if we recently created an order - wait for websocket to provide orderId
     }
 
-    state.updatedAt = Date.now();
+    // Update state timestamp (state should exist at this point - either created above or existed before)
+    if (state) {
+      state.updatedAt = Date.now();
+    }
 
-    if (!this.analysisEnabled) {
+    if (!state || !this.analysisEnabled) {
       return;
     }
 
