@@ -223,21 +223,43 @@ class StopLimitV2Service {
       state.lastUnrealizedQty = unrealizedQty;
       state.updatedAt = Date.now();
 
-      // CRITICAL: Before any reset logic, check if there's an active ACK order in cache
-      // This prevents resetting state when an ACK order exists but isn't linked yet
-      const activeOrderCheck = this.findActiveStopLimitOrder(symbol);
-      if (activeOrderCheck) {
-        const activeStatus = (activeOrderCheck.order?.Status || '').toUpperCase();
-        // If we found an active ACK or active order, link it immediately
-        if (activeStatus === 'ACK' || ACTIVE_ORDER_STATUSES.has(activeStatus) || this.isQueuedStatus(activeStatus)) {
-          if (!state.orderId || state.orderId !== activeOrderCheck.orderId) {
-            console.log(`🔗 StopLimitService: Auto-linking active ${activeStatus} order ${activeOrderCheck.orderId} to ${symbol} during position update`);
-            this.updateStateFromOrder(state, activeOrderCheck.orderId, activeOrderCheck.order, activeOrderCheck.leg, activeStatus);
+      // CRITICAL: Before any reset logic, check if there's ANY active ACK or DON SELL order in cache
+      // This prevents resetting state when an ACK/DON order exists but isn't linked yet
+      // Check ALL SELL orders, not just StopLimit - each position can have unlimited orders
+      const allSellOrdersCheck = this.findActiveSellOrders(symbol);
+      const activeSellOrder = allSellOrdersCheck.find(o => {
+        const orderStatus = (o.order?.Status || '').toUpperCase();
+        // Check for ACK (received) or DON (queued) - these mean order is active/queued
+        // Ignore REJ (rejected) and FLL (filled) as they don't indicate active orders
+        return orderStatus === 'ACK' || orderStatus === 'DON' || this.isQueuedStatus(orderStatus);
+      });
+      
+      if (activeSellOrder) {
+        const activeStatus = (activeSellOrder.order?.Status || '').toUpperCase();
+        const activeOrderType = (activeSellOrder.order?.OrderType || '').toUpperCase();
+        
+        // Only link StopLimit orders to state, but check all order types to prevent duplicate creation
+        if (activeOrderType === 'STOPLIMIT') {
+          if (!state.orderId || state.orderId !== activeSellOrder.orderId) {
+            const leg = activeSellOrder.order.Legs?.find(l => 
+              (l.Symbol || '').toUpperCase() === symbol && 
+              (l.BuyOrSell || '').toUpperCase() === 'SELL'
+            );
+            if (leg) {
+              console.log(`🔗 StopLimitService: Auto-linking active ${activeStatus} ${activeOrderType} order ${activeSellOrder.orderId} to ${symbol} during position update`);
+              this.updateStateFromOrder(state, activeSellOrder.orderId, activeSellOrder.order, leg, activeStatus);
+            }
           }
           // Ensure stageIndex is set if order is active
           if (state.stageIndex < 0) {
             state.stageIndex = 0;
-            console.log(`✅ StopLimitService: Setting stageIndex=0 for ${symbol} (found active ${activeStatus} order)`);
+            console.log(`✅ StopLimitService: Setting stageIndex=0 for ${symbol} (found active ${activeStatus} ${activeOrderType} order)`);
+          }
+        } else {
+          // Non-StopLimit order found (Limit, Market, etc.) - don't link but prevent creation
+          if (state.stageIndex < 0) {
+            state.stageIndex = 0; // Mark as "has order" to prevent duplicate creation
+            console.log(`✅ StopLimitService: Setting stageIndex=0 for ${symbol} (found active ${activeStatus} ${activeOrderType} SELL order - preventing duplicate StopLimit creation)`);
           }
         }
       }
@@ -1434,27 +1456,39 @@ class StopLimitV2Service {
       return;
     }
 
-    // Additional check: Look specifically for ACK or DON (queued) orders that might not have been caught above
+    // Additional check: Look for ANY SELL order with ACK or DON status (not just StopLimit)
+    // CRITICAL: Each position can have unlimited orders, so check ALL SELL orders
+    // If ANY SELL order has ACK (received) or DON (queued) status, do NOT create a new StopLimit
+    // Ignore REJ (rejected) and FLL (filled) orders when determining if position has active orders
     const allSellOrders = this.findActiveSellOrders(state.symbol);
-    const ackOrDonStopLimitOrder = allSellOrders.find(o => 
-      (o.order?.OrderType || '').toUpperCase() === 'STOPLIMIT' &&
-      ((o.order?.Status || '').toUpperCase() === 'ACK' || (o.order?.Status || '').toUpperCase() === 'DON' || this.isQueuedStatus(o.order?.Status))
-    );
-    if (ackOrDonStopLimitOrder) {
-      const orderStatus = (ackOrDonStopLimitOrder.order?.Status || '').toUpperCase();
-      const leg = ackOrDonStopLimitOrder.order.Legs?.find(l => 
-        (l.Symbol || '').toUpperCase() === state.symbol && 
-        (l.BuyOrSell || '').toUpperCase() === 'SELL'
-      );
-      if (leg) {
-        this.updateStateFromOrder(state, ackOrDonStopLimitOrder.orderId, ackOrDonStopLimitOrder.order, leg, orderStatus);
-        if (orderStatus === 'ACK') {
-          console.log(`✅ StopLimitService: Additional check found ACK StopLimit order ${ackOrDonStopLimitOrder.orderId} for ${state.symbol} (status: ${orderStatus}). SKIPPING CREATION - order is received and active.`);
-        } else {
-          console.log(`⏳ StopLimitService: Additional check found queued StopLimit order ${ackOrDonStopLimitOrder.orderId} for ${state.symbol} (status: ${orderStatus}). SKIPPING CREATION - order is queued and will activate when market opens.`);
+    const ackOrDonSellOrder = allSellOrders.find(o => {
+      const orderStatus = (o.order?.Status || '').toUpperCase();
+      // Check for ACK (received) or DON (queued) - these mean order is active/queued
+      // Ignore REJ (rejected) and FLL (filled) as they don't indicate active orders
+      return orderStatus === 'ACK' || orderStatus === 'DON' || this.isQueuedStatus(orderStatus);
+    });
+    
+    if (ackOrDonSellOrder) {
+      const orderStatus = (ackOrDonSellOrder.order?.Status || '').toUpperCase();
+      const orderType = (ackOrDonSellOrder.order?.OrderType || '').toUpperCase();
+      
+      // Only link StopLimit orders to state, but check all order types to prevent duplicate creation
+      if (orderType === 'STOPLIMIT') {
+        const leg = ackOrDonSellOrder.order.Legs?.find(l => 
+          (l.Symbol || '').toUpperCase() === state.symbol && 
+          (l.BuyOrSell || '').toUpperCase() === 'SELL'
+        );
+        if (leg) {
+          this.updateStateFromOrder(state, ackOrDonSellOrder.orderId, ackOrDonSellOrder.order, leg, orderStatus);
         }
-        return;
       }
+      
+      if (orderStatus === 'ACK') {
+        console.log(`✅ StopLimitService: Found existing ACK ${orderType} SELL order ${ackOrDonSellOrder.orderId} for ${state.symbol} (status: ${orderStatus}). SKIPPING StopLimit CREATION - position already has active SELL order.`);
+      } else {
+        console.log(`⏳ StopLimitService: Found existing DON/queued ${orderType} SELL order ${ackOrDonSellOrder.orderId} for ${state.symbol} (status: ${orderStatus}). SKIPPING StopLimit CREATION - order is queued and will activate when market opens.`);
+      }
+      return;
     }
 
     // Step 4: Final check - if stageIndex >= 0, we've already created an order
@@ -1490,40 +1524,40 @@ class StopLimitV2Service {
       const stopDiffFromAvg = this.roundPrice(state.avgPrice - stopPrice);
       console.log(`🛡️ StopLimitService: Creating initial StopLimit for ${state.symbol} (${config.label}) - stop ${stopPrice}, limit ${limitPrice} (avgPrice=${state.avgPrice}, initialOffset=${config.initialOffset}, stopDiffFromAvg=${stopDiffFromAvg})`);
 
-      // CRITICAL FINAL CHECK: Before deleting any orders, check for existing ACK or DON StopLimit orders
-      // If there's an ACK (received) or DON (queued) order, DO NOT delete it and DO NOT create a new one
+      // CRITICAL FINAL CHECK: Before deleting any orders, check for ANY existing ACK or DON SELL orders
+      // If there's ANY SELL order with ACK (received) or DON (queued) status, DO NOT delete it and DO NOT create a new one
       // This prevents creating duplicate orders that will be rejected
-      const finalActiveOrderCheck = this.findActiveStopLimitOrder(state.symbol);
-      if (finalActiveOrderCheck) {
-        const finalStatus = (finalActiveOrderCheck.order?.Status || '').toUpperCase();
-        // ACK means order is received/active, DON means queued (waiting for market hours)
-        if (finalStatus === 'ACK' || finalStatus === 'DON' || this.isQueuedStatus(finalStatus)) {
-          // Link the existing order to state and abort creation
-          this.updateStateFromOrder(state, finalActiveOrderCheck.orderId, finalActiveOrderCheck.order, finalActiveOrderCheck.leg, finalStatus);
-          state.pendingCreate = false;
-          console.log(`🛑 StopLimitService: CRITICAL ABORT - Found existing StopLimit order ${finalActiveOrderCheck.orderId} for ${state.symbol} with status ${finalStatus} (ACK=received, DON=queued). ABORTING creation to prevent duplicate/rejected orders.`);
-          return;
-        }
-      }
-
-      // Also check findActiveSellOrders for ACK/DON StopLimit orders as a safety net
+      // CRITICAL: Each position can have unlimited orders - check ALL SELL orders, not just StopLimit
+      // Ignore REJ (rejected) and FLL (filled) orders when determining if position has active orders
       const allActiveSellOrders = this.findActiveSellOrders(state.symbol);
-      const existingAckOrDonOrder = allActiveSellOrders.find(o => 
-        (o.order?.OrderType || '').toUpperCase() === 'STOPLIMIT' &&
-        ((o.order?.Status || '').toUpperCase() === 'ACK' || (o.order?.Status || '').toUpperCase() === 'DON' || this.isQueuedStatus(o.order?.Status))
-      );
+      const existingAckOrDonOrder = allActiveSellOrders.find(o => {
+        const orderStatus = (o.order?.Status || '').toUpperCase();
+        // Check for ACK (received) or DON (queued) - these mean order is active/queued
+        // Ignore REJ (rejected) and FLL (filled) as they don't indicate active orders
+        return orderStatus === 'ACK' || orderStatus === 'DON' || this.isQueuedStatus(orderStatus);
+      });
+      
       if (existingAckOrDonOrder) {
         const existingStatus = (existingAckOrDonOrder.order?.Status || '').toUpperCase();
-        // Link the existing order to state and abort creation
-        const leg = existingAckOrDonOrder.order.Legs?.find(l => 
-          (l.Symbol || '').toUpperCase() === state.symbol && 
-          (l.BuyOrSell || '').toUpperCase() === 'SELL'
-        );
-        if (leg) {
-          this.updateStateFromOrder(state, existingAckOrDonOrder.orderId, existingAckOrDonOrder.order, leg, existingStatus);
+        const existingOrderType = (existingAckOrDonOrder.order?.OrderType || '').toUpperCase();
+        
+        // Only link StopLimit orders to state, but check all order types to prevent duplicate creation
+        if (existingOrderType === 'STOPLIMIT') {
+          const leg = existingAckOrDonOrder.order.Legs?.find(l => 
+            (l.Symbol || '').toUpperCase() === state.symbol && 
+            (l.BuyOrSell || '').toUpperCase() === 'SELL'
+          );
+          if (leg) {
+            this.updateStateFromOrder(state, existingAckOrDonOrder.orderId, existingAckOrDonOrder.order, leg, existingStatus);
+          }
         }
+        
         state.pendingCreate = false;
-        console.log(`🛑 StopLimitService: CRITICAL ABORT (safety check) - Found existing StopLimit order ${existingAckOrDonOrder.orderId} for ${state.symbol} with status ${existingStatus} (ACK=received, DON=queued). ABORTING creation to prevent duplicate/rejected orders.`);
+        if (existingStatus === 'ACK') {
+          console.log(`🛑 StopLimitService: CRITICAL ABORT - Found existing ACK ${existingOrderType} SELL order ${existingAckOrDonOrder.orderId} for ${state.symbol} (status: ${existingStatus}). ABORTING StopLimit creation - position already has active SELL order.`);
+        } else {
+          console.log(`🛑 StopLimitService: CRITICAL ABORT - Found existing DON/queued ${existingOrderType} SELL order ${existingAckOrDonOrder.orderId} for ${state.symbol} (status: ${existingStatus}). ABORTING StopLimit creation - order is queued and will activate when market opens.`);
+        }
         return;
       }
 
