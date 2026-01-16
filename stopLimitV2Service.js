@@ -2890,23 +2890,90 @@ class StopLimitV2Service {
       }
     }
 
-    // SECONDARY CHECK: If stageIndex >= 0, StopLimit order was created - show as active
-    // This handles cases where order was created but not yet in cache
+    // CRITICAL: SECONDARY CHECK - If stageIndex >= 0, StopLimit order was created - ALWAYS show as active
+    // This is the key fix: Once a StopLimit is created (stageIndex >= 0), it should NEVER change back to inactive
+    // unless the order is clearly filled, rejected, or the position is sold
     if (state.stageIndex >= 0) {
       // Check for terminal states that override active
       if (state.autoSellExecuted) {
         return 'auto-sell-executed';
       }
       
+      // CRITICAL: Check if there's an active order by checking state.orderId
+      // If orderId exists, check its status in the cache
+      if (state.orderId) {
+        const cachedOrder = this.ordersCache.get(state.orderId);
+        if (cachedOrder) {
+          const orderStatus = (cachedOrder.Status || '').toUpperCase();
+          
+          // If order is filled, position is closed
+          if (orderStatus === 'FLL' || orderStatus === 'FIL') {
+            return 'closed';
+          }
+          
+          // If order is rejected, check if there's another active order
+          if (orderStatus === 'REJ') {
+            // Check if there's another active StopLimit order
+            const allActiveOrders = this.findActiveSellOrders(state.symbol);
+            const otherActiveOrder = allActiveOrders.find(o => 
+              o.orderId !== state.orderId && 
+              (o.order?.OrderType || '').toUpperCase() === 'STOPLIMIT' &&
+              ((o.order?.Status || '').toUpperCase() === 'ACK' || ACTIVE_ORDER_STATUSES.has((o.order?.Status || '').toUpperCase()))
+            );
+            if (otherActiveOrder) {
+              // Found another active order - link it and return active
+              const otherStatus = (otherActiveOrder.order?.Status || '').toUpperCase();
+              this.updateStateFromOrder(state, otherActiveOrder.orderId, otherActiveOrder.order, otherActiveOrder.leg, otherStatus);
+              if (otherStatus === 'DON' || otherStatus === 'QUE' || otherStatus === 'QUEUED') {
+                return 'queued';
+              }
+              return 'active';
+            }
+            return 'order-rejected';
+          }
+          
+          // If order is queued, show queued
+          if (orderStatus === 'DON' || orderStatus === 'QUE' || orderStatus === 'QUEUED') {
+            return 'queued';
+          }
+          
+          // If order is active (ACK, etc.), return active
+          if (orderStatus === 'ACK' || ACTIVE_ORDER_STATUSES.has(orderStatus) || this.isQueuedStatus(orderStatus)) {
+            return 'active';
+          }
+          
+          // If order exists but status is unexpected, still return active if stageIndex >= 0
+          // This prevents flickering when order status is temporarily unclear
+          return 'active';
+        }
+      }
+      
+      // CRITICAL: If stageIndex >= 0, order was created - DEFAULT to active
+      // Even if orderId is not set or order is not in cache, if stageIndex >= 0,
+      // it means a StopLimit was successfully created, so it should show as active
+      // This is the key fix: Once StopLimit is created, it stays active
       const orderStatus = (state.orderStatus || '').toUpperCase();
       
-      // CRITICAL: Check if StopLimit order is filled - position should show as closed
+      // Only override active status if order is clearly filled or rejected
       if (orderStatus === 'FLL' || orderStatus === 'FIL') {
         return 'closed';
       }
       
-      // CRITICAL: Check for rejected orders - but only if no active order found above
+      // For rejected orders, still check if there's another active order
       if (orderStatus === 'REJ') {
+        const allActiveOrders = this.findActiveSellOrders(state.symbol);
+        const otherActiveOrder = allActiveOrders.find(o => 
+          (o.order?.OrderType || '').toUpperCase() === 'STOPLIMIT' &&
+          ((o.order?.Status || '').toUpperCase() === 'ACK' || ACTIVE_ORDER_STATUSES.has((o.order?.Status || '').toUpperCase()))
+        );
+        if (otherActiveOrder) {
+          const otherStatus = (otherActiveOrder.order?.Status || '').toUpperCase();
+          this.updateStateFromOrder(state, otherActiveOrder.orderId, otherActiveOrder.order, otherActiveOrder.leg, otherStatus);
+          if (otherStatus === 'DON' || otherStatus === 'QUE' || otherStatus === 'QUEUED') {
+            return 'queued';
+          }
+          return 'active';
+        }
         return 'order-rejected';
       }
       
@@ -2915,8 +2982,8 @@ class StopLimitV2Service {
         return 'queued';
       }
       
-      // stageIndex >= 0 means order was created - DEFAULT to active
-      // This prevents flickering while waiting for order to appear in cache
+      // CRITICAL: stageIndex >= 0 means StopLimit was created - ALWAYS return active
+      // This is the key fix: Once created, it never goes back to 'awaiting-stoplimit'
       return 'active';
     }
     
