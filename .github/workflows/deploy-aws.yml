@@ -1,0 +1,110 @@
+name: Deploy to AWS EC2
+
+on:
+  push:
+    branches:
+      - main  # Change to your main branch name if different
+  workflow_dispatch:  # Allow manual triggers
+
+env:
+  AWS_REGION: us-east-1  # Change to your AWS region
+  EC2_INSTANCE_IP: YOUR_ELASTIC_IP  # Replace with your EC2 Elastic IP
+  EC2_USER: ec2-user  # Use 'ubuntu' for Ubuntu instances
+  APP_DIR: /var/www/tapp
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install backend dependencies
+        run: npm ci
+      
+      - name: Install frontend dependencies
+        run: |
+          cd client
+          npm ci
+      
+      - name: Build frontend
+        run: |
+          cd client
+          npm run build
+        env:
+          VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL }}
+          VITE_WS_BASE_URL: ${{ secrets.VITE_WS_BASE_URL }}
+      
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ env.EC2_INSTANCE_IP }} >> ~/.ssh/known_hosts
+      
+      - name: Deploy to EC2
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ env.EC2_USER }}@${{ env.EC2_INSTANCE_IP }} << 'ENDSSH'
+            set -e
+            
+            # Create app directory if it doesn't exist
+            if [ ! -d "${{ env.APP_DIR }}" ]; then
+              echo "📁 Creating application directory..."
+              sudo mkdir -p ${{ env.APP_DIR }}
+              sudo chown ${{ env.EC2_USER }}:${{ env.EC2_USER }} ${{ env.APP_DIR }}
+            fi
+            
+            cd ${{ env.APP_DIR }}
+            
+            # Initialize git repo if it doesn't exist
+            if [ ! -d ".git" ]; then
+              echo "📥 Initializing git repository..."
+              git init
+              # Use HTTPS with token for private repos, or SSH if configured
+              REPO_URL="https://github.com/${{ github.repository }}.git"
+              git remote add origin "$REPO_URL" || git remote set-url origin "$REPO_URL"
+            fi
+            
+            echo "📥 Pulling latest code..."
+            git fetch origin
+            git reset --hard origin/main
+            
+            echo "📦 Installing backend dependencies..."
+            npm ci --production
+            
+            echo "📦 Installing frontend dependencies..."
+            cd client
+            npm ci
+            echo "🏗️ Building frontend..."
+            npm run build
+            cd ..
+            
+            # Create logs directory if it doesn't exist
+            mkdir -p logs
+            
+            echo "🔄 Restarting application..."
+            if pm2 list | grep -q "tapp-backend"; then
+              pm2 restart tapp-backend
+            else
+              pm2 start ecosystem.config.js
+              pm2 save
+            fi
+            
+            echo "✅ Deployment complete!"
+            pm2 status
+          ENDSSH
+      
+      - name: Verify deployment
+        run: |
+          echo "⏳ Waiting for application to start..."
+          sleep 10
+          echo "🔍 Checking health endpoint..."
+          curl -f http://${{ env.EC2_INSTANCE_IP }}/api/health || exit 1
+          echo "✅ Health check passed!"

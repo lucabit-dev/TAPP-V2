@@ -1,0 +1,103 @@
+# Example Nginx configuration for TAPP
+# Copy this to /etc/nginx/conf.d/tapp.conf on your EC2 instance
+# Replace YOUR_DOMAIN.com with your actual domain
+
+upstream tapp_backend {
+    server localhost:3001;
+    keepalive 64;
+}
+
+# HTTP server - redirect to HTTPS
+server {
+    listen 80;
+    server_name YOUR_DOMAIN.com www.YOUR_DOMAIN.com;
+    
+    # For Let's Encrypt verification
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+    
+    # Redirect all HTTP to HTTPS
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# HTTPS server
+server {
+    listen 443 ssl http2;
+    server_name YOUR_DOMAIN.com www.YOUR_DOMAIN.com;
+    
+    # SSL certificates (set up with Let's Encrypt)
+    ssl_certificate /etc/letsencrypt/live/YOUR_DOMAIN.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/YOUR_DOMAIN.com/privkey.pem;
+    
+    # SSL configuration
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    
+    # WebSocket support
+    location / {
+        proxy_pass http://tapp_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+        
+        # WebSocket specific timeouts
+        proxy_read_timeout 86400;
+        proxy_send_timeout 86400;
+    }
+    
+    # API routes
+    location /api {
+        proxy_pass http://tapp_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    
+    # Static files (if serving frontend from same server)
+    location /static {
+        alias /var/www/tapp/client/dist;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+}
+
+# For initial setup without domain (HTTP only)
+# Use this configuration first, then switch to HTTPS config above after setting up SSL
+server {
+    listen 80;
+    server_name _;
+    
+    location / {
+        proxy_pass http://tapp_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+        proxy_read_timeout 86400;
+        proxy_send_timeout 86400;
+    }
+    
+    location /api {
+        proxy_pass http://tapp_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

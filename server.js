@@ -90,6 +90,7 @@ connectDatabase()
   .then(() => {
     loadManualWeightsFromDb();
     initializeCachePersistence();
+    initializeOrderStateService();
   })
   .catch(() => {
     console.warn('Server started without DB connection. Auth routes will return 503.');
@@ -153,6 +154,8 @@ const ordersCache = new Map(); // Map<OrderID, { OrderID, Symbol, Status, Legs, 
 
 // Cache persistence service (initialized after DB connection)
 let cachePersistenceService = null;
+// Order state service (initialized after DB connection)
+let orderStateService = null;
 
 // Initialize cache persistence service
 async function initializeCachePersistence() {
@@ -180,6 +183,31 @@ async function initializeCachePersistence() {
     console.error('❌ Failed to initialize cache persistence:', err);
     // Continue without persistence - cache will work in-memory only
     cachePersistenceService = null;
+  }
+}
+
+// Initialize order state service
+async function initializeOrderStateService() {
+  try {
+    const OrderStateService = require('./services/orderStateService');
+    const apiBaseUrl = 'https://sections-bot.inbitme.com';
+    const apiKey = process.env.PNL_API_KEY;
+    orderStateService = new OrderStateService(apiBaseUrl, apiKey);
+    
+    // Rehydrate active orders from MongoDB
+    await orderStateService.rehydrateActiveOrders();
+    
+    console.log('✅ Order state service initialized');
+    
+    // Update stopLimitV2Service with orderStateService reference
+    if (stopLimitV2Service) {
+      stopLimitV2Service.orderStateService = orderStateService;
+      console.log('✅ Updated stopLimitV2Service with orderStateService');
+    }
+  } catch (err) {
+    console.error('❌ Failed to initialize order state service:', err);
+    // Continue without order state service - orders will still work but without duplicate prevention
+    orderStateService = null;
   }
 }
 
@@ -2913,7 +2941,8 @@ function isActiveOrderStatus(status) {
 
 // StopLimit automation service
 const stopLimitService = new StopLimitService({ ordersCache, positionsCache });
-const stopLimitV2Service = new StopLimitV2Service({ ordersCache, positionsCache });
+// Initialize stopLimitV2Service immediately (orderStateService will be added later if available)
+const stopLimitV2Service = new StopLimitV2Service({ ordersCache, positionsCache, orderStateService: null });
 
 const STOPLIMIT_POSITION_SYNC_INTERVAL_MS = parseInt(process.env.STOPLIMIT_POSITION_SYNC_MS || '5000', 10);
 const STOPLIMIT_POSITION_STALE_THRESHOLD_MS = parseInt(process.env.STOPLIMIT_POSITION_STALE_MS || '60000', 10);
@@ -3301,7 +3330,7 @@ function connectOrdersWebSocket() {
   try {
     ordersWs = new WebSocket(wsUrl);
     
-    ordersWs.on('open', () => {
+    ordersWs.on('open', async () => {
       console.log('✅ Orders WebSocket connected for orders cache');
       ordersReconnectAttempts = 0;
       lastOrdersError = null;
@@ -3309,6 +3338,16 @@ function connectOrdersWebSocket() {
       if (ordersWsReconnectTimer) {
         clearTimeout(ordersWsReconnectTimer);
         ordersWsReconnectTimer = null;
+      }
+      
+      // Rehydrate active orders on reconnect to ensure state is up-to-date
+      if (orderStateService) {
+        try {
+          console.log('🔄 Rehydrating order state after WebSocket reconnect...');
+          await orderStateService.rehydrateActiveOrders();
+        } catch (err) {
+          console.error('❌ Error rehydrating order state after reconnect:', err);
+        }
       }
     });
     
@@ -3338,6 +3377,13 @@ function connectOrdersWebSocket() {
           // Schedule save to database
           if (cachePersistenceService) {
             cachePersistenceService.scheduleOrderSave(orderId);
+          }
+          
+          // Persist order to order_state collection for duplicate prevention
+          if (orderStateService) {
+            orderStateService.upsertOrder(order, 'ws').catch(err => {
+              console.error(`❌ Error persisting order ${orderId} to order_state:`, err);
+            });
           }
           
         if (stopLimitService) {
