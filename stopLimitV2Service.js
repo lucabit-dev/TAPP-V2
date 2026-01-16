@@ -112,16 +112,6 @@ class StopLimitV2Service {
         // This is a re-entry - remove from sold positions and allow tracking
         console.log(`🔄 StopLimitV2Service: Position ${symbol} re-entered after being sold - removing from sold list and re-tracking`);
         this.soldPositions.delete(symbol);
-        
-        // CRITICAL: If there's existing tracked state from the previous position, clean it up completely
-        // This prevents stale state (old orderId, stageIndex) from interfering with the new position
-        if (this.trackedPositions.has(symbol)) {
-          const oldState = this.trackedPositions.get(symbol);
-          console.log(`🧹 StopLimitV2Service: Cleaning up stale state for re-entry ${symbol} (old orderId: ${oldState.orderId || 'none'}, old stageIndex: ${oldState.stageIndex})`);
-          // Remove the old state completely - we'll create a fresh one below
-          this.trackedPositions.delete(symbol);
-        }
-        
         // Continue to track this position - isReEntry flag will be used below
       } else {
         // Still sold or invalid - don't track
@@ -218,110 +208,21 @@ class StopLimitV2Service {
       };
       this.trackedPositions.set(symbol, state);
       console.log(`✅ StopLimitService: Started tracking ${symbol} (quantity: ${quantity}, avgPrice: ${avgPrice})`);
-    } else if (isReEntry) {
-      // CRITICAL: If this is a re-entry and we have existing state, force complete reset
-      // This prevents stale state (old orderId, stageIndex) from the previous position
-      console.log(`🔄 StopLimitService: Re-entry detected for ${symbol} but state still exists - forcing complete state reset to prevent stale data`);
-      // Delete the old state completely - we'll create a fresh one
-      this.trackedPositions.delete(symbol);
-      // Set state to null so we create a fresh one below
-      state = null;
     } else {
-        // CRITICAL: Double-check position is still active before updating state
-        // This handles cases where position closes between updates
-        if (!this.hasActivePosition(symbol)) {
-          console.log(`🧹 StopLimitService: Position ${symbol} is no longer active during state update, cleaning up`);
-          this.cleanupPosition(symbol);
-          return;
-        }
+      // CRITICAL: Double-check position is still active before updating state
+      // This handles cases where position closes between updates
+      if (!this.hasActivePosition(symbol)) {
+        console.log(`🧹 StopLimitService: Position ${symbol} is no longer active during state update, cleaning up`);
+        this.cleanupPosition(symbol);
+        return;
+      }
 
-        // CRITICAL: Check if quantity has increased - if so, update existing order quantity
-        const previousQuantity = state.quantity;
-        const quantityIncreased = quantity > previousQuantity;
-      
       state.avgPrice = avgPrice;
       state.quantity = quantity;
       state.positionId = position?.PositionID || state.positionId;
       state.lastUnrealizedQty = unrealizedQty;
       state.updatedAt = Date.now();
 
-      // CRITICAL: If quantity increased and we have an active order, update the order quantity
-      if (quantityIncreased && (state.orderId || state.stageIndex >= 0)) {
-        const activeOrder = state.orderId ? this.ordersCache.get(state.orderId) : this.findActiveStopLimitOrder(symbol);
-        if (activeOrder) {
-          const order = activeOrder.order || activeOrder;
-          const orderQuantity = this.parseNumber(order.Quantity || order.Legs?.[0]?.Quantity || order.Legs?.[0]?.QuantityRemaining);
-          if (orderQuantity && orderQuantity < quantity) {
-            console.log(`📊 StopLimitService: Position ${symbol} quantity increased from ${previousQuantity} to ${quantity}, updating order quantity from ${orderQuantity} to ${quantity}`);
-            // Update order quantity
-            const orderId = state.orderId || (activeOrder.orderId || activeOrder.OrderID);
-            if (orderId) {
-              try {
-                await this.updateOrderQuantity(orderId, quantity);
-              } catch (err) {
-                console.error(`❌ StopLimitService: Failed to update order quantity for ${symbol}:`, err);
-              }
-            }
-          }
-        }
-      }
-    }
-    
-    // CRITICAL: If state was nulled due to re-entry, create fresh state now
-    if (!state) {
-      // Double-check quantity is still valid
-      const currentQuantity = this.parseNumber(position?.Quantity);
-      if (!currentQuantity || currentQuantity <= 0) {
-        console.log(`🧹 StopLimitService: Skipping ${symbol} - quantity is ${currentQuantity}`);
-        return;
-      }
-
-      const group = this.resolveGroup(avgPrice);
-      if (!group) {
-        console.warn(`⚠️ StopLimitService: ${symbol} price ${avgPrice} outside supported range - skipping StopLimit automation`);
-        return;
-      }
-
-      state = {
-        symbol,
-        positionId: position?.PositionID || null,
-        accountId: position?.AccountID || null,
-        groupKey: group,
-        avgPrice,
-        quantity,
-        longShort,
-        stageIndex: -1, // -1 indicates initial order not yet created - FRESH STATE
-        orderId: null, // FRESH STATE - no old orderId
-        pendingCreate: false,
-        pendingUpdate: false,
-        autoSellExecuted: false,
-        lastStopPrice: null,
-        lastLimitPrice: null,
-        lastUnrealizedQty: unrealizedQty,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        orderStatus: null,
-        lastOrderCreateAttempt: null
-      };
-      this.trackedPositions.set(symbol, state);
-      console.log(`✅ StopLimitService: Created FRESH state for re-entry ${symbol} (quantity: ${quantity}, avgPrice: ${avgPrice}) - all previous state cleared`);
-      
-      // CRITICAL: Immediately check for ACK order after creating fresh state for re-entry
-      // This prevents creation loop if ACK order already exists from the new position
-      const reEntryAckCheck = this.findActiveStopLimitOrder(symbol);
-      if (reEntryAckCheck) {
-        const reEntryAckStatus = (reEntryAckCheck.order?.Status || '').toUpperCase();
-        if (reEntryAckStatus === 'ACK') {
-          // ACK order found for re-entry - link it immediately and skip creation
-          this.updateStateFromOrder(state, reEntryAckCheck.orderId, reEntryAckCheck.order, reEntryAckCheck.leg, 'ACK');
-          state.stageIndex = 0; // Ensure stageIndex is set
-          console.log(`✅ StopLimitService: ACK order ${reEntryAckCheck.orderId} found immediately for re-entry ${symbol}. Order is ACTIVE and linked.`);
-        }
-      }
-    }
-    
-    // If state exists (not re-entry or already tracked), handle updates
-    if (state) {
       // CRITICAL: Before any reset logic, check if there's an active ACK order in cache
       // This prevents resetting state when an ACK order exists but isn't linked yet
       const activeOrderCheck = this.findActiveStopLimitOrder(symbol);
@@ -414,12 +315,9 @@ class StopLimitV2Service {
       // Don't reset stageIndex if we recently created an order - wait for websocket to provide orderId
     }
 
-    // Update state timestamp (state should exist at this point - either created above or existed before)
-    if (state) {
-      state.updatedAt = Date.now();
-    }
+    state.updatedAt = Date.now();
 
-    if (!state || !this.analysisEnabled) {
+    if (!this.analysisEnabled) {
       return;
     }
 
@@ -427,64 +325,19 @@ class StopLimitV2Service {
       return;
     }
 
-    // CRITICAL: Check for ACK order FIRST - this is the most reliable indicator of active StopLimit
-    // If ACK order exists, position is ACTIVE STOPLIMIT - do NOT create more orders
-    const ackCheck = this.findActiveStopLimitOrder(symbol);
-    if (ackCheck) {
-      const ackStatus = (ackCheck.order?.Status || '').toUpperCase();
-      if (ackStatus === 'ACK') {
-        // ACK order found - position is ACTIVE STOPLIMIT
-        // Mark as active immediately and skip ALL creation logic
-        if (!state.orderId || state.orderId !== ackCheck.orderId) {
-          this.updateStateFromOrder(state, ackCheck.orderId, ackCheck.order, ackCheck.leg, 'ACK');
-        }
-        // CRITICAL: Set stageIndex = 0 to mark as ACTIVE STOPLIMIT
-        if (state.stageIndex < 0) {
-          state.stageIndex = 0;
-          console.log(`✅ StopLimitService: ${symbol} marked as ACTIVE STOPLIMIT (ACK order ${ackCheck.orderId} found, stageIndex set to 0)`);
-        }
-        // Clear pendingCreate flag if set - order already exists
-        state.pendingCreate = false;
-        console.log(`✅ StopLimitService: ${symbol} is ACTIVE STOPLIMIT (ACK order ${ackCheck.orderId}). Skipping ALL order creation.`);
-        // Skip to adjustments - DO NOT call ensureInitialOrder
-        await this.evaluateAdjustments(state, unrealizedQty);
-        return; // EARLY RETURN - position is active, no creation needed
-      }
+    // Only ensure initial order if we haven't created one yet
+    // If stageIndex >= 0, we've already created an order (even if orderId not yet set)
+    // If we have an orderId, we definitely have an order
+    // If we recently attempted creation, wait for it to complete
+    const hasOrder = state.stageIndex >= 0 || state.orderId || (state.pendingCreate && state.lastOrderCreateAttempt);
+    
+    if (!hasOrder) {
+      await this.ensureInitialOrder(state);
+    } else if (state.stageIndex >= 0) {
+      // We have an order, just evaluate adjustments (price updates based on unrealized profit)
+      // Don't try to create another order
+      console.log(`✅ StopLimitService: ${symbol} already has StopLimit order (stageIndex=${state.stageIndex}, orderId=${state.orderId || 'pending'}), skipping creation, evaluating adjustments only`);
     }
-
-    // CRITICAL: If stageIndex >= 0, position is already ACTIVE STOPLIMIT - do NOT create more orders
-    // This check must come BEFORE ensureInitialOrder to prevent duplicates
-    if (state.stageIndex >= 0) {
-      console.log(`✅ StopLimitService: ${symbol} is ACTIVE STOPLIMIT (stageIndex=${state.stageIndex}, orderId=${state.orderId || 'pending'}). Skipping order creation, evaluating adjustments only`);
-      await this.evaluateAdjustments(state, unrealizedQty);
-      return; // EARLY RETURN - already active, no creation needed
-    }
-
-    // CRITICAL: If pendingCreate is true, order creation is in progress - do NOT create duplicates
-    if (state.pendingCreate && state.lastOrderCreateAttempt) {
-      const secondsSinceAttempt = ((Date.now() - state.lastOrderCreateAttempt) / 1000).toFixed(1);
-      console.log(`⏸️ StopLimitService: ${symbol} order creation in progress (${secondsSinceAttempt}s ago). Skipping duplicate creation.`);
-      await this.evaluateAdjustments(state, unrealizedQty);
-      return; // EARLY RETURN - creation in progress, wait for completion
-    }
-
-    // CRITICAL: If orderId exists, order already created - do NOT create duplicates
-    if (state.orderId) {
-      // Verify order still exists in cache
-      const cachedOrder = this.ordersCache.get(state.orderId);
-      if (cachedOrder) {
-        const status = (cachedOrder.Status || '').toUpperCase();
-        if (ACTIVE_ORDER_STATUSES.has(status) || this.isQueuedStatus(status) || status === 'ACK') {
-          console.log(`✅ StopLimitService: ${symbol} has active order ${state.orderId} (status: ${status}). Skipping duplicate creation.`);
-          await this.evaluateAdjustments(state, unrealizedQty);
-          return; // EARLY RETURN - order exists and is active
-        }
-      }
-    }
-
-    // Only call ensureInitialOrder if ALL checks above passed
-    // This means: no ACK order, stageIndex < 0, not pendingCreate, no active orderId
-    await this.ensureInitialOrder(state);
     
     await this.evaluateAdjustments(state, unrealizedQty);
   }
@@ -586,60 +439,13 @@ class StopLimitV2Service {
     if (NON_ACTIVE_STATUSES.has(status)) {
       // CRITICAL: Handle REJ status even if order wasn't previously linked (newly created orders)
       if (status === 'REJ' && isStopLimit) {
-        // CRITICAL: BEFORE processing REJ, check if there's an ACK order in cache
-        // If an ACK order exists, ignore this REJ order completely (ACK is the authoritative status)
-        const ackOrderCheck = this.findActiveStopLimitOrder(symbol);
-        if (ackOrderCheck) {
-          const ackStatus = (ackOrderCheck.order?.Status || '').toUpperCase();
-          if (ackStatus === 'ACK') {
-            // ACK order exists - this REJ is stale/duplicate, ignore it
-            console.log(`🛡️ StopLimitService: Ignoring REJ order ${orderId} for ${symbol} - ACK order ${ackOrderCheck.orderId} already exists and is active`);
-            // Link ACK order if not already linked
-            if (!state.orderId || state.orderId !== ackOrderCheck.orderId) {
-              this.updateStateFromOrder(state, ackOrderCheck.orderId, ackOrderCheck.order, ackOrderCheck.leg, 'ACK');
-            }
-            if (state.stageIndex < 0) {
-              state.stageIndex = 0;
-            }
-            return; // Ignore REJ completely
-          }
-        }
-        
         // Check if this order matches our tracked order (by orderId or by symbol if we're waiting for it)
         const isOurOrder = previousOrderId === orderId || 
                           (state.stageIndex >= 0 && !state.orderId && state.pendingCreate) ||
                           (state.orderId === orderId);
         
         if (isOurOrder) {
-          // CRITICAL: Before resetting state, check again for ACK orders (race condition protection)
-          const finalAckCheck = this.findActiveStopLimitOrder(symbol);
-          if (finalAckCheck && (finalAckCheck.order?.Status || '').toUpperCase() === 'ACK') {
-            console.log(`🛡️ StopLimitService: Ignoring REJ order ${orderId} for ${symbol} - ACK order ${finalAckCheck.orderId} found during processing. NOT resetting state.`);
-            // Link ACK order if not already linked
-            if (!state.orderId || state.orderId !== finalAckCheck.orderId) {
-              this.updateStateFromOrder(state, finalAckCheck.orderId, finalAckCheck.order, finalAckCheck.leg, 'ACK');
-            }
-            if (state.stageIndex < 0) {
-              state.stageIndex = 0;
-            }
-            return; // Ignore REJ completely
-          }
-          
-          console.log(`❌ StopLimitService: StopLimit order ${orderId} for ${symbol} was REJECTED. Checking for other active orders before resetting.`);
-          
-          // CRITICAL: Check if there are other active sell orders (including ACK)
-          if (this.hasActiveSellOrder(symbol)) {
-            console.log(`🛑 StopLimitService: Order ${orderId} rejected for ${symbol}, but active sell order exists. NOT resetting state.`);
-            // Don't reset - another order is active
-            state.orderStatus = 'REJ'; // Update status but don't reset
-            state.pendingCreate = false;
-            state.pendingUpdate = false;
-            state.updatedAt = Date.now();
-            return;
-          }
-          
-          // No active orders found - safe to reset and retry
-          console.log(`⚠️ StopLimitService: Order ${orderId} rejected for ${symbol} and no active orders found. Resetting state to allow retry.`);
+          console.log(`❌ StopLimitService: StopLimit order ${orderId} for ${symbol} was REJECTED. Resetting state to allow retry.`);
           
           // Update state to reflect rejection
           state.orderStatus = 'REJ';
@@ -1598,21 +1404,7 @@ class StopLimitV2Service {
       return;
     }
 
-    // Step 3: CRITICAL - Check for ACK orders FIRST (most reliable indicator of active order)
-    // ACK status means the order was accepted and is active - we MUST NOT create another
-    const ackOrder = this.findActiveStopLimitOrder(state.symbol);
-    if (ackOrder) {
-      const ackStatus = (ackOrder.order?.Status || '').toUpperCase();
-      if (ackStatus === 'ACK') {
-        // ACK order found - link it immediately and ABORT creation
-        this.updateStateFromOrder(state, ackOrder.orderId, ackOrder.order, ackOrder.leg, 'ACK');
-        state.stageIndex = 0; // Ensure stageIndex is set
-        console.log(`🛡️ StopLimitService: CRITICAL - ACK order ${ackOrder.orderId} found for ${state.symbol}. Order is ACTIVE. ABORTING CREATION to prevent duplicate.`);
-        return;
-      }
-    }
-
-    // Step 4: Comprehensive validation - check all possible sources
+    // Step 3: Comprehensive validation - check all possible sources
     const validation = this.validateExistingStopLimitOrder(state.symbol);
     console.log(`🔍 StopLimitService: Order validation for ${state.symbol}:`, {
       hasOrder: validation.hasOrder,
@@ -1625,15 +1417,11 @@ class StopLimitV2Service {
     if (validation.hasOrder) {
       // Order exists! Link it immediately and skip creation
       this.updateStateFromOrder(state, validation.orderId, validation.order, validation.leg, validation.status);
-      // CRITICAL: If status is ACK, ensure stageIndex is set
-      if (validation.status === 'ACK') {
-        state.stageIndex = 0;
-      }
       console.log(`🛡️ StopLimitService: SAFETY CHECK PASSED - Existing StopLimit order ${validation.orderId} found for ${state.symbol} (status: ${validation.status}, source: ${validation.source}). SKIPPING CREATION to prevent duplicate.`);
       return;
     }
 
-    // Step 5: Final check - if stageIndex >= 0, we've already created an order
+    // Step 4: Final check - if stageIndex >= 0, we've already created an order
     if (state.stageIndex >= 0) {
       console.log(`⏸️ StopLimitService: StageIndex >= 0 for ${state.symbol} (stageIndex=${state.stageIndex}, orderId=${state.orderId || 'none'}), skipping creation`);
       return;
@@ -1642,23 +1430,9 @@ class StopLimitV2Service {
     // Step 5: All checks passed - safe to create
     console.log(`✅ StopLimitService: All validation checks passed for ${state.symbol}. No existing order found. Proceeding with creation.`);
 
-    // CRITICAL: Before setting pendingCreate, check for ACK order one more time (race condition protection)
-    const finalAckCheck = this.findActiveStopLimitOrder(state.symbol);
-    if (finalAckCheck && (finalAckCheck.order?.Status || '').toUpperCase() === 'ACK') {
-      // ACK order found just before creation - link it and abort
-      this.updateStateFromOrder(state, finalAckCheck.orderId, finalAckCheck.order, finalAckCheck.leg, 'ACK');
-      state.stageIndex = 0;
-      state.pendingCreate = false;
-      console.log(`🛡️ StopLimitService: CRITICAL - ACK order ${finalAckCheck.orderId} found for ${state.symbol} just before creation. ABORTING to prevent duplicate.`);
-      return; // ABORT - order already exists
-    }
-
     // Set flags BEFORE async operations to prevent race conditions
-    // CRITICAL: Set stageIndex = 0 immediately to mark as ACTIVE STOPLIMIT
-    // This prevents duplicate creation even if API call is delayed
     state.pendingCreate = true;
     state.lastOrderCreateAttempt = Date.now();
-    state.stageIndex = 0; // Mark as ACTIVE STOPLIMIT immediately - prevents duplicates
     
     try {
       const config = this.groupConfigs[state.groupKey];
@@ -1741,19 +1515,6 @@ class StopLimitV2Service {
         }
         state.updatedAt = Date.now();
         console.log(`🔒 StopLimitService: Order creation complete for ${state.symbol}. State locked: stageIndex=${state.stageIndex}, orderId=${state.orderId || 'pending'}, lastOrderCreateAttempt=${state.lastOrderCreateAttempt ? new Date(state.lastOrderCreateAttempt).toISOString() : 'none'}`);
-        
-        // CRITICAL: Immediately check for ACK order in cache after creation
-        // This prevents duplicate creation if ACK arrives before next validation
-        const immediateAckCheck = this.findActiveStopLimitOrder(state.symbol);
-        if (immediateAckCheck) {
-          const immediateStatus = (immediateAckCheck.order?.Status || '').toUpperCase();
-          if (immediateStatus === 'ACK') {
-            // ACK order found immediately - link it and ensure state is locked
-            this.updateStateFromOrder(state, immediateAckCheck.orderId, immediateAckCheck.order, immediateAckCheck.leg, 'ACK');
-            state.stageIndex = 0; // Ensure stageIndex is set
-            console.log(`✅ StopLimitService: ACK order ${immediateAckCheck.orderId} found immediately after creation for ${state.symbol}. Order is ACTIVE and linked.`);
-          }
-        }
         
         // Try to realign state with orders cache to ensure we have the latest order info
         this.realignStateWithOrders(state);
@@ -1933,8 +1694,7 @@ class StopLimitV2Service {
     state.pendingUpdate = true;
     try {
       console.log(`🔄 StopLimitService: Updating StopLimit for ${state.symbol} to stage ${stageNumber} (${label}) - stop ${stopPrice}, limit ${limitPrice} (previous: stop ${previousStopPrice}, limit ${previousLimitPrice})`);
-      // Include current position quantity when updating order
-      const result = await this.putOrder(orderId, stopPrice, limitPrice, state.quantity);
+      const result = await this.putOrder(orderId, stopPrice, limitPrice);
       if (result.success) {
         state.stageIndex = stageNumber;
         state.lastStopPrice = stopPrice;
@@ -2619,22 +2379,9 @@ class StopLimitV2Service {
     if (!this.ordersCache) return false;
     const targetSymbol = symbol.toUpperCase();
     
-    // CRITICAL: Use findActiveStopLimitOrder which properly checks for ACK orders
-    // This is more reliable than iterating through cache
-    const activeOrder = this.findActiveStopLimitOrder(targetSymbol);
-    if (activeOrder) {
-      const status = (activeOrder.order?.Status || '').toUpperCase();
-      // ACK status means order is active
-      if (status === 'ACK' || ACTIVE_ORDER_STATUSES.has(status) || this.isQueuedStatus(status)) {
-        return true;
-      }
-    }
-    
-    // Fallback: Also check cache for other active sell orders (non-StopLimit)
     for (const order of this.ordersCache.values()) {
-      // Check status - include ACK explicitly
-      const orderStatus = (order.Status || '').toUpperCase();
-      if (orderStatus !== 'ACK' && !ACTIVE_ORDER_STATUSES.has(orderStatus)) continue;
+      // Check status
+      if (!ACTIVE_ORDER_STATUSES.has((order.Status || '').toUpperCase())) continue;
       
       // Check legs for SELL on symbol
       if (order.Legs && Array.isArray(order.Legs)) {
@@ -3143,90 +2890,23 @@ class StopLimitV2Service {
       }
     }
 
-    // CRITICAL: SECONDARY CHECK - If stageIndex >= 0, StopLimit order was created - ALWAYS show as active
-    // This is the key fix: Once a StopLimit is created (stageIndex >= 0), it should NEVER change back to inactive
-    // unless the order is clearly filled, rejected, or the position is sold
+    // SECONDARY CHECK: If stageIndex >= 0, StopLimit order was created - show as active
+    // This handles cases where order was created but not yet in cache
     if (state.stageIndex >= 0) {
       // Check for terminal states that override active
       if (state.autoSellExecuted) {
         return 'auto-sell-executed';
       }
       
-      // CRITICAL: Check if there's an active order by checking state.orderId
-      // If orderId exists, check its status in the cache
-      if (state.orderId) {
-        const cachedOrder = this.ordersCache.get(state.orderId);
-        if (cachedOrder) {
-          const orderStatus = (cachedOrder.Status || '').toUpperCase();
-          
-          // If order is filled, position is closed
-          if (orderStatus === 'FLL' || orderStatus === 'FIL') {
-            return 'closed';
-          }
-          
-          // If order is rejected, check if there's another active order
-          if (orderStatus === 'REJ') {
-            // Check if there's another active StopLimit order
-            const allActiveOrders = this.findActiveSellOrders(state.symbol);
-            const otherActiveOrder = allActiveOrders.find(o => 
-              o.orderId !== state.orderId && 
-              (o.order?.OrderType || '').toUpperCase() === 'STOPLIMIT' &&
-              ((o.order?.Status || '').toUpperCase() === 'ACK' || ACTIVE_ORDER_STATUSES.has((o.order?.Status || '').toUpperCase()))
-            );
-            if (otherActiveOrder) {
-              // Found another active order - link it and return active
-              const otherStatus = (otherActiveOrder.order?.Status || '').toUpperCase();
-              this.updateStateFromOrder(state, otherActiveOrder.orderId, otherActiveOrder.order, otherActiveOrder.leg, otherStatus);
-              if (otherStatus === 'DON' || otherStatus === 'QUE' || otherStatus === 'QUEUED') {
-                return 'queued';
-              }
-              return 'active';
-            }
-            return 'order-rejected';
-          }
-          
-          // If order is queued, show queued
-          if (orderStatus === 'DON' || orderStatus === 'QUE' || orderStatus === 'QUEUED') {
-            return 'queued';
-          }
-          
-          // If order is active (ACK, etc.), return active
-          if (orderStatus === 'ACK' || ACTIVE_ORDER_STATUSES.has(orderStatus) || this.isQueuedStatus(orderStatus)) {
-            return 'active';
-          }
-          
-          // If order exists but status is unexpected, still return active if stageIndex >= 0
-          // This prevents flickering when order status is temporarily unclear
-          return 'active';
-        }
-      }
-      
-      // CRITICAL: If stageIndex >= 0, order was created - DEFAULT to active
-      // Even if orderId is not set or order is not in cache, if stageIndex >= 0,
-      // it means a StopLimit was successfully created, so it should show as active
-      // This is the key fix: Once StopLimit is created, it stays active
       const orderStatus = (state.orderStatus || '').toUpperCase();
       
-      // Only override active status if order is clearly filled or rejected
+      // CRITICAL: Check if StopLimit order is filled - position should show as closed
       if (orderStatus === 'FLL' || orderStatus === 'FIL') {
         return 'closed';
       }
       
-      // For rejected orders, still check if there's another active order
+      // CRITICAL: Check for rejected orders - but only if no active order found above
       if (orderStatus === 'REJ') {
-        const allActiveOrders = this.findActiveSellOrders(state.symbol);
-        const otherActiveOrder = allActiveOrders.find(o => 
-          (o.order?.OrderType || '').toUpperCase() === 'STOPLIMIT' &&
-          ((o.order?.Status || '').toUpperCase() === 'ACK' || ACTIVE_ORDER_STATUSES.has((o.order?.Status || '').toUpperCase()))
-        );
-        if (otherActiveOrder) {
-          const otherStatus = (otherActiveOrder.order?.Status || '').toUpperCase();
-          this.updateStateFromOrder(state, otherActiveOrder.orderId, otherActiveOrder.order, otherActiveOrder.leg, otherStatus);
-          if (otherStatus === 'DON' || otherStatus === 'QUE' || otherStatus === 'QUEUED') {
-            return 'queued';
-          }
-          return 'active';
-        }
         return 'order-rejected';
       }
       
@@ -3235,8 +2915,8 @@ class StopLimitV2Service {
         return 'queued';
       }
       
-      // CRITICAL: stageIndex >= 0 means StopLimit was created - ALWAYS return active
-      // This is the key fix: Once created, it never goes back to 'awaiting-stoplimit'
+      // stageIndex >= 0 means order was created - DEFAULT to active
+      // This prevents flickering while waiting for order to appear in cache
       return 'active';
     }
     
