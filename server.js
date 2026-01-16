@@ -5732,7 +5732,7 @@ function computeManualList() {
     const reasons = [];
     if ((indicators.macd5m?.histogram ?? -1) <= 0) reasons.push("Hist 5m <= 0");
     if ((indicators.macd5m?.macd ?? -1) <= 0) reasons.push("MACD 5m <= 0");
-    if ((indicators.ema5m18 ?? 0) <= (indicators.ema5m200 ?? 999999)) reasons.push("EMA18 < EMA200");
+    // EMA18 5m > EMA200 5m is now a visual indicator only, not a filter condition
 
     if (reasons.length > 0) {
       nonQualified.push({ symbol, price, reasons, factors, rawRow: row });
@@ -5741,7 +5741,8 @@ function computeManualList() {
 
     const meetsExtra = {
       macd1mPos: (indicators.macd1m?.macd ?? -1) > 0,
-      closeOverEma1m: price > (indicators.ema1m18 ?? 999999)
+      closeOverEma1m: price > (indicators.ema1m18 ?? 999999),
+      ema18Above200_5m: (indicators.ema5m18 ?? 0) > (indicators.ema5m200 ?? 999999)
     };
 
     qualified.push({

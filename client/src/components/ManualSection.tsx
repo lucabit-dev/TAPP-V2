@@ -38,6 +38,7 @@ interface ScoredStock {
   meetsExtra: {
     macd1mPos: boolean;
     closeOverEma1m: boolean;
+    ema18Above200_5m: boolean;
   };
   rawRow: any;
 }
@@ -410,6 +411,7 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-right">Price</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-center">MACD 1m+</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-center">Close {'>'} EMA18</th>
+                  <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-center">EMA 18 5m {'>'} EMA 200 5m</th>
                   {/* Factors */}
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-right" title="Distance VWAP (20%)">VWAP %</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-right" title="2m Change (15%)">2m %</th>
@@ -441,6 +443,11 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                       <td className="p-3 text-center">
                         <span className={`px-2 py-0.5 rounded ${stock.meetsExtra.closeOverEma1m ? 'bg-[#22c55e]/20 text-[#22c55e]' : 'bg-[#2a2820] text-[#808080]'}`}>
                           {stock.meetsExtra.closeOverEma1m ? 'YES' : 'NO'}
+                        </span>
+                      </td>
+                      <td className="p-3 text-center">
+                        <span className={`px-2 py-0.5 rounded ${stock.meetsExtra.ema18Above200_5m ? 'bg-[#22c55e]/20 text-[#22c55e]' : 'bg-[#2a2820] text-[#808080]'}`}>
+                          {stock.meetsExtra.ema18Above200_5m ? 'YES' : 'NO'}
                         </span>
                       </td>
 

@@ -113,22 +113,22 @@ class ConditionsService {
       });
     }
 
-    // Condition 5: EMA18 5m > EMA200 5m
+    // Condition 5: EMA18 5m > EMA200 5m (VISUAL INDICATOR ONLY - NOT A FILTER)
     const ema5m18Value = indicators.ema5m18;
     const ema5m200Value = indicators.ema5m200;
     conditions.ema18Above200_5m = this.isGreaterThanWithTolerance(ema5m18Value, ema5m200Value);
-    if (!conditions.ema18Above200_5m) {
-      failedConditions.push({
-        name: this.conditionNames.ema18Above200_5m,
-        expected: `EMA 18 5m (${ema5m18Value}) > EMA 200 5m (${ema5m200Value})`,
-        actual: `${ema5m18Value || 'N/A'} vs ${ema5m200Value || 'N/A'}`,
-        condition: 'ema18Above200_5m'
-      });
-    }
+    // Note: ema18Above200_5m is NOT added to failedConditions - it's only for visual display
 
     // Count passed conditions - CRITICAL: Verify boolean logic
-    const passedConditions = Object.values(conditions).filter(Boolean).length;
-    const totalConditions = Object.keys(conditions).length;
+    // Exclude ema18Above200_5m from filtering logic (it's visual only)
+    const filterConditions = {
+      macd5mHistogramPositive: conditions.macd5mHistogramPositive,
+      macd5mPositive: conditions.macd5mPositive,
+      macd1mPositive: conditions.macd1mPositive,
+      closeAboveEma18_1m: conditions.closeAboveEma18_1m
+    };
+    const passedConditions = Object.values(filterConditions).filter(Boolean).length;
+    const totalConditions = Object.keys(filterConditions).length;
     const allConditionsMet = passedConditions === totalConditions;
     
     // Enhanced debugging output
