@@ -4,10 +4,9 @@ const ACTIVE_ORDER_STATUSES = new Set(['ACK', 'DON', 'REC', 'QUE', 'QUEUED', 'OP
 const NON_ACTIVE_STATUSES = new Set(['CAN', 'FIL', 'EXP', 'OUT', 'REJ', 'FLL']);
 
 class StopLimitV2Service {
-  constructor({ ordersCache, positionsCache, orderStateService }) {
+  constructor({ ordersCache, positionsCache }) {
     this.ordersCache = ordersCache;
     this.positionsCache = positionsCache || null;
-    this.orderStateService = orderStateService || null; // Optional: for duplicate order prevention
     this.trackedPositions = new Map(); // Map<symbol, PositionState>
     this.soldPositions = new Map(); // Map<symbol, SoldPositionState>
     this.orderWaiters = new Map(); // Map<symbol, Set<OrderWaiter>>
@@ -2278,11 +2277,9 @@ class StopLimitV2Service {
 
   async postOrder(body) {
     const symbol = (body.symbol || '').toUpperCase();
-    const isSellOrder = (body.side || '').toLowerCase() === 'sell';
-    const isStopLimit = body.order_type === 'StopLimit';
     
     // CRITICAL: Verify position is still active before creating any order
-    if (symbol && isStopLimit) {
+    if (symbol && body.order_type === 'StopLimit') {
       if (!this.hasActivePosition(symbol)) {
         console.warn(`🛑 StopLimitService: Blocked StopLimit order creation for ${symbol} - position is no longer active (may have been sold)`);
         return {
@@ -2306,7 +2303,7 @@ class StopLimitV2Service {
     // Final safety check: do not create orders if automation is disabled
     // Exception: Allow 'Market' orders if they are from auto-sell (which checks enabled status before calling)
     // But for StopLimit creation, strictly enforce enabled status
-    if (!this.analysisEnabled && isStopLimit) {
+    if (!this.analysisEnabled && body.order_type === 'StopLimit') {
       console.warn(`🛑 StopLimitService: Blocked order creation for ${body.symbol} because automation is disabled`);
       return {
         success: false,
@@ -2315,161 +2312,52 @@ class StopLimitV2Service {
       };
     }
 
-    // IDEMPOTENT CHECK: For SELL orders, check if an active sell already exists
-    if (isSellOrder && symbol && this.orderStateService) {
-      let releaseLock = null;
-      try {
-        // Acquire per-symbol lock to prevent concurrent duplicate orders
-        releaseLock = await this.orderStateService.acquireOrderLock(symbol);
-        
-        // Check for active sell order
-        const activeSell = await this.orderStateService.getActiveSell(symbol);
-        if (activeSell) {
-          console.log(`⏭️ SKIP duplicate sell: symbol=${symbol}, activeOrderId=${activeSell.brokerOrderId}, statusRaw=${activeSell.statusRaw}`);
-          // Release lock before returning
-          if (releaseLock) {
-            this.orderStateService.releaseOrderLock(symbol);
-          }
-          return {
-            success: false,
-            notifyStatus: 'SKIPPED: Active Sell Order Exists',
-            error: `Active sell order already exists: ${activeSell.brokerOrderId} (${activeSell.statusRaw})`,
-            existingOrderId: activeSell.brokerOrderId,
-            existingStatus: activeSell.statusRaw
-          };
+    try {
+      const resp = await fetch(`${this.apiBaseUrl}/order`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(body)
+      });
+
+      const notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
+      const text = await resp.text();
+      let data = null;
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = text;
         }
-      } catch (lockErr) {
-        console.error(`❌ Error acquiring order lock for ${symbol}:`, lockErr);
-        // Continue with order placement if lock fails (better to try than block)
-        releaseLock = null; // Don't try to release if we didn't acquire
       }
 
-      try {
-        const resp = await fetch(`${this.apiBaseUrl}/order`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-          },
-          body: JSON.stringify(body)
-        });
-
-        const notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
-        const text = await resp.text();
-        let data = null;
-        if (text) {
-          try {
-            data = JSON.parse(text);
-          } catch {
-            data = text;
-          }
-        }
-
-        const success = resp.ok;
-        const extractedOrderId = success ? this.extractOrderId(data) : null;
-        
-        if (success && !extractedOrderId) {
-          console.warn(`⚠️ StopLimitService: Order creation succeeded but orderId extraction failed. Response data: ${JSON.stringify(data).substring(0, 500)}`);
-        }
-        
-        const result = {
-          success,
-          notifyStatus,
-          responseData: data,
-          orderId: extractedOrderId
-        };
-
-        if (!success) {
-          result.error = this.extractErrorMessage(data) || notifyStatus;
-          
-          // REJ HANDLING: If order was rejected, reconcile with broker
-          const errorStr = (result.error || '').toUpperCase();
-          const statusStr = (notifyStatus || '').toUpperCase();
-          if (errorStr.includes('REJ') || statusStr.includes('REJ') || 
-              (data && typeof data === 'object' && (data.status === 'REJ' || data.Status === 'REJ'))) {
-            console.warn(`⚠️ Order rejected (REJ) for ${symbol}, reconciling with broker...`);
-            try {
-              await this.orderStateService.reconcileSymbolOrders(symbol);
-              // After reconciliation, check again if there's an active sell
-              const activeSellAfterRecon = await this.orderStateService.getActiveSell(symbol);
-              if (activeSellAfterRecon) {
-                console.log(`✅ After REJ reconciliation: Found active sell order ${activeSellAfterRecon.brokerOrderId} for ${symbol}`);
-                result.reconciled = true;
-                result.existingOrderId = activeSellAfterRecon.brokerOrderId;
-                result.existingStatus = activeSellAfterRecon.statusRaw;
-              }
-            } catch (reconErr) {
-              console.error(`❌ Error reconciling orders after REJ for ${symbol}:`, reconErr);
-            }
-          }
-        }
-
-        // Release lock after order placement attempt
-        if (releaseLock) {
-          this.orderStateService.releaseOrderLock(symbol);
-        }
-
-        return result;
-      } catch (err) {
-        // Release lock on error
-        if (releaseLock) {
-          this.orderStateService.releaseOrderLock(symbol);
-        }
-        return {
-          success: false,
-          notifyStatus: `ERROR: ${err.message}`,
-          error: err.message
-        };
+      const success = resp.ok;
+      const extractedOrderId = success ? this.extractOrderId(data) : null;
+      
+      if (success && !extractedOrderId) {
+        console.warn(`⚠️ StopLimitService: Order creation succeeded but orderId extraction failed. Response data: ${JSON.stringify(data).substring(0, 500)}`);
       }
-    } else {
-      // No orderStateService or not a sell order - proceed without idempotency check
-      try {
-        const resp = await fetch(`${this.apiBaseUrl}/order`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-          },
-          body: JSON.stringify(body)
-        });
+      
+      const result = {
+        success,
+        notifyStatus,
+        responseData: data,
+        orderId: extractedOrderId
+      };
 
-        const notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
-        const text = await resp.text();
-        let data = null;
-        if (text) {
-          try {
-            data = JSON.parse(text);
-          } catch {
-            data = text;
-          }
-        }
-
-        const success = resp.ok;
-        const extractedOrderId = success ? this.extractOrderId(data) : null;
-        
-        if (success && !extractedOrderId) {
-          console.warn(`⚠️ StopLimitService: Order creation succeeded but orderId extraction failed. Response data: ${JSON.stringify(data).substring(0, 500)}`);
-        }
-        
-        const result = {
-          success,
-          notifyStatus,
-          responseData: data,
-          orderId: extractedOrderId
-        };
-
-        if (!success) {
-          result.error = this.extractErrorMessage(data) || notifyStatus;
-        }
-
-        return result;
-      } catch (err) {
-        return {
-          success: false,
-          notifyStatus: `ERROR: ${err.message}`,
-          error: err.message
-        };
+      if (!success) {
+        result.error = this.extractErrorMessage(data) || notifyStatus;
       }
+
+      return result;
+    } catch (err) {
+      return {
+        success: false,
+        notifyStatus: `ERROR: ${err.message}`,
+        error: err.message
+      };
     }
   }
 
