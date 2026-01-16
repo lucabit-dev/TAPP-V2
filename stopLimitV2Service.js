@@ -1416,8 +1416,28 @@ class StopLimitV2Service {
 
     if (validation.hasOrder) {
       // Order exists! Link it immediately and skip creation
+      // CRITICAL: If order is queued (DON/QUE/QUEUED), don't create a new one - it's waiting for market hours
+      const statusUpper = (validation.status || '').toUpperCase();
+      if (this.isQueuedStatus(statusUpper)) {
+        this.updateStateFromOrder(state, validation.orderId, validation.order, validation.leg, validation.status);
+        console.log(`⏳ StopLimitService: SAFETY CHECK PASSED - Existing queued StopLimit order ${validation.orderId} found for ${state.symbol} (status: ${validation.status}, source: ${validation.source}). SKIPPING CREATION - order is queued and will activate when market opens.`);
+        return;
+      }
       this.updateStateFromOrder(state, validation.orderId, validation.order, validation.leg, validation.status);
       console.log(`🛡️ StopLimitService: SAFETY CHECK PASSED - Existing StopLimit order ${validation.orderId} found for ${state.symbol} (status: ${validation.status}, source: ${validation.source}). SKIPPING CREATION to prevent duplicate.`);
+      return;
+    }
+
+    // Additional check: Look specifically for queued (DON) orders that might not have been caught above
+    const allSellOrders = this.findActiveSellOrders(state.symbol);
+    const queuedStopLimitOrder = allSellOrders.find(o => 
+      (o.order?.OrderType || '').toUpperCase() === 'STOPLIMIT' &&
+      this.isQueuedStatus(o.order?.Status)
+    );
+    if (queuedStopLimitOrder) {
+      const queuedStatus = (queuedStopLimitOrder.order?.Status || '').toUpperCase();
+      this.updateStateFromOrder(state, queuedStopLimitOrder.orderId, queuedStopLimitOrder.order, queuedStopLimitOrder.leg, queuedStatus);
+      console.log(`⏳ StopLimitService: Additional check found queued StopLimit order ${queuedStopLimitOrder.orderId} for ${state.symbol} (status: ${queuedStatus}). SKIPPING CREATION - order is queued and will activate when market opens.`);
       return;
     }
 
@@ -2890,7 +2910,27 @@ class StopLimitV2Service {
       }
     }
 
-    // SECONDARY CHECK: If stageIndex >= 0, StopLimit order was created - show as active
+    // SECONDARY CHECK: Look for any queued (DON) orders even if not found by findActiveStopLimitOrder
+    // This ensures queued orders are detected even when stageIndex < 0
+    const allSellOrders = this.findActiveSellOrders(state.symbol);
+    const queuedStopLimitOrder = allSellOrders.find(o => 
+      (o.order?.OrderType || '').toUpperCase() === 'STOPLIMIT' &&
+      this.isQueuedStatus(o.order?.Status)
+    );
+    if (queuedStopLimitOrder) {
+      const queuedStatus = (queuedStopLimitOrder.order?.Status || '').toUpperCase();
+      // Link the order to state if not already linked
+      if (!state.orderId || state.orderId !== queuedStopLimitOrder.orderId) {
+        this.updateStateFromOrder(state, queuedStopLimitOrder.orderId, queuedStopLimitOrder.order, queuedStopLimitOrder.leg, queuedStatus);
+      }
+      // Ensure stageIndex is set if we found a queued order
+      if (state.stageIndex < 0) {
+        state.stageIndex = 0;
+      }
+      return 'queued';
+    }
+
+    // TERTIARY CHECK: If stageIndex >= 0, StopLimit order was created - show as active
     // This handles cases where order was created but not yet in cache
     if (state.stageIndex >= 0) {
       // Check for terminal states that override active
