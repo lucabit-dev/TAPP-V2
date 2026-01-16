@@ -427,36 +427,64 @@ class StopLimitV2Service {
       return;
     }
 
-    // CRITICAL: Before checking hasOrder, verify if there's an ACK order in cache
-    // This prevents creation loops when ACK order exists but isn't linked to state yet
+    // CRITICAL: Check for ACK order FIRST - this is the most reliable indicator of active StopLimit
+    // If ACK order exists, position is ACTIVE STOPLIMIT - do NOT create more orders
     const ackCheck = this.findActiveStopLimitOrder(symbol);
     if (ackCheck) {
       const ackStatus = (ackCheck.order?.Status || '').toUpperCase();
       if (ackStatus === 'ACK') {
-        // ACK order found - link it immediately and skip creation
+        // ACK order found - position is ACTIVE STOPLIMIT
+        // Mark as active immediately and skip ALL creation logic
         if (!state.orderId || state.orderId !== ackCheck.orderId) {
           this.updateStateFromOrder(state, ackCheck.orderId, ackCheck.order, ackCheck.leg, 'ACK');
         }
+        // CRITICAL: Set stageIndex = 0 to mark as ACTIVE STOPLIMIT
         if (state.stageIndex < 0) {
           state.stageIndex = 0;
+          console.log(`✅ StopLimitService: ${symbol} marked as ACTIVE STOPLIMIT (ACK order ${ackCheck.orderId} found, stageIndex set to 0)`);
         }
-        console.log(`✅ StopLimitService: ACK order ${ackCheck.orderId} found for ${symbol}. Order is ACTIVE. Skipping creation.`);
+        // Clear pendingCreate flag if set - order already exists
+        state.pendingCreate = false;
+        console.log(`✅ StopLimitService: ${symbol} is ACTIVE STOPLIMIT (ACK order ${ackCheck.orderId}). Skipping ALL order creation.`);
+        // Skip to adjustments - DO NOT call ensureInitialOrder
+        await this.evaluateAdjustments(state, unrealizedQty);
+        return; // EARLY RETURN - position is active, no creation needed
       }
     }
 
-    // Only ensure initial order if we haven't created one yet
-    // If stageIndex >= 0, we've already created an order (even if orderId not yet set)
-    // If we have an orderId, we definitely have an order
-    // If we recently attempted creation, wait for it to complete
-    const hasOrder = state.stageIndex >= 0 || state.orderId || (state.pendingCreate && state.lastOrderCreateAttempt);
-    
-    if (!hasOrder) {
-      await this.ensureInitialOrder(state);
-    } else if (state.stageIndex >= 0) {
-      // We have an order, just evaluate adjustments (price updates based on unrealized profit)
-      // Don't try to create another order
-      console.log(`✅ StopLimitService: ${symbol} already has StopLimit order (stageIndex=${state.stageIndex}, orderId=${state.orderId || 'pending'}), skipping creation, evaluating adjustments only`);
+    // CRITICAL: If stageIndex >= 0, position is already ACTIVE STOPLIMIT - do NOT create more orders
+    // This check must come BEFORE ensureInitialOrder to prevent duplicates
+    if (state.stageIndex >= 0) {
+      console.log(`✅ StopLimitService: ${symbol} is ACTIVE STOPLIMIT (stageIndex=${state.stageIndex}, orderId=${state.orderId || 'pending'}). Skipping order creation, evaluating adjustments only`);
+      await this.evaluateAdjustments(state, unrealizedQty);
+      return; // EARLY RETURN - already active, no creation needed
     }
+
+    // CRITICAL: If pendingCreate is true, order creation is in progress - do NOT create duplicates
+    if (state.pendingCreate && state.lastOrderCreateAttempt) {
+      const secondsSinceAttempt = ((Date.now() - state.lastOrderCreateAttempt) / 1000).toFixed(1);
+      console.log(`⏸️ StopLimitService: ${symbol} order creation in progress (${secondsSinceAttempt}s ago). Skipping duplicate creation.`);
+      await this.evaluateAdjustments(state, unrealizedQty);
+      return; // EARLY RETURN - creation in progress, wait for completion
+    }
+
+    // CRITICAL: If orderId exists, order already created - do NOT create duplicates
+    if (state.orderId) {
+      // Verify order still exists in cache
+      const cachedOrder = this.ordersCache.get(state.orderId);
+      if (cachedOrder) {
+        const status = (cachedOrder.Status || '').toUpperCase();
+        if (ACTIVE_ORDER_STATUSES.has(status) || this.isQueuedStatus(status) || status === 'ACK') {
+          console.log(`✅ StopLimitService: ${symbol} has active order ${state.orderId} (status: ${status}). Skipping duplicate creation.`);
+          await this.evaluateAdjustments(state, unrealizedQty);
+          return; // EARLY RETURN - order exists and is active
+        }
+      }
+    }
+
+    // Only call ensureInitialOrder if ALL checks above passed
+    // This means: no ACK order, stageIndex < 0, not pendingCreate, no active orderId
+    await this.ensureInitialOrder(state);
     
     await this.evaluateAdjustments(state, unrealizedQty);
   }
@@ -1614,9 +1642,23 @@ class StopLimitV2Service {
     // Step 5: All checks passed - safe to create
     console.log(`✅ StopLimitService: All validation checks passed for ${state.symbol}. No existing order found. Proceeding with creation.`);
 
+    // CRITICAL: Before setting pendingCreate, check for ACK order one more time (race condition protection)
+    const finalAckCheck = this.findActiveStopLimitOrder(state.symbol);
+    if (finalAckCheck && (finalAckCheck.order?.Status || '').toUpperCase() === 'ACK') {
+      // ACK order found just before creation - link it and abort
+      this.updateStateFromOrder(state, finalAckCheck.orderId, finalAckCheck.order, finalAckCheck.leg, 'ACK');
+      state.stageIndex = 0;
+      state.pendingCreate = false;
+      console.log(`🛡️ StopLimitService: CRITICAL - ACK order ${finalAckCheck.orderId} found for ${state.symbol} just before creation. ABORTING to prevent duplicate.`);
+      return; // ABORT - order already exists
+    }
+
     // Set flags BEFORE async operations to prevent race conditions
+    // CRITICAL: Set stageIndex = 0 immediately to mark as ACTIVE STOPLIMIT
+    // This prevents duplicate creation even if API call is delayed
     state.pendingCreate = true;
     state.lastOrderCreateAttempt = Date.now();
+    state.stageIndex = 0; // Mark as ACTIVE STOPLIMIT immediately - prevents duplicates
     
     try {
       const config = this.groupConfigs[state.groupKey];
