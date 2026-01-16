@@ -89,6 +89,7 @@ const mongoose = require('mongoose');
 connectDatabase()
   .then(() => {
     loadManualWeightsFromDb();
+    initializeCachePersistence();
   })
   .catch(() => {
     console.warn('Server started without DB connection. Auth routes will return 503.');
@@ -149,6 +150,38 @@ const lastBuyTsByTicker = new Map();
 // All users see the same positions and orders data
 const positionsCache = new Map(); // Map<symbol, { PositionID, Symbol, Quantity, ... }>
 const ordersCache = new Map(); // Map<OrderID, { OrderID, Symbol, Status, Legs, ... }>
+
+// Cache persistence service (initialized after DB connection)
+let cachePersistenceService = null;
+
+// Initialize cache persistence service
+async function initializeCachePersistence() {
+  try {
+    const CachePersistenceService = require('./services/cachePersistenceService');
+    cachePersistenceService = new CachePersistenceService(ordersCache, positionsCache);
+    
+    // Load cache from database on startup
+    const loaded = await cachePersistenceService.loadFromDatabase();
+    console.log(`✅ Cache persistence initialized: Loaded ${loaded.orders} orders and ${loaded.positions} positions from database`);
+    
+    // Start periodic saves
+    cachePersistenceService.startPeriodicSave();
+    
+    // Add API endpoint for cache stats
+    app.get('/api/cache/stats', requireDbReady, async (req, res) => {
+      try {
+        const stats = await cachePersistenceService.getStats();
+        res.json({ success: true, data: stats });
+      } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+      }
+    });
+  } catch (err) {
+    console.error('❌ Failed to initialize cache persistence:', err);
+    // Continue without persistence - cache will work in-memory only
+    cachePersistenceService = null;
+  }
+}
 
 // Helper function to normalize timestamp (keeps UTC, formatting is done on frontend)
 // This function is here for consistency but doesn't actually change the timestamp
@@ -3153,6 +3186,10 @@ function connectPositionsWebSocket() {
               Symbol: symbol,
               lastUpdated: Date.now()
             });
+            // Schedule save to database
+            if (cachePersistenceService) {
+              cachePersistenceService.schedulePositionSave(symbol);
+            }
             console.log(`📊 Position cache updated: ${symbol} (${quantity} shares)`);
 
           if (stopLimitService) {
@@ -3168,6 +3205,10 @@ function connectPositionsWebSocket() {
         } else {
           // Position closed or quantity is 0, remove from cache
           positionsCache.delete(symbol);
+          // Schedule save to database (to delete from DB)
+          if (cachePersistenceService) {
+            cachePersistenceService.schedulePositionSave(symbol);
+          }
           if (typeof lastBuyTsByTicker !== 'undefined' && lastBuyTsByTicker.has(symbol)) {
             lastBuyTsByTicker.delete(symbol);
             console.log(`🔁 Reset buy lock for ${symbol} (position closed)`);
@@ -3294,6 +3335,10 @@ function connectOrdersWebSocket() {
             ...order,
             lastUpdated: Date.now()
           });
+          // Schedule save to database
+          if (cachePersistenceService) {
+            cachePersistenceService.scheduleOrderSave(orderId);
+          }
           
         if (stopLimitService) {
           stopLimitService.handleOrderUpdate(order).catch(err => {
@@ -3316,6 +3361,10 @@ function connectOrdersWebSocket() {
           // Status values like CAN, FIL, etc. indicate the order is no longer active
           if (order.Status === 'CAN' || order.Status === 'FIL' || order.Status === 'EXP') {
             ordersCache.delete(orderId);
+            // Schedule save to database (to delete from DB)
+            if (cachePersistenceService) {
+              cachePersistenceService.scheduleOrderSave(orderId);
+            }
             console.log(`📋 Order removed from cache: ${orderId} (Status: ${order.Status})`);
           }
         }
@@ -4057,6 +4106,10 @@ async function deleteOrder(orderId) {
       // the order from being detected as active in subsequent checks
       if (ordersCache.has(orderIdStr)) {
         ordersCache.delete(orderIdStr);
+        // Schedule save to database (to delete from DB)
+        if (cachePersistenceService) {
+          cachePersistenceService.scheduleOrderSave(orderIdStr);
+        }
         console.log(`🗑️ Removed order ${orderIdStr} from cache after deletion`);
       }
       
@@ -4352,6 +4405,10 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
             // Remove from cache if it exists
             if (ordersCache.has(orderId)) {
               ordersCache.delete(orderId);
+              // Schedule save to database (to delete from DB)
+              if (cachePersistenceService) {
+                cachePersistenceService.scheduleOrderSave(orderId);
+              }
               console.log(`🗑️ Removed order ${orderId} from cache`);
             }
             return true;
@@ -4362,6 +4419,10 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
               console.log(`✅ Order ${orderId} not found (likely already cancelled) - treating as success`);
               if (ordersCache.has(orderId)) {
                 ordersCache.delete(orderId);
+                // Schedule save to database (to delete from DB)
+                if (cachePersistenceService) {
+                  cachePersistenceService.scheduleOrderSave(orderId);
+                }
               }
               return true;
             }
