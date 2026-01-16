@@ -112,6 +112,16 @@ class StopLimitV2Service {
         // This is a re-entry - remove from sold positions and allow tracking
         console.log(`🔄 StopLimitV2Service: Position ${symbol} re-entered after being sold - removing from sold list and re-tracking`);
         this.soldPositions.delete(symbol);
+        
+        // CRITICAL: If there's existing tracked state from the previous position, clean it up completely
+        // This prevents stale state (old orderId, stageIndex) from interfering with the new position
+        if (this.trackedPositions.has(symbol)) {
+          const oldState = this.trackedPositions.get(symbol);
+          console.log(`🧹 StopLimitV2Service: Cleaning up stale state for re-entry ${symbol} (old orderId: ${oldState.orderId || 'none'}, old stageIndex: ${oldState.stageIndex})`);
+          // Remove the old state completely - we'll create a fresh one below
+          this.trackedPositions.delete(symbol);
+        }
+        
         // Continue to track this position - isReEntry flag will be used below
       } else {
         // Still sold or invalid - don't track
@@ -209,17 +219,26 @@ class StopLimitV2Service {
       this.trackedPositions.set(symbol, state);
       console.log(`✅ StopLimitService: Started tracking ${symbol} (quantity: ${quantity}, avgPrice: ${avgPrice})`);
     } else {
-      // CRITICAL: Double-check position is still active before updating state
-      // This handles cases where position closes between updates
-      if (!this.hasActivePosition(symbol)) {
-        console.log(`🧹 StopLimitService: Position ${symbol} is no longer active during state update, cleaning up`);
-        this.cleanupPosition(symbol);
-        return;
-      }
+      // CRITICAL: If this is a re-entry and we have existing state, force complete reset
+      // This prevents stale state (old orderId, stageIndex) from the previous position
+      if (isReEntry) {
+        console.log(`🔄 StopLimitService: Re-entry detected for ${symbol} but state still exists - forcing complete state reset to prevent stale data`);
+        // Delete the old state completely - we'll create a fresh one
+        this.trackedPositions.delete(symbol);
+        // Set state to null so we create a fresh one below
+        state = null;
+      } else {
+        // CRITICAL: Double-check position is still active before updating state
+        // This handles cases where position closes between updates
+        if (!this.hasActivePosition(symbol)) {
+          console.log(`🧹 StopLimitService: Position ${symbol} is no longer active during state update, cleaning up`);
+          this.cleanupPosition(symbol);
+          return;
+        }
 
-      // CRITICAL: Check if quantity has increased - if so, update existing order quantity
-      const previousQuantity = state.quantity;
-      const quantityIncreased = quantity > previousQuantity;
+        // CRITICAL: Check if quantity has increased - if so, update existing order quantity
+        const previousQuantity = state.quantity;
+        const quantityIncreased = quantity > previousQuantity;
       
       state.avgPrice = avgPrice;
       state.quantity = quantity;
@@ -247,7 +266,60 @@ class StopLimitV2Service {
           }
         }
       }
+    }
+    
+    // CRITICAL: If state was nulled due to re-entry, create fresh state now
+    if (!state) {
+      // Double-check quantity is still valid
+      const currentQuantity = this.parseNumber(position?.Quantity);
+      if (!currentQuantity || currentQuantity <= 0) {
+        console.log(`🧹 StopLimitService: Skipping ${symbol} - quantity is ${currentQuantity}`);
+        return;
+      }
 
+      const group = this.resolveGroup(avgPrice);
+      if (!group) {
+        console.warn(`⚠️ StopLimitService: ${symbol} price ${avgPrice} outside supported range - skipping StopLimit automation`);
+        return;
+      }
+
+      state = {
+        symbol,
+        positionId: position?.PositionID || null,
+        accountId: position?.AccountID || null,
+        groupKey: group,
+        avgPrice,
+        quantity,
+        longShort,
+        stageIndex: -1, // -1 indicates initial order not yet created - FRESH STATE
+        orderId: null, // FRESH STATE - no old orderId
+        pendingCreate: false,
+        pendingUpdate: false,
+        autoSellExecuted: false,
+        lastStopPrice: null,
+        lastLimitPrice: null,
+        lastUnrealizedQty: unrealizedQty,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        orderStatus: null,
+        lastOrderCreateAttempt: null
+      };
+      this.trackedPositions.set(symbol, state);
+      console.log(`✅ StopLimitService: Created FRESH state for re-entry ${symbol} (quantity: ${quantity}, avgPrice: ${avgPrice}) - all previous state cleared`);
+      
+      // CRITICAL: Immediately check for ACK order after creating fresh state for re-entry
+      // This prevents creation loop if ACK order already exists from the new position
+      const reEntryAckCheck = this.findActiveStopLimitOrder(symbol);
+      if (reEntryAckCheck) {
+        const reEntryAckStatus = (reEntryAckCheck.order?.Status || '').toUpperCase();
+        if (reEntryAckStatus === 'ACK') {
+          // ACK order found for re-entry - link it immediately and skip creation
+          this.updateStateFromOrder(state, reEntryAckCheck.orderId, reEntryAckCheck.order, reEntryAckCheck.leg, 'ACK');
+          state.stageIndex = 0; // Ensure stageIndex is set
+          console.log(`✅ StopLimitService: ACK order ${reEntryAckCheck.orderId} found immediately for re-entry ${symbol}. Order is ACTIVE and linked.`);
+        }
+      }
+    } else {
       // CRITICAL: Before any reset logic, check if there's an active ACK order in cache
       // This prevents resetting state when an ACK order exists but isn't linked yet
       const activeOrderCheck = this.findActiveStopLimitOrder(symbol);
