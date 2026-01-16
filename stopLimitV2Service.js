@@ -217,11 +217,36 @@ class StopLimitV2Service {
         return;
       }
 
+      // CRITICAL: Check if quantity has increased - if so, update existing order quantity
+      const previousQuantity = state.quantity;
+      const quantityIncreased = quantity > previousQuantity;
+      
       state.avgPrice = avgPrice;
       state.quantity = quantity;
       state.positionId = position?.PositionID || state.positionId;
       state.lastUnrealizedQty = unrealizedQty;
       state.updatedAt = Date.now();
+
+      // CRITICAL: If quantity increased and we have an active order, update the order quantity
+      if (quantityIncreased && (state.orderId || state.stageIndex >= 0)) {
+        const activeOrder = state.orderId ? this.ordersCache.get(state.orderId) : this.findActiveStopLimitOrder(symbol);
+        if (activeOrder) {
+          const order = activeOrder.order || activeOrder;
+          const orderQuantity = this.parseNumber(order.Quantity || order.Legs?.[0]?.Quantity || order.Legs?.[0]?.QuantityRemaining);
+          if (orderQuantity && orderQuantity < quantity) {
+            console.log(`📊 StopLimitService: Position ${symbol} quantity increased from ${previousQuantity} to ${quantity}, updating order quantity from ${orderQuantity} to ${quantity}`);
+            // Update order quantity
+            const orderId = state.orderId || (activeOrder.orderId || activeOrder.OrderID);
+            if (orderId) {
+              try {
+                await this.updateOrderQuantity(orderId, quantity);
+              } catch (err) {
+                console.error(`❌ StopLimitService: Failed to update order quantity for ${symbol}:`, err);
+              }
+            }
+          }
+        }
+      }
 
       // CRITICAL: Before any reset logic, check if there's an active ACK order in cache
       // This prevents resetting state when an ACK order exists but isn't linked yet
@@ -1694,7 +1719,8 @@ class StopLimitV2Service {
     state.pendingUpdate = true;
     try {
       console.log(`🔄 StopLimitService: Updating StopLimit for ${state.symbol} to stage ${stageNumber} (${label}) - stop ${stopPrice}, limit ${limitPrice} (previous: stop ${previousStopPrice}, limit ${previousLimitPrice})`);
-      const result = await this.putOrder(orderId, stopPrice, limitPrice);
+      // Include current position quantity when updating order
+      const result = await this.putOrder(orderId, stopPrice, limitPrice, state.quantity);
       if (result.success) {
         state.stageIndex = stageNumber;
         state.lastStopPrice = stopPrice;
