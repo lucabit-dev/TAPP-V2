@@ -350,6 +350,23 @@ class StopLimitV2Service {
       return;
     }
 
+    // CRITICAL: Before checking hasOrder, verify if there's an ACK order in cache
+    // This prevents creation loops when ACK order exists but isn't linked to state yet
+    const ackCheck = this.findActiveStopLimitOrder(symbol);
+    if (ackCheck) {
+      const ackStatus = (ackCheck.order?.Status || '').toUpperCase();
+      if (ackStatus === 'ACK') {
+        // ACK order found - link it immediately and skip creation
+        if (!state.orderId || state.orderId !== ackCheck.orderId) {
+          this.updateStateFromOrder(state, ackCheck.orderId, ackCheck.order, ackCheck.leg, 'ACK');
+        }
+        if (state.stageIndex < 0) {
+          state.stageIndex = 0;
+        }
+        console.log(`✅ StopLimitService: ACK order ${ackCheck.orderId} found for ${symbol}. Order is ACTIVE. Skipping creation.`);
+      }
+    }
+
     // Only ensure initial order if we haven't created one yet
     // If stageIndex >= 0, we've already created an order (even if orderId not yet set)
     // If we have an orderId, we definitely have an order
@@ -1429,7 +1446,21 @@ class StopLimitV2Service {
       return;
     }
 
-    // Step 3: Comprehensive validation - check all possible sources
+    // Step 3: CRITICAL - Check for ACK orders FIRST (most reliable indicator of active order)
+    // ACK status means the order was accepted and is active - we MUST NOT create another
+    const ackOrder = this.findActiveStopLimitOrder(state.symbol);
+    if (ackOrder) {
+      const ackStatus = (ackOrder.order?.Status || '').toUpperCase();
+      if (ackStatus === 'ACK') {
+        // ACK order found - link it immediately and ABORT creation
+        this.updateStateFromOrder(state, ackOrder.orderId, ackOrder.order, ackOrder.leg, 'ACK');
+        state.stageIndex = 0; // Ensure stageIndex is set
+        console.log(`🛡️ StopLimitService: CRITICAL - ACK order ${ackOrder.orderId} found for ${state.symbol}. Order is ACTIVE. ABORTING CREATION to prevent duplicate.`);
+        return;
+      }
+    }
+
+    // Step 4: Comprehensive validation - check all possible sources
     const validation = this.validateExistingStopLimitOrder(state.symbol);
     console.log(`🔍 StopLimitService: Order validation for ${state.symbol}:`, {
       hasOrder: validation.hasOrder,
@@ -1442,11 +1473,15 @@ class StopLimitV2Service {
     if (validation.hasOrder) {
       // Order exists! Link it immediately and skip creation
       this.updateStateFromOrder(state, validation.orderId, validation.order, validation.leg, validation.status);
+      // CRITICAL: If status is ACK, ensure stageIndex is set
+      if (validation.status === 'ACK') {
+        state.stageIndex = 0;
+      }
       console.log(`🛡️ StopLimitService: SAFETY CHECK PASSED - Existing StopLimit order ${validation.orderId} found for ${state.symbol} (status: ${validation.status}, source: ${validation.source}). SKIPPING CREATION to prevent duplicate.`);
       return;
     }
 
-    // Step 4: Final check - if stageIndex >= 0, we've already created an order
+    // Step 5: Final check - if stageIndex >= 0, we've already created an order
     if (state.stageIndex >= 0) {
       console.log(`⏸️ StopLimitService: StageIndex >= 0 for ${state.symbol} (stageIndex=${state.stageIndex}, orderId=${state.orderId || 'none'}), skipping creation`);
       return;
@@ -1540,6 +1575,19 @@ class StopLimitV2Service {
         }
         state.updatedAt = Date.now();
         console.log(`🔒 StopLimitService: Order creation complete for ${state.symbol}. State locked: stageIndex=${state.stageIndex}, orderId=${state.orderId || 'pending'}, lastOrderCreateAttempt=${state.lastOrderCreateAttempt ? new Date(state.lastOrderCreateAttempt).toISOString() : 'none'}`);
+        
+        // CRITICAL: Immediately check for ACK order in cache after creation
+        // This prevents duplicate creation if ACK arrives before next validation
+        const immediateAckCheck = this.findActiveStopLimitOrder(state.symbol);
+        if (immediateAckCheck) {
+          const immediateStatus = (immediateAckCheck.order?.Status || '').toUpperCase();
+          if (immediateStatus === 'ACK') {
+            // ACK order found immediately - link it and ensure state is locked
+            this.updateStateFromOrder(state, immediateAckCheck.orderId, immediateAckCheck.order, immediateAckCheck.leg, 'ACK');
+            state.stageIndex = 0; // Ensure stageIndex is set
+            console.log(`✅ StopLimitService: ACK order ${immediateAckCheck.orderId} found immediately after creation for ${state.symbol}. Order is ACTIVE and linked.`);
+          }
+        }
         
         // Try to realign state with orders cache to ensure we have the latest order info
         this.realignStateWithOrders(state);
