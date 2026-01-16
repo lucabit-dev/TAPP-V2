@@ -3466,34 +3466,28 @@ app.post('/api/buys/test', async (req, res) => {
       });
     }
     
-    // CRITICAL: Ensure only one active sell order exists for this position
-    // Cancel any existing sell orders (StopLimit or Limit) before placing the new one
-    console.log(`🧹 Manual Sell: Checking for existing sell orders for ${symbol}...`);
-    try {
-      if (stopLimitService) {
-        await stopLimitService.deleteExistingSellOrders(symbol);
-        // Small buffer to allow cancellation to propagate if needed
-        await new Promise(resolve => setTimeout(resolve, 500));
-      }
-    } catch (cleanupErr) {
-      console.warn(`⚠️ Manual Sell: Error cleaning up existing orders for ${symbol}:`, cleanupErr.message);
-      // Continue, but warn - better to try placing the sell than fail completely
-    }
-
-    // Calculate quantity based on price ranges
-    let quantity;
-    if (currentPrice > 0 && currentPrice <= 5) {
-      quantity = 2002;
-    } else if (currentPrice > 5 && currentPrice <= 10) {
-      quantity = 1001;
-    } else if (currentPrice > 10 && currentPrice <= 12) {
-      quantity = 757;
-    } else {
-      // For prices outside the specified ranges, use a default (or return error)
+    // Calculate quantity based on price ranges (using configured buy quantities)
+    const priceGroup = getPriceGroup(currentPrice);
+    if (!priceGroup) {
+      // Price outside supported range - skip buy
       return res.status(400).json({ 
         success: false, 
-        error: `Price ${currentPrice} is outside supported range (0-12). Only prices between 0-12 are supported.` 
+        error: `Price ${currentPrice} is outside supported range (0-30). Only prices between 0-30 are supported.` 
       });
+    }
+    
+    // Get quantity from configured buy quantities, or use default
+    let quantity = MANUAL_BUY_QUANTITIES[priceGroup];
+    if (!quantity || quantity <= 0) {
+      // Fallback to defaults if not configured
+      const defaults = {
+        '0-5': 2002,
+        '5-10': 1001,
+        '10-12': 757,
+        '12-20': 500,
+        '20-30': 333
+      };
+      quantity = defaults[priceGroup] || 500;
     }
     
     // Build order body according to Sections Bot API documentation

@@ -84,18 +84,26 @@ class StopLimitV2Service {
     const longShort = (position?.LongShort || '').toUpperCase();
     
     // CRITICAL: If position is already marked as sold, check if it's a re-entry
-    // If quantity > 0 and position exists in cache with valid quantity, it's a new position (re-entry) - allow tracking
+    // If quantity > 0 and LONG, it's a new position (re-entry) - allow tracking
+    // CRITICAL: Check the position parameter directly, not just cache, to avoid race conditions
     let isReEntry = false;
     if (this.soldPositions.has(symbol)) {
       // Check if this is a re-entry (new position after being sold)
-      // We check the cache directly instead of hasActivePosition because hasActivePosition returns false for sold positions
-      if (quantity > 0 && this.positionsCache && typeof this.positionsCache.get === 'function') {
+      // CRITICAL: Check the position parameter first - it's the most up-to-date data
+      // Also check cache as fallback, but prioritize the position parameter
+      if (quantity > 0 && longShort === 'LONG') {
+        // Position parameter shows active LONG position - this is definitely a re-entry
+        isReEntry = true;
+        console.log(`🔄 StopLimitV2Service: Detected re-entry for ${symbol} from position update (quantity: ${quantity}, longShort: ${longShort})`);
+      } else if (quantity > 0 && this.positionsCache && typeof this.positionsCache.get === 'function') {
+        // Fallback: Check cache if position parameter doesn't show as active
         const cachedPosition = this.positionsCache.get(symbol);
         if (cachedPosition) {
           const cachedQuantity = this.parseNumber(cachedPosition?.Quantity);
           const cachedLongShort = (cachedPosition?.LongShort || '').toUpperCase();
           if (cachedQuantity > 0 && cachedLongShort === 'LONG') {
             isReEntry = true;
+            console.log(`🔄 StopLimitV2Service: Detected re-entry for ${symbol} from cache (quantity: ${cachedQuantity}, longShort: ${cachedLongShort})`);
           }
         }
       }
@@ -107,7 +115,7 @@ class StopLimitV2Service {
         // Continue to track this position - isReEntry flag will be used below
       } else {
         // Still sold or invalid - don't track
-        console.log(`🛑 StopLimitV2Service: Ignoring position update for ${symbol} - position is already marked as sold`);
+        console.log(`🛑 StopLimitV2Service: Ignoring position update for ${symbol} - position is already marked as sold (quantity: ${quantity}, longShort: ${longShort})`);
         if (this.trackedPositions.has(symbol)) {
           this.cleanupPosition(symbol);
         }
