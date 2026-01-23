@@ -513,8 +513,6 @@ const PositionsSection: React.FC = () => {
     });
   };
 
-  }, [mergedPositions]);
-
   return (
     <div className="h-full flex flex-col bg-[#14130e]">
       <NotificationContainer notifications={notifications} onRemove={removeNotification} />
