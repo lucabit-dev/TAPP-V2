@@ -147,6 +147,9 @@ const lastBuyTsByTicker = new Map();
 const positionsCache = new Map(); // Map<symbol, { PositionID, Symbol, Quantity, ... }>
 const ordersCache = new Map(); // Map<OrderID, { OrderID, Symbol, Status, Legs, ... }>
 
+// Pending manual BUY orders: track orderId → { symbol, quantity, limitPrice } for FLL→StopLimit logic
+const pendingManualBuyOrders = new Map();
+
 // Cache persistence service (initialized after DB connection)
 let cachePersistenceService = null;
 
@@ -3015,10 +3018,14 @@ function connectOrdersWebSocket() {
         if (dataObj.OrderID) {
           const order = dataObj;
           const orderId = order.OrderID;
-          
+          const status = (order.Status || '').toUpperCase();
+          const isFilled = (status === 'FLL' || status === 'FIL');
+          const isBuy = (order.Legs?.[0]?.BuyOrSell || '').toUpperCase() === 'BUY';
+          const pending = pendingManualBuyOrders.get(orderId);
+
           // Update last order update time to track websocket activity
           lastOrderUpdateTime = Date.now();
-          
+
           // Update cache with order
           ordersCache.set(orderId, {
             ...order,
@@ -3028,18 +3035,22 @@ function connectOrdersWebSocket() {
           if (cachePersistenceService) {
             cachePersistenceService.scheduleOrderSave(orderId);
           }
-          
-        // Log order updates for debugging (only for active orders)
+
+          // When a tracked manual BUY reaches FLL/FIL: create or modify StopLimit SELL
+          if (isFilled && isBuy && pending) {
+            handleManualBuyFilled(orderId, order, pending).catch(err => console.error('handleManualBuyFilled:', err));
+            pendingManualBuyOrders.delete(orderId);
+          }
+
+          // Log order updates for debugging (only for active orders)
           if (isActiveOrderStatus(order.Status)) {
             const symbol = order.Legs && order.Legs.length > 0 ? order.Legs[0].Symbol : 'UNKNOWN';
             console.log(`📋 Order cache updated: ${orderId} (${symbol}, Status: ${order.Status})`);
           }
-          
+
           // Remove order from cache if it's cancelled or filled (status indicates completion)
-          // Status values like CAN, FIL, etc. indicate the order is no longer active
-          if (order.Status === 'CAN' || order.Status === 'FIL' || order.Status === 'EXP') {
+          if (status === 'CAN' || status === 'FIL' || status === 'FLL' || status === 'EXP') {
             ordersCache.delete(orderId);
-            // Schedule save to database (to delete from DB)
             if (cachePersistenceService) {
               cachePersistenceService.scheduleOrderSave(orderId);
             }
@@ -3248,7 +3259,18 @@ app.post('/api/buys/test', async (req, res) => {
         stack: err.stack
       });
     }
-    
+
+    // If Sections Bot returned an order id, track it for status (ACK/DON/FLL/REJ) and FLL→StopLimit logic
+    let orderIdFromApi = null;
+    if (responseData && typeof responseData === 'object') {
+      orderIdFromApi = responseData.order_id ?? responseData.OrderID ?? responseData.orderId ?? null;
+      if (orderIdFromApi != null && (notifyStatus.startsWith('200') || notifyStatus.startsWith('201'))) {
+        const oid = String(orderIdFromApi);
+        pendingManualBuyOrders.set(oid, { symbol, quantity, limitPrice: currentPrice });
+        console.log(`📌 Tracking manual buy order ${oid} for ${symbol} (qty ${quantity})`);
+      }
+    }
+
     // Find which config/origin this symbol belongs to
     let configId = null;
     let groupKey = null;
@@ -3265,7 +3287,7 @@ app.post('/api/buys/test', async (req, res) => {
         }
       }
     }
-    
+
     // Analyze symbol to get indicators and momentum at buy moment
     let indicators = null;
     let momentum = null;
@@ -3326,18 +3348,19 @@ app.post('/api/buys/test', async (req, res) => {
     
     console.log(`✅ Manual buy logged for ${symbol} - Added to buy list`);
     
-    return res.status(200).json({ 
-      success: isSuccess, 
+    return res.status(200).json({
+      success: isSuccess,
       error: !isSuccess ? (errorMessage || `Failed to buy ${symbol}`) : undefined,
-      data: { 
-        symbol, 
-        quantity, 
-        orderType: 'LIMIT', 
-        limitPrice: currentPrice, 
-        notifyStatus, 
+      data: {
+        symbol,
+        quantity,
+        orderType: 'LIMIT',
+        limitPrice: currentPrice,
+        notifyStatus,
         response: responseData,
-        addedToBuyList: true 
-      } 
+        addedToBuyList: true,
+        orderId: orderIdFromApi || undefined
+      }
     });
   } catch (e) {
     console.error(`❌ Error in manual buy for ${req.body?.symbol}:`, e);
@@ -3779,6 +3802,91 @@ async function deleteOrder(orderId) {
   }
 }
 
+const SECTIONS_BOT_ORDER_URL = 'https://sections-bot.inbitme.com/order';
+
+// Find existing active SELL StopLimit order for a symbol (from orders cache). Returns { orderId, quantity } or null.
+function findExistingStopLimitSellForSymbol(symbol) {
+  const normalized = (symbol || '').toUpperCase();
+  for (const [oid, order] of ordersCache.entries()) {
+    if (!order?.Legs?.length || !isActiveOrderStatus(order.Status)) continue;
+    const ot = (order.OrderType || '').toUpperCase();
+    if (ot !== 'STOPLIMIT' && ot !== 'STOP_LIMIT') continue;
+    const leg = order.Legs[0];
+    const legSymbol = (leg.Symbol || '').toUpperCase();
+    const side = (leg.BuyOrSell || '').toUpperCase();
+    if (legSymbol === normalized && side === 'SELL') {
+      const qty = parseInt(leg.QuantityRemaining || leg.QuantityOrdered || '0', 10) || 0;
+      return { orderId: oid, quantity: qty };
+    }
+  }
+  return null;
+}
+
+// Create a SELL StopLimit order. limit_price = stop_price - 0.05 per Sections Bot /ordenes.
+async function createStopLimitSellOrder(symbol, quantity, stopPrice) {
+  const limitPrice = Math.max(0, Number(stopPrice) - 0.05);
+  const body = {
+    symbol: (symbol || '').toUpperCase(),
+    side: 'SELL',
+    order_type: 'StopLimit',
+    quantity: Math.floor(Number(quantity)) || 0,
+    stop_price: Number(stopPrice),
+    limit_price: limitPrice
+  };
+  const resp = await fetch(SECTIONS_BOT_ORDER_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  const text = await resp.text().catch(() => '');
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { }
+  if (!resp.ok) {
+    console.error(`❌ Create StopLimit SELL failed for ${symbol}:`, resp.status, data || text);
+    return { success: false, error: data?.message || data?.detail || String(resp.status) };
+  }
+  console.log(`✅ StopLimit SELL created for ${symbol} qty=${body.quantity} stop=${body.stop_price} limit=${body.limit_price}`);
+  return { success: true, data };
+}
+
+// Modify order quantity via PUT /order (Sections Bot Modificar Orden).
+async function modifyOrderQuantity(orderId, newQuantity) {
+  const body = { order_id: String(orderId), quantity: Math.floor(Number(newQuantity)) || 0 };
+  const resp = await fetch(SECTIONS_BOT_ORDER_URL, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  const text = await resp.text().catch(() => '');
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { }
+  if (!resp.ok) {
+    console.error(`❌ Modify order ${orderId} quantity failed:`, resp.status, data || text);
+    return { success: false, error: data?.message || data?.detail || String(resp.status) };
+  }
+  console.log(`✅ Order ${orderId} quantity updated to ${body.quantity}`);
+  return { success: true, data };
+}
+
+// When a tracked manual BUY order reaches FLL/FIL: create new StopLimit SELL or add to existing.
+async function handleManualBuyFilled(orderId, order, pending) {
+  const symbol = (pending.symbol || (order.Legs?.[0]?.Symbol || '')).toString().toUpperCase();
+  const leg = order.Legs && order.Legs[0] ? order.Legs[0] : null;
+  const quantity = Math.floor(Number(pending.quantity || leg?.ExecQuantity || leg?.QuantityOrdered || 0)) || 0;
+  const fillPrice = parseFloat(order.FilledPrice || order.LimitPrice || leg?.AveragePrice || pending.limitPrice || 0) || 0;
+  if (!symbol || quantity <= 0) {
+    console.warn(`⚠️ handleManualBuyFilled: skip ${orderId} symbol=${symbol} qty=${quantity}`);
+    return;
+  }
+  const existing = findExistingStopLimitSellForSymbol(symbol);
+  if (!existing) {
+    await createStopLimitSellOrder(symbol, quantity, fillPrice);
+  } else {
+    const newQty = existing.quantity + quantity;
+    await modifyOrderQuantity(existing.orderId, newQty);
+  }
+}
+
 // Helper function to get active SELL orders for a symbol from orders websocket
 // Analyzes the orders websocket stream to find active sell orders based on active statuses
 async function getActiveSellOrdersFromWebSocket(symbol) {
@@ -3922,6 +4030,33 @@ async function deleteAllSellOrdersForSymbol(symbol) {
     return { success: false, error: e.message, deleted: 0, failed: 0, results: [] };
   }
 }
+
+// Get order status by order_id (for manual buy tracking: ACK, DON, FLL, REJ)
+app.get('/api/orders/:orderId/status', requireAuth, (req, res) => {
+  try {
+    const orderId = (req.params.orderId || '').trim();
+    if (!orderId) return res.status(400).json({ success: false, error: 'Missing order ID' });
+    const cached = ordersCache.get(orderId);
+    if (cached) {
+      const symbol = cached.Legs?.[0]?.Symbol || null;
+      return res.json({
+        success: true,
+        data: { orderId, status: cached.Status || null, symbol, tracked: false }
+      });
+    }
+    const pending = pendingManualBuyOrders.get(orderId);
+    if (pending) {
+      return res.json({
+        success: true,
+        data: { orderId, status: 'PENDING', symbol: pending.symbol, quantity: pending.quantity, tracked: true }
+      });
+    }
+    return res.status(404).json({ success: false, error: 'Order not found', data: { orderId } });
+  } catch (e) {
+    console.error('Error getting order status:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
 
 // Delete order endpoint - cancels an order by order_id
 // According to Sections Bot API: DELETE /order/{order_id}

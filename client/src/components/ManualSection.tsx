@@ -96,6 +96,9 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
   const [buyQuantities, setBuyQuantities] = useState<Record<string, number>>({});
   const [editingQuantity, setEditingQuantity] = useState<string | null>(null);
   const [tempQuantity, setTempQuantity] = useState<Record<string, string>>({});
+  const [lastOrderIdBySymbol, setLastOrderIdBySymbol] = useState<Record<string, string>>({});
+  const [orderStatusBySymbol, setOrderStatusBySymbol] = useState<Record<string, string>>({});
+  const orderPollRef = useRef<Record<string, { orderId: string; until: number }>>({});
 
   useEffect(() => {
     // Initial load of buys enabled status
@@ -160,6 +163,33 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
       wsRef.current?.close();
     };
   }, []);
+
+  // Poll order status (ACK/DON/FLL/REJ) for recently sent manual buys
+  useEffect(() => {
+    const terminal = new Set(['FLL', 'FIL', 'REJ']);
+    const syms = Object.keys(orderPollRef.current);
+    if (syms.length === 0) return;
+    const id = setInterval(async () => {
+      const now = Date.now();
+      for (const sym of [...syms]) {
+        const ent = orderPollRef.current[sym];
+        if (!ent || now > ent.until) {
+          delete orderPollRef.current[sym];
+          continue;
+        }
+        try {
+          const r = await fetchWithAuth(`${API_BASE_URL}/orders/${encodeURIComponent(ent.orderId)}/status`);
+          const j = await r.json().catch(() => ({}));
+          const status = (j?.data?.status ?? '').toUpperCase();
+          if (status) setOrderStatusBySymbol(prev => ({ ...prev, [sym]: status }));
+          if (terminal.has(status)) delete orderPollRef.current[sym];
+        } catch {
+          /* ignore */
+        }
+      }
+    }, 2000);
+    return () => clearInterval(id);
+  }, [lastOrderIdBySymbol, fetchWithAuth]);
 
   const formatNumber = (num: number, decimals = 2) => num.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 
@@ -228,9 +258,15 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
       if (data?.success) {
         const quantity = data.data?.quantity || 'N/A';
         const limitPrice = data.data?.limitPrice ? `$${parseFloat(data.data.limitPrice).toFixed(2)}` : 'N/A';
-        console.log(`✅ Buy signal sent for ${cleanSymbol}:`, data.data?.notifyStatus);
-        addNotification(`Buy order sent successfully for ${quantity} ${cleanSymbol} at ${limitPrice}`, 'success');
+        const orderId = data.data?.orderId ?? null;
+        console.log(`✅ Buy signal sent for ${cleanSymbol}:`, data.data?.notifyStatus, orderId ? `orderId=${orderId}` : '');
+        addNotification(`Buy order sent for ${quantity} ${cleanSymbol} at ${limitPrice}${orderId ? ` · Order ${String(orderId).slice(0, 8)}…` : ''}`, 'success');
         setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'success' }));
+        if (orderId) {
+          setLastOrderIdBySymbol(prev => ({ ...prev, [cleanSymbol]: String(orderId) }));
+          setOrderStatusBySymbol(prev => ({ ...prev, [cleanSymbol]: 'PENDING' }));
+          orderPollRef.current[cleanSymbol] = { orderId: String(orderId), until: Date.now() + 90000 };
+        }
         // Clear status after 3 seconds
         setTimeout(() => {
           setBuyStatuses(prev => {
@@ -482,20 +518,30 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                               buttonClass += ' bg-[#4ade80] text-[#14130e] hover:bg-[#22c55e]';
                             }
                             
+                            const orderId = lastOrderIdBySymbol[cleanSymbol];
+                            const status = orderStatusBySymbol[cleanSymbol];
+                            const statusHint = status === 'ACK' ? 'Received' : status === 'DON' ? 'Queued' : status === 'FLL' || status === 'FIL' ? 'Filled' : status === 'REJ' ? 'Rejected' : status === 'PENDING' ? '…' : '';
                             return (
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (!isDisabled) {
-                                    handleBuyClick(symbolVal);
-                                  }
-                                }}
-                                disabled={isDisabled}
-                                className={buttonClass}
-                                title={buttonTitle}
-                              >
-                                {buttonText}
-                              </button>
+                              <div className="flex flex-col items-center gap-0.5">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (!isDisabled) {
+                                      handleBuyClick(symbolVal);
+                                    }
+                                  }}
+                                  disabled={isDisabled}
+                                  className={buttonClass}
+                                  title={buttonTitle}
+                                >
+                                  {buttonText}
+                                </button>
+                                {orderId && (
+                                  <span className="text-[9px] text-[#808080]" title={`Order ${orderId} · ${status || '—'}`}>
+                                    {statusHint || status || '—'}
+                                  </span>
+                                )}
+                              </div>
                             );
                           })()}
                           
