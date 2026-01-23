@@ -2923,7 +2923,6 @@ function connectPositionsWebSocket() {
           console.log(`📊 Position removed from cache: ${symbol}`);
         }
         
-        }
       } catch (err) {
         console.error('⚠️ Error parsing positions WebSocket message:', err.message);
       }
