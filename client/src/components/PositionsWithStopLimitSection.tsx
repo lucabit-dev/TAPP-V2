@@ -31,31 +31,7 @@ interface Position {
   MarkToMarketPrice: string;
 }
 
-interface StopLimitV2Snapshot {
-  symbol: string;
-  groupKey: string;
-  groupLabel: string;
-  avgPrice: number;
-  quantity: number;
-  stageIndex: number;
-  stageLabel: string;
-  stageDescription: string;
-  nextStageLabel: string | null;
-  nextTrigger: number | null;
-  stopPrice: number | null;
-  limitPrice: number | null;
-  orderId: string | null;
-  orderStatus: string | null;
-  unrealizedQty: number | null;
-  progress: number | null;
-  status: string;
-  statusLabel: string;
-  createdAt: number | null;
-  updatedAt: number | null;
-}
-
 interface MergedPosition extends Position {
-  stopLimit?: StopLimitV2Snapshot;
 }
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
@@ -64,7 +40,6 @@ const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
 const PositionsWithStopLimitSection: React.FC = () => {
   const { fetchWithAuth } = useAuth();
   const [positions, setPositions] = useState<Map<string, Position>>(new Map());
-  const [stopLimitData, setStopLimitData] = useState<Map<string, StopLimitV2Snapshot>>(new Map());
   const [isConnected, setIsConnected] = useState(false);
   const token = localStorage.getItem('auth_token');
   const [loading, setLoading] = useState(true);
@@ -94,27 +69,6 @@ const PositionsWithStopLimitSection: React.FC = () => {
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const connectionTimeoutRef = useRef<number | null>(null);
-  const stopLimitIntervalRef = useRef<number | null>(null);
-
-  // Fetch StopLimit V2 snapshot
-  const fetchStopLimitSnapshot = useCallback(async () => {
-    try {
-      const response = await fetchWithAuth(`${API_BASE_URL}/stoplimit/v2/snapshot`);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-      const data = await response.json();
-      if (data.success && data.data) {
-        const snapshotMap = new Map<string, StopLimitV2Snapshot>();
-        for (const item of data.data) {
-          snapshotMap.set(item.symbol.toUpperCase(), item);
-        }
-        setStopLimitData(snapshotMap);
-      }
-    } catch (err: any) {
-      console.error('Error fetching StopLimit V2 snapshot:', err);
-    }
-  }, [fetchWithAuth]);
 
   // WebSocket connection for positions
   const connectWebSocket = useCallback(() => {
@@ -291,41 +245,28 @@ const PositionsWithStopLimitSection: React.FC = () => {
     reconnectAttemptsRef.current = 0;
   }, []);
 
-  // Merge positions with StopLimit data
+  // Merge positions
   const mergedPositions = useMemo(() => {
     const merged: MergedPosition[] = [];
     
     for (const position of positions.values()) {
-      const symbol = position.Symbol.toUpperCase();
-      const stopLimit = stopLimitData.get(symbol);
-      
       merged.push({
-        ...position,
-        stopLimit
+        ...position
       });
     }
     
     // Sort by symbol
     return merged.sort((a, b) => a.Symbol.localeCompare(b.Symbol));
-  }, [positions, stopLimitData]);
+  }, [positions]);
 
   // Auto-connect on mount
   useEffect(() => {
     connectWebSocket();
-    fetchStopLimitSnapshot();
-    
-    // Start polling StopLimit snapshot every second
-    stopLimitIntervalRef.current = window.setInterval(() => {
-      fetchStopLimitSnapshot();
-    }, 1000);
     
     return () => {
       disconnectWebSocket();
-      if (stopLimitIntervalRef.current) {
-        clearInterval(stopLimitIntervalRef.current);
-      }
     };
-  }, [connectWebSocket, disconnectWebSocket, fetchStopLimitSnapshot]);
+  }, [connectWebSocket, disconnectWebSocket]);
 
   const addNotification = (message: string, type: 'success' | 'error' | 'warning' | 'info' = 'info', duration?: number) => {
     const id = Date.now().toString() + Math.random().toString(36).substr(2, 9);
@@ -572,8 +513,6 @@ const PositionsWithStopLimitSection: React.FC = () => {
     });
   };
 
-  const activeWithStopLimit = useMemo(() => {
-    return mergedPositions.filter(p => p.stopLimit && p.stopLimit.status === 'active').length;
   }, [mergedPositions]);
 
   return (
@@ -617,18 +556,14 @@ const PositionsWithStopLimitSection: React.FC = () => {
               </svg>
             </div>
             <div>
-              <h2 className="text-sm font-bold text-[#eae9e9] tracking-wider uppercase">Positions & StopLimit</h2>
-              <p className="text-xs text-[#808080] mt-0.5 font-light tracking-wide">Active Positions with Automated StopLimit Tracking</p>
+              <h2 className="text-sm font-bold text-[#eae9e9] tracking-wider uppercase">Positions</h2>
+              <p className="text-xs text-[#808080] mt-0.5 font-light tracking-wide">Active Positions</p>
             </div>
           </div>
           <div className="flex items-center space-x-3">
             <div className="px-3 py-1 bg-[#1a1915] border border-[#2a2820] rounded-md flex items-center space-x-2">
               <span className="text-[10px] text-[#808080] uppercase tracking-wider">Positions</span>
               <span className="text-xs font-mono font-bold text-[#eae9e9]">{mergedPositions.length}</span>
-            </div>
-            <div className="px-3 py-1 bg-[#1a1915] border border-[#2a2820] rounded-md flex items-center space-x-2">
-              <span className="text-[10px] text-[#808080] uppercase tracking-wider">With StopLimit</span>
-              <span className="text-xs font-mono font-bold text-[#4ade80]">{activeWithStopLimit}</span>
             </div>
             <div className="w-px h-6 bg-[#2a2820] mx-2"></div>
             <div className="flex items-center space-x-2">
@@ -771,7 +706,6 @@ const PositionsWithStopLimitSection: React.FC = () => {
                   const unrealizedPL = parseFloat(position.UnrealizedProfitLoss);
                   const unrealizedPLQty = parseFloat(position.UnrealizedProfitLossQty || '0');
                   const todaysPL = parseFloat(position.TodaysProfitLoss);
-                  const stopLimit = position.stopLimit;
                   
                   return (
                     <div
@@ -783,17 +717,7 @@ const PositionsWithStopLimitSection: React.FC = () => {
                       <div className="grid grid-cols-10 gap-4 items-center text-sm">
                         {/* Symbol */}
                         <div>
-                          <div className="flex items-center space-x-2">
-                            {stopLimit && stopLimit.status === 'active' && (
-                              <div className="w-1 h-6 rounded-full bg-[#4ade80]"></div>
-                            )}
-                            <div>
-                              <div className="font-semibold text-[#eae9e9]">{position.Symbol}</div>
-                              {stopLimit && (
-                                <div className="text-[10px] text-[#808080] uppercase tracking-wider">{stopLimit.groupLabel}</div>
-                              )}
-                            </div>
-                          </div>
+                          <div className="font-semibold text-[#eae9e9]">{position.Symbol}</div>
                         </div>
 
                         {/* Quantity */}
@@ -809,15 +733,6 @@ const PositionsWithStopLimitSection: React.FC = () => {
                         {/* Last */}
                         <div className="text-right">
                           <div className="text-[#eae9e9] font-mono text-xs">{formatPrice(position.Last)}</div>
-                        </div>
-
-                        {/* Limit Price */}
-                        <div className="text-right">
-                          {stopLimit && stopLimit.limitPrice !== null ? (
-                            <div className="font-mono text-[#facc15]/80 text-xs">{formatCurrency(stopLimit.limitPrice)}</div>
-                          ) : (
-                            <div className="text-[#2a2820] text-xs">-</div>
-                          )}
                         </div>
 
                         {/* P&L (Quantity) */}
@@ -854,42 +769,6 @@ const PositionsWithStopLimitSection: React.FC = () => {
                               'Sell'
                             )}
                           </button>
-                        </div>
-
-                        {/* Stage & Progress */}
-                        <div className="text-center">
-                          {stopLimit && stopLimit.status === 'active' ? (
-                            <div className="flex flex-row items-center justify-center gap-2 bg-[#1a1915] border border-[#2a2820]/40 rounded px-2 py-1 mx-auto">
-                              {/* Current Stage */}
-                              <div className="flex flex-col items-start min-w-0">
-                                <span className="font-bold text-[#eae9e9] text-xs leading-tight">{stopLimit.stageLabel}</span>
-                                <span className="text-[9px] text-[#808080] leading-tight truncate max-w-[100px]">{stopLimit.stageDescription}</span>
-                              </div>
-                              
-                              {/* Next Stage */}
-                              {stopLimit.nextStageLabel ? (
-                                <>
-                                  <div className="w-px h-4 bg-[#2a2820]/40"></div>
-                                  <div className="flex items-center gap-1.5 min-w-0">
-                                    <span className="text-[9px] text-[#808080] uppercase tracking-wide whitespace-nowrap">Next:</span>
-                                    <span className="text-[10px] text-[#eae9e9] font-semibold leading-tight truncate max-w-[80px]">{stopLimit.nextStageLabel}</span>
-                                    {stopLimit.nextTrigger !== null && (
-                                      <span className="text-[9px] text-[#4ade80] bg-[#4ade80]/20 px-1 py-0.5 rounded font-medium whitespace-nowrap">
-                                        +{(stopLimit.nextTrigger * 100).toFixed(0)}%
-                                      </span>
-                                    )}
-                                  </div>
-                                </>
-                              ) : (
-                                <>
-                                  <div className="w-px h-4 bg-[#2a2820]/40"></div>
-                                  <span className="text-[9px] text-[#4ade80] uppercase tracking-wider font-bold whitespace-nowrap">Max Stage</span>
-                                </>
-                              )}
-                            </div>
-                          ) : (
-                            <div className="text-[#2a2820] text-xs">-</div>
-                          )}
                         </div>
 
                         {/* Time */}
