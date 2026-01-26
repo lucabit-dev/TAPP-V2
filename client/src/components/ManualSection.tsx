@@ -249,8 +249,8 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
         addNotification(`Buy order sent successfully for ${quantity} ${cleanSymbol} at ${limitPrice}`, 'success');
         setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'success' }));
         
-        // Start 5-second cooldown for all BUY buttons
-        setBuyCooldown(5);
+        // Start 7-second cooldown for all BUY buttons
+        setBuyCooldown(7);
         
         // Clear status after 3 seconds
         setTimeout(() => {
