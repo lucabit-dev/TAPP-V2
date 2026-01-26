@@ -123,7 +123,7 @@ function App() {
   const [newValidAlertsCount, setNewValidAlertsCount] = useState(0);
   const [conditionStats, setConditionStats] = useState<any>(null);
   const [showStats, setShowStats] = useState(false);
-  const [selectedTab, setSelectedTab] = useState<'all' | 'valid' | 'filtered' | 'dashboard' | 'config-float' | 'listas-float-raw' | 'manual' | 'manual-non-qualified' | 'buy-list' | 'positions' | 'orders' | 'l2' | 'charts'>('manual');
+  const [selectedTab, setSelectedTab] = useState<'all' | 'valid' | 'filtered' | 'dashboard' | 'config-float' | 'listas-float-raw' | 'manual' | 'manual-non-qualified' | 'buy-list' | 'positions' | 'orders' | 'stoplimit' | 'l2' | 'charts'>('manual');
   const [alertsCollapsed, setAlertsCollapsed] = useState(true); // Start collapsed
   const [listsCollapsed, setListsCollapsed] = useState(false); // Start expanded by default for Lists
   const [manualCollapsed, setManualCollapsed] = useState(false); // Start expanded by default for Manual
@@ -698,6 +698,7 @@ function App() {
                     { key: 'manual-non-qualified', label: 'NON-QUALIFIED', count: 0 },
                     { key: 'positions', label: 'Positions', count: 0 },
                     { key: 'orders', label: 'Orders', count: 0 },
+                    { key: 'stoplimit', label: 'Stop Limit', count: 0 },
                     { key: 'l2', label: 'L2', count: 0 },
                     { key: 'charts', label: 'Charts', count: 0 },
                   ].map(tab => (
@@ -1116,7 +1117,7 @@ function App() {
           {selectedTab === 'orders' && <OrdersSection />}
           {selectedTab === 'l2' && <L2Section />}
           {selectedTab === 'charts' && <ChartsSection />}
-          {!['dashboard', 'config-float', 'listas-float-raw', 'buy-list', 'positions', 'orders', 'l2', 'charts', 'sold', 'manual', 'manual-non-qualified'].includes(selectedTab) && (
+          {!['dashboard', 'config-float', 'listas-float-raw', 'buy-list', 'positions', 'orders', 'stoplimit', 'l2', 'charts', 'sold', 'manual', 'manual-non-qualified'].includes(selectedTab) && (
             <div className="h-full flex">
             {/* Main Alerts Content */}
             <div className="flex-1 flex flex-col">
