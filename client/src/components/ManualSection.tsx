@@ -96,6 +96,7 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
   const [buyQuantities, setBuyQuantities] = useState<Record<string, number>>({});
   const [editingQuantity, setEditingQuantity] = useState<string | null>(null);
   const [tempQuantity, setTempQuantity] = useState<Record<string, string>>({});
+  const [buyCooldown, setBuyCooldown] = useState<number>(0); // Cooldown in seconds
 
   useEffect(() => {
     // Initial load of buys enabled status
@@ -122,6 +123,22 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
     };
     loadBuyQuantities();
   }, []);
+
+  // Buy cooldown countdown effect
+  useEffect(() => {
+    if (buyCooldown <= 0) return;
+    
+    const interval = setInterval(() => {
+      setBuyCooldown(prev => {
+        if (prev <= 1) {
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    
+    return () => clearInterval(interval);
+  }, [buyCooldown]);
 
   useEffect(() => {
     const connect = () => {
@@ -231,6 +248,10 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
         console.log(`✅ Buy signal sent for ${cleanSymbol}:`, data.data?.notifyStatus);
         addNotification(`Buy order sent successfully for ${quantity} ${cleanSymbol} at ${limitPrice}`, 'success');
         setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'success' }));
+        
+        // Start 5-second cooldown for all BUY buttons
+        setBuyCooldown(5);
+        
         // Clear status after 3 seconds
         setTimeout(() => {
           setBuyStatuses(prev => {
@@ -459,7 +480,8 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                             const cleanSymbol = String(symbolVal).trim().toUpperCase();
                             const isBuying = buyingSymbols.has(cleanSymbol);
                             const status = buyStatuses[cleanSymbol];
-                            const isDisabled = isBuying;
+                            const isCooldownActive = buyCooldown > 0;
+                            const isDisabled = isBuying || isCooldownActive;
                             
                             let buttonClass = 'px-2 py-0.5 text-[11px] font-semibold rounded transition-colors';
                             let buttonText = 'BUY';
@@ -469,6 +491,10 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                               buttonClass += ' bg-[#2a2820] cursor-not-allowed opacity-50';
                               buttonText = '...';
                               buttonTitle = `Sending buy signal for ${symbolVal}...`;
+                            } else if (isCooldownActive) {
+                              buttonClass += ' bg-[#2a2820] cursor-not-allowed opacity-50';
+                              buttonText = `${buyCooldown}s`;
+                              buttonTitle = `Buy cooldown active. Wait ${buyCooldown} second${buyCooldown !== 1 ? 's' : ''} before buying again.`;
                             } else if (status === 'success') {
                               buttonClass += ' bg-[#4ade80] text-[#14130e]';
                               buttonText = '✓';
