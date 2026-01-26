@@ -3342,34 +3342,10 @@ app.post('/api/buys/test', async (req, res) => {
         console.log(`📌 [DEBUG] Full response data:`, JSON.stringify(responseData, null, 2));
         console.log(`📌 [DEBUG] Total tracked manual buys: ${pendingManualBuyOrders.size}`);
         
-        // Check if order is instantly filled (FLL status in response)
-        const responseStatus = (responseData.status || responseData.Status || '').toUpperCase();
-        if (responseStatus === 'FLL' || responseStatus === 'FIL') {
-          console.log(`⚡ [DEBUG] Buy order ${oid} was instantly filled (FLL status in response)`);
-          // Create order object from response for handleManualBuyFilled
-          const instantOrder = {
-            OrderID: oid,
-            Status: responseStatus,
-            OrderType: 'Limit',
-            FilledPrice: responseData.filled_price || responseData.FilledPrice || currentPrice,
-            LimitPrice: currentPrice,
-            Legs: [{
-              Symbol: symbol,
-              BuyOrSell: 'BUY',
-              QuantityOrdered: quantity,
-              ExecQuantity: quantity,
-              AveragePrice: responseData.filled_price || responseData.FilledPrice || currentPrice
-            }]
-          };
-          // Handle instant fill immediately - but mark as in progress to prevent duplicate
-          if (!stopLimitCreationInProgress.has(oid)) {
-            handleManualBuyFilled(oid, instantOrder, { symbol, quantity, limitPrice: currentPrice }).catch(err => {
-              console.error(`❌ [DEBUG] Error handling instant fill for ${oid}:`, err);
-            });
-          } else {
-            console.log(`⏸️ [DEBUG] StopLimit creation already in progress for instant fill ${oid}, skipping`);
-          }
-        }
+        // NOTE: We do NOT create StopLimit here even if response shows FLL status
+        // The API response status might be stale or incorrect. We wait for WebSocket
+        // to confirm FLL status before creating StopLimit to ensure accuracy.
+        // The WebSocket handler will call handleManualBuyFilled when it receives FLL status.
       } else if (orderIdFromApi == null) {
         console.warn(`⚠️ [DEBUG] Buy order sent for ${symbol} but no order_id in response. Response:`, JSON.stringify(responseData, null, 2));
       }
@@ -4048,9 +4024,17 @@ async function handleManualBuyFilled(orderId, order, pending) {
   const leg = order.Legs && order.Legs[0] ? order.Legs[0] : null;
   const quantity = Math.floor(Number(pending.quantity || leg?.ExecQuantity || leg?.QuantityOrdered || 0)) || 0;
   
-  // Use FilledPrice if available, otherwise use LimitPrice from buy order (most consistent)
-  // Don't use leg?.AveragePrice as it might be stale or different
-  const fillPrice = parseFloat(order.FilledPrice || pending.limitPrice || order.LimitPrice || 0) || 0;
+  // IMPORTANT: Use the buy order's limitPrice (pending.limitPrice) as the stop price
+  // This is the price at which we bought, so we want to set stop at this price
+  // The FilledPrice might be slightly different, but we use limitPrice for consistency
+  // StopLimit stop_price = buy limit price, limit_price = stop_price - 0.05
+  const fillPrice = parseFloat(pending.limitPrice || order.FilledPrice || order.LimitPrice || 0) || 0;
+  
+  // Validate fillPrice - must be positive
+  if (fillPrice <= 0) {
+    console.error(`❌ [DEBUG] handleManualBuyFilled: Invalid fillPrice ${fillPrice} for ${symbol}. Order:`, JSON.stringify(order, null, 2), `Pending:`, JSON.stringify(pending, null, 2));
+    return;
+  }
   
   console.log(`🎯 [DEBUG] Extracted values:`, {
     symbol,
@@ -4060,7 +4044,9 @@ async function handleManualBuyFilled(orderId, order, pending) {
     limitPrice: order.LimitPrice,
     pendingLimitPrice: pending.limitPrice,
     legExecQuantity: leg?.ExecQuantity,
-    legQuantityOrdered: leg?.QuantityOrdered
+    legQuantityOrdered: leg?.QuantityOrdered,
+    calculatedStopPrice: fillPrice,
+    calculatedLimitPrice: Math.max(0, fillPrice - 0.05)
   });
   
   if (!symbol || quantity <= 0) {
