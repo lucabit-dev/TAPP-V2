@@ -563,6 +563,84 @@ function clearAllStockColorCache() {
   console.log(`🗑️ Cleared all stock color cache`);
 }
 
+// Periodic cleanup of StopLimit tracking maps to remove stale entries
+// Runs every 2 minutes to keep tracking maps in sync with actual order state
+setInterval(() => {
+  try {
+    let cleanedTracking = 0;
+    let cleanedPending = 0;
+    
+    // Clean up tracking map - remove entries where order is no longer active
+    for (const [symbol, orderId] of stopLimitOrderIdsBySymbol.entries()) {
+      const order = ordersCache.get(orderId);
+      if (!order) {
+        // Order not in cache - might be old, remove it
+        stopLimitOrderIdsBySymbol.delete(symbol);
+        cleanedTracking++;
+        console.log(`🧹 [CLEANUP] Removed stale tracking entry for ${symbol} (order ${orderId} not in cache)`);
+      } else {
+        const status = (order.Status || '').toUpperCase();
+        const isActive = isActiveOrderStatus(status);
+        const isTerminal = ['FIL', 'FLL', 'CAN', 'EXP', 'REJ'].includes(status);
+        if (isTerminal || !isActive) {
+          // Order is terminal or not active, remove from tracking
+          stopLimitOrderIdsBySymbol.delete(symbol);
+          cleanedTracking++;
+          console.log(`🧹 [CLEANUP] Removed tracking entry for ${symbol} (order ${orderId} status: ${status})`);
+        } else {
+          // Verify order is actually a StopLimit SELL for this symbol
+          const leg = order.Legs?.[0];
+          const legSymbol = (leg?.Symbol || '').toUpperCase();
+          const legSide = (leg?.BuyOrSell || '').toUpperCase();
+          const orderType = (order.OrderType || '').toUpperCase();
+          if (legSymbol !== symbol || legSide !== 'SELL' || (orderType !== 'STOPLIMIT' && orderType !== 'STOP_LIMIT')) {
+            // Mismatch - remove stale entry
+            stopLimitOrderIdsBySymbol.delete(symbol);
+            cleanedTracking++;
+            console.log(`🧹 [CLEANUP] Removed mismatched tracking entry for ${symbol} (order ${orderId} is ${legSymbol}/${legSide}/${orderType})`);
+          }
+        }
+      }
+    }
+    
+    // Clean up pending map - remove entries where order is terminal or not in cache
+    for (const [symbol, orderId] of pendingStopLimitOrderIds.entries()) {
+      const order = ordersCache.get(orderId);
+      if (!order) {
+        // Order not in cache - might be old, but wait a bit longer for pending orders
+        // Only remove if it's been more than 2 minutes (checked by timeout in createStopLimitSellOrder)
+        // For now, just verify it's not in tracking (which means it was ACK'd)
+        if (stopLimitOrderIdsBySymbol.get(symbol) === orderId) {
+          // Order is in tracking, remove from pending
+          pendingStopLimitOrderIds.delete(symbol);
+          cleanedPending++;
+          console.log(`🧹 [CLEANUP] Removed pending entry for ${symbol} (order ${orderId} moved to tracking)`);
+        }
+      } else {
+        const status = (order.Status || '').toUpperCase();
+        const isTerminal = ['FIL', 'FLL', 'CAN', 'EXP', 'REJ'].includes(status);
+        if (isTerminal) {
+          // Order is terminal, remove from pending
+          pendingStopLimitOrderIds.delete(symbol);
+          cleanedPending++;
+          console.log(`🧹 [CLEANUP] Removed pending entry for ${symbol} (order ${orderId} status: ${status})`);
+        } else if (status === 'ACK' && stopLimitOrderIdsBySymbol.get(symbol) === orderId) {
+          // Order is ACK'd and in tracking, remove from pending
+          pendingStopLimitOrderIds.delete(symbol);
+          cleanedPending++;
+          console.log(`🧹 [CLEANUP] Removed pending entry for ${symbol} (order ${orderId} ACK'd and in tracking)`);
+        }
+      }
+    }
+    
+    if (cleanedTracking > 0 || cleanedPending > 0) {
+      console.log(`🧹 [CLEANUP] Cleaned ${cleanedTracking} tracking entries and ${cleanedPending} pending entries`);
+    }
+  } catch (err) {
+    console.error(`❌ [CLEANUP] Error in StopLimit cleanup:`, err);
+  }
+}, 120000); // Every 2 minutes
+
 // Periodic cache cleanup to remove expired entries (less frequent)
 setInterval(() => {
   const now = Date.now();
@@ -3075,39 +3153,48 @@ function connectOrdersWebSocket() {
           if (isStopLimit && isSell && status === 'ACK') {
             const legSymbol = (order.Legs?.[0]?.Symbol || '').toUpperCase();
             if (legSymbol) {
-              // CRITICAL: Immediately save to tracking map when ACK'd
-              // This "locks" the symbol as tracked and prevents duplicate creation
-              // Works for multi-user scenarios since this map is shared globally
-              stopLimitOrderIdsBySymbol.set(legSymbol, orderId);
-              
               // Check if this order ID was in pending (temporarily saved)
               const pendingOrderId = pendingStopLimitOrderIds.get(legSymbol);
               if (pendingOrderId === orderId) {
-                // This is the order we created - remove from pending
+                // This is the order we created - move from pending to permanent tracking
                 pendingStopLimitOrderIds.delete(legSymbol);
-                console.log(`✅ [DEBUG] StopLimit order ${orderId} ACK'd for ${legSymbol} - moved from pending to tracking map (LOCKED)`);
+                console.log(`✅ [DEBUG] StopLimit order ${orderId} ACK'd for ${legSymbol} - moved from pending to tracking map`);
               } else {
-                console.log(`✅ [DEBUG] StopLimit order ${orderId} ACK'd for ${legSymbol} - saved to tracking map (LOCKED)`);
+                console.log(`✅ [DEBUG] StopLimit order ${orderId} ACK'd for ${legSymbol} - saved to tracking map`);
               }
-              
-              // Log that symbol is now locked/tracked
-              console.log(`🔒 [DEBUG] Symbol ${legSymbol} is now LOCKED with StopLimit order ${orderId}. No more StopLimit orders will be created for this symbol.`);
+              stopLimitOrderIdsBySymbol.set(legSymbol, orderId);
             }
           }
           
-          // Clean up StopLimit tracking when order is cancelled or filled
+          // Clean up StopLimit tracking when order is cancelled, filled, or rejected
           if (isStopLimit && isSell && (status === 'CAN' || status === 'EXP' || status === 'FIL' || status === 'FLL' || status === 'REJ')) {
             const legSymbol = (order.Legs?.[0]?.Symbol || '').toUpperCase();
             if (legSymbol) {
               // Remove from permanent tracking map
-              if (stopLimitOrderIdsBySymbol.get(legSymbol) === orderId) {
+              const trackedOrderId = stopLimitOrderIdsBySymbol.get(legSymbol);
+              if (trackedOrderId === orderId) {
                 stopLimitOrderIdsBySymbol.delete(legSymbol);
                 console.log(`🗑️ [DEBUG] Removed StopLimit order ${orderId} from tracking for ${legSymbol} (status: ${status})`);
+              } else if (trackedOrderId && trackedOrderId !== orderId) {
+                // Different order ID in tracking - might be stale, verify it still exists
+                const trackedOrder = ordersCache.get(trackedOrderId);
+                if (!trackedOrder || !isActiveOrderStatus(trackedOrder.Status)) {
+                  console.log(`🧹 [DEBUG] Cleaning up stale StopLimit tracking for ${legSymbol} (old order ${trackedOrderId} no longer active)`);
+                  stopLimitOrderIdsBySymbol.delete(legSymbol);
+                }
               }
               // Remove from pending map
-              if (pendingStopLimitOrderIds.get(legSymbol) === orderId) {
+              const pendingOrderId = pendingStopLimitOrderIds.get(legSymbol);
+              if (pendingOrderId === orderId) {
                 pendingStopLimitOrderIds.delete(legSymbol);
                 console.log(`🗑️ [DEBUG] Removed pending StopLimit order ${orderId} for ${legSymbol} (status: ${status})`);
+              } else if (pendingOrderId && pendingOrderId !== orderId) {
+                // Different order ID in pending - might be stale, verify it still exists
+                const pendingOrder = ordersCache.get(pendingOrderId);
+                if (!pendingOrder || (!isActiveOrderStatus(pendingOrder.Status) && (pendingOrder.Status || '').toUpperCase() !== 'ACK')) {
+                  console.log(`🧹 [DEBUG] Cleaning up stale pending StopLimit for ${legSymbol} (old order ${pendingOrderId} no longer active)`);
+                  pendingStopLimitOrderIds.delete(legSymbol);
+                }
               }
             }
           }
@@ -3920,23 +4007,74 @@ async function deleteOrder(orderId) {
 
 const SECTIONS_BOT_ORDER_URL = 'https://sections-bot.inbitme.com/order';
 
-// Find existing active SELL StopLimit order for a symbol (from orders cache). Returns { orderId, quantity } or null.
+// Find existing active SELL StopLimit order for a symbol. Returns { orderId, quantity, order } or null.
+// This function searches tracking map → pending map → cache to catch orders in any state
 function findExistingStopLimitSellForSymbol(symbol) {
   const normalized = (symbol || '').toUpperCase();
   console.log(`🔍 [DEBUG] Searching for existing StopLimit SELL for ${normalized}...`);
   console.log(`🔍 [DEBUG] Orders cache size: ${ordersCache.size}`);
+  console.log(`🔍 [DEBUG] Tracking map has: ${stopLimitOrderIdsBySymbol.get(normalized) || 'none'}`);
+  console.log(`🔍 [DEBUG] Pending map has: ${pendingStopLimitOrderIds.get(normalized) || 'none'}`);
   
+  // First check tracking and pending maps - these are authoritative
+  const trackingOrderId = stopLimitOrderIdsBySymbol.get(normalized);
+  if (trackingOrderId) {
+    const trackingOrder = ordersCache.get(trackingOrderId);
+    if (trackingOrder) {
+      const leg = trackingOrder.Legs?.[0];
+      const legSymbol = (leg?.Symbol || '').toUpperCase();
+      const legSide = (leg?.BuyOrSell || '').toUpperCase();
+      if (legSymbol === normalized && legSide === 'SELL') {
+        const ot = (trackingOrder.OrderType || '').toUpperCase();
+        if (ot === 'STOPLIMIT' || ot === 'STOP_LIMIT') {
+          const qty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
+          const status = (trackingOrder.Status || '').toUpperCase();
+          console.log(`✅ [DEBUG] Found StopLimit in tracking map: ${trackingOrderId} (qty ${qty}, status ${status})`);
+          return { orderId: trackingOrderId, quantity: qty, order: trackingOrder };
+        }
+      }
+    }
+  }
+  
+  const pendingOrderId = pendingStopLimitOrderIds.get(normalized);
+  if (pendingOrderId) {
+    const pendingOrder = ordersCache.get(pendingOrderId);
+    if (pendingOrder) {
+      const leg = pendingOrder.Legs?.[0];
+      const legSymbol = (leg?.Symbol || '').toUpperCase();
+      const legSide = (leg?.BuyOrSell || '').toUpperCase();
+      if (legSymbol === normalized && legSide === 'SELL') {
+        const ot = (pendingOrder.OrderType || '').toUpperCase();
+        if (ot === 'STOPLIMIT' || ot === 'STOP_LIMIT') {
+          const qty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
+          const status = (pendingOrder.Status || '').toUpperCase();
+          console.log(`✅ [DEBUG] Found StopLimit in pending map: ${pendingOrderId} (qty ${qty}, status ${status})`);
+          return { orderId: pendingOrderId, quantity: qty, order: pendingOrder };
+        }
+      }
+    }
+  }
+  
+  // Then search cache - check ALL orders, not just active ones, to catch orders in transition
   for (const [oid, order] of ordersCache.entries()) {
-    if (!order?.Legs?.length || !isActiveOrderStatus(order.Status)) continue;
+    if (!order?.Legs?.length) continue;
     const ot = (order.OrderType || '').toUpperCase();
     if (ot !== 'STOPLIMIT' && ot !== 'STOP_LIMIT') continue;
+    
     const leg = order.Legs[0];
     const legSymbol = (leg.Symbol || '').toUpperCase();
     const side = (leg.BuyOrSell || '').toUpperCase();
     if (legSymbol === normalized && side === 'SELL') {
-      const qty = parseInt(leg.QuantityRemaining || leg.QuantityOrdered || '0', 10) || 0;
-      console.log(`✅ [DEBUG] Found existing StopLimit SELL: ${oid} for ${normalized} (qty ${qty}, status ${order.Status})`);
-      return { orderId: oid, quantity: qty };
+      const status = (order.Status || '').toUpperCase();
+      // Check if order is active OR pending (ACK, DON, etc.) - don't skip orders that might be transitioning
+      const isActive = isActiveOrderStatus(status);
+      const isPending = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(status);
+      
+      if (isActive || isPending) {
+        const qty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
+        console.log(`✅ [DEBUG] Found existing StopLimit SELL in cache: ${oid} for ${normalized} (qty ${qty}, status ${status})`);
+        return { orderId: oid, quantity: qty, order };
+      }
     }
   }
   console.log(`ℹ️ [DEBUG] No existing StopLimit SELL found for ${normalized}`);
@@ -4000,16 +4138,39 @@ async function createStopLimitSellOrder(symbol, quantity, buyPrice) {
   // However, save it temporarily to prevent duplicate creation
   const orderId = data?.order_id ?? data?.OrderID ?? data?.orderId ?? null;
   if (orderId) {
+    const orderIdStr = String(orderId);
+    // Check if there's already a pending order for this symbol (shouldn't happen, but be defensive)
+    const existingPending = pendingStopLimitOrderIds.get(normalizedSymbol);
+    if (existingPending && existingPending !== orderIdStr) {
+      console.warn(`⚠️ [DEBUG] Replacing existing pending StopLimit order ${existingPending} with new order ${orderIdStr} for ${normalizedSymbol}`);
+    }
     // Temporarily save to prevent duplicate creation while waiting for ACK
-    pendingStopLimitOrderIds.set(normalizedSymbol, String(orderId));
-    console.log(`📋 [DEBUG] StopLimit order created for ${normalizedSymbol}, order ID ${orderId} (temporarily saved, will move to tracking map when ACK'd)`);
-    // Remove from pending after 30 seconds if not ACK'd (cleanup)
+    pendingStopLimitOrderIds.set(normalizedSymbol, orderIdStr);
+    console.log(`📋 [DEBUG] StopLimit order created for ${normalizedSymbol}, order ID ${orderIdStr} (temporarily saved, will move to tracking map when ACK'd)`);
+    // Remove from pending after 60 seconds if not ACK'd (cleanup) - increased from 30s to handle slow ACKs
     setTimeout(() => {
-      if (pendingStopLimitOrderIds.get(normalizedSymbol) === String(orderId)) {
-        pendingStopLimitOrderIds.delete(normalizedSymbol);
-        console.log(`🧹 [DEBUG] Removed pending StopLimit order ID ${orderId} for ${normalizedSymbol} (not ACK'd within 30s)`);
+      const currentPending = pendingStopLimitOrderIds.get(normalizedSymbol);
+      if (currentPending === orderIdStr) {
+        // Check if order was ACK'd but not moved to tracking (edge case)
+        const inTracking = stopLimitOrderIdsBySymbol.get(normalizedSymbol);
+        if (!inTracking || inTracking !== orderIdStr) {
+          // Check cache to see if order exists and is active
+          const cachedOrder = ordersCache.get(orderIdStr);
+          if (!cachedOrder || !isActiveOrderStatus(cachedOrder.Status)) {
+            pendingStopLimitOrderIds.delete(normalizedSymbol);
+            console.log(`🧹 [DEBUG] Removed pending StopLimit order ID ${orderIdStr} for ${normalizedSymbol} (not ACK'd within 60s or not active)`);
+          } else {
+            // Order is active but not in tracking - move it there
+            console.log(`🔄 [DEBUG] Found active StopLimit ${orderIdStr} in cache but not in tracking. Moving to tracking map.`);
+            stopLimitOrderIdsBySymbol.set(normalizedSymbol, orderIdStr);
+            pendingStopLimitOrderIds.delete(normalizedSymbol);
+          }
+        } else {
+          // Order is in tracking, just clean up pending
+          pendingStopLimitOrderIds.delete(normalizedSymbol);
+        }
       }
-    }, 30000);
+    }, 60000);
   } else {
     console.warn(`⚠️ [DEBUG] StopLimit order created for ${normalizedSymbol} but no order_id in response:`, JSON.stringify(data, null, 2));
   }
@@ -4077,87 +4238,6 @@ async function handleManualBuyFilled(orderId, order, pending) {
   const leg = order.Legs && order.Legs[0] ? order.Legs[0] : null;
   const quantity = Math.floor(Number(pending.quantity || leg?.ExecQuantity || leg?.QuantityOrdered || 0)) || 0;
   
-  // CRITICAL: IMMEDIATE CHECK - If this symbol already has a tracked StopLimit order, update it instead of creating new
-  // This check happens FIRST before any other processing to prevent duplicate creation
-  // Works for multi-user scenarios since stopLimitOrderIdsBySymbol is shared globally
-  const immediatelyTrackedOrderId = stopLimitOrderIdsBySymbol.get(normalizedSymbol);
-  if (immediatelyTrackedOrderId) {
-    const immediatelyTrackedOrder = ordersCache.get(immediatelyTrackedOrderId);
-    if (immediatelyTrackedOrder) {
-      const trackedStatus = (immediatelyTrackedOrder.Status || '').toUpperCase();
-      // If order is active (ACK, DON, etc.) or pending (just created), update it
-      if (isActiveOrderStatus(trackedStatus) || trackedStatus === '' || !trackedStatus) {
-        console.log(`🔒 [DEBUG] Symbol ${normalizedSymbol} is ALREADY TRACKED with StopLimit order ${immediatelyTrackedOrderId} (status: ${trackedStatus}). Updating quantity instead of creating new.`);
-        const trackedLeg = immediatelyTrackedOrder.Legs?.[0];
-        const existingQty = parseInt(trackedLeg?.QuantityRemaining || trackedLeg?.QuantityOrdered || '0', 10) || 0;
-        const newQty = existingQty + quantity;
-        try {
-          const result = await modifyOrderQuantity(immediatelyTrackedOrderId, newQty);
-          console.log(`✅ [DEBUG] Updated existing tracked StopLimit order ${immediatelyTrackedOrderId} quantity to ${newQty}`);
-          // Ensure it stays in tracking map
-          stopLimitOrderIdsBySymbol.set(normalizedSymbol, immediatelyTrackedOrderId);
-          pendingStopLimitOrderIds.delete(normalizedSymbol);
-          return;
-        } catch (err) {
-          console.error(`❌ [DEBUG] Error updating tracked StopLimit order ${immediatelyTrackedOrderId}:`, err.message);
-          // If update fails, continue with normal flow (might need to create new if order was cancelled)
-        }
-      } else {
-        // Order exists but is not active (FLL, CAN, etc.) - remove from tracking and continue
-        console.log(`🗑️ [DEBUG] Tracked StopLimit order ${immediatelyTrackedOrderId} for ${normalizedSymbol} is not active (status: ${trackedStatus}). Removing from tracking.`);
-        stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
-      }
-    } else {
-      // Order ID in tracking but not in cache - might be stale, remove it
-      console.log(`🗑️ [DEBUG] Tracked StopLimit order ${immediatelyTrackedOrderId} for ${normalizedSymbol} not found in cache. Removing stale tracking.`);
-      stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
-    }
-  }
-  
-  // Also check pending map immediately
-  const immediatelyPendingOrderId = pendingStopLimitOrderIds.get(normalizedSymbol);
-  if (immediatelyPendingOrderId && !immediatelyTrackedOrderId) {
-    console.log(`⏸️ [DEBUG] Symbol ${normalizedSymbol} has pending StopLimit order ${immediatelyPendingOrderId}. Waiting for ACK...`);
-    // Wait a moment for ACK to arrive
-    for (let i = 0; i < 6; i++) {
-      await new Promise(resolve => setTimeout(resolve, 500));
-      const pendingOrder = ordersCache.get(immediatelyPendingOrderId);
-      if (pendingOrder) {
-        const pendingStatus = (pendingOrder.Status || '').toUpperCase();
-        if (pendingStatus === 'ACK') {
-          // Order was ACK'd, move to tracking and update
-          stopLimitOrderIdsBySymbol.set(normalizedSymbol, immediatelyPendingOrderId);
-          pendingStopLimitOrderIds.delete(normalizedSymbol);
-          console.log(`✅ [DEBUG] Pending order ${immediatelyPendingOrderId} was ACK'd. Updating quantity...`);
-          const pendingLeg = pendingOrder.Legs?.[0];
-          const existingQty = parseInt(pendingLeg?.QuantityRemaining || pendingLeg?.QuantityOrdered || '0', 10) || 0;
-          const newQty = existingQty + quantity;
-          await modifyOrderQuantity(immediatelyPendingOrderId, newQty);
-          return;
-        } else if (isActiveOrderStatus(pendingStatus)) {
-          // Order is active but not yet ACK'd, update it
-          const pendingLeg = pendingOrder.Legs?.[0];
-          const existingQty = parseInt(pendingLeg?.QuantityRemaining || pendingLeg?.QuantityOrdered || '0', 10) || 0;
-          const newQty = existingQty + quantity;
-          await modifyOrderQuantity(immediatelyPendingOrderId, newQty);
-          return;
-        }
-      }
-      // Check if it moved to tracking map
-      if (stopLimitOrderIdsBySymbol.get(normalizedSymbol) === immediatelyPendingOrderId) {
-        // Order was ACK'd and moved to tracking, update it
-        const trackedOrder = ordersCache.get(immediatelyPendingOrderId);
-        if (trackedOrder) {
-          const trackedLeg = trackedOrder.Legs?.[0];
-          const existingQty = parseInt(trackedLeg?.QuantityRemaining || trackedLeg?.QuantityOrdered || '0', 10) || 0;
-          const newQty = existingQty + quantity;
-          await modifyOrderQuantity(immediatelyPendingOrderId, newQty);
-          return;
-        }
-      }
-    }
-  }
-  
   // CRITICAL: Always use pending.limitPrice (the buy order's limit price) as the buy price
   // This is the price at which we bought
   // DO NOT use order.FilledPrice or order.LimitPrice as they might be different or stale
@@ -4218,17 +4298,21 @@ async function handleManualBuyFilled(orderId, order, pending) {
       for (let i = 0; i < 10; i++) {
         await new Promise(resolve => setTimeout(resolve, 500));
         
-        // Check if the order is now in tracking map (ACK'd)
-        const nowInTracking = stopLimitOrderIdsBySymbol.get(normalizedSymbol);
-        if (nowInTracking) {
-          const finalOrder = ordersCache.get(nowInTracking);
-          if (finalOrder && isActiveOrderStatus(finalOrder.Status)) {
-            console.log(`✅ [DEBUG] Found active StopLimit order ${nowInTracking} after waiting. Updating quantity...`);
-            const leg = finalOrder.Legs?.[0];
+        // Use unified search to check for existing order (more reliable than checking maps directly)
+        const waitCheck = findExistingStopLimitSellForSymbol(normalizedSymbol);
+        if (waitCheck) {
+          const { orderId: waitOrderId, order: waitOrder } = waitCheck;
+          const waitStatus = (waitOrder?.Status || '').toUpperCase();
+          const isActive = isActiveOrderStatus(waitStatus);
+          const isPending = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(waitStatus);
+          
+          if (isActive || isPending) {
+            console.log(`✅ [DEBUG] Found active StopLimit order ${waitOrderId} after waiting (status: ${waitStatus}). Updating quantity...`);
+            const leg = waitOrder.Legs?.[0];
             const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
             const newQty = existingQty + quantity;
-            await modifyOrderQuantity(nowInTracking, newQty);
-            stopLimitOrderIdsBySymbol.set(normalizedSymbol, nowInTracking);
+            await modifyOrderQuantity(waitOrderId, newQty);
+            stopLimitOrderIdsBySymbol.set(normalizedSymbol, waitOrderId);
             pendingStopLimitOrderIds.delete(normalizedSymbol);
             return;
           }
@@ -4236,17 +4320,21 @@ async function handleManualBuyFilled(orderId, order, pending) {
         
         // Check if creation is no longer in progress (completed or failed)
         if (!stopLimitCreationBySymbol.has(normalizedSymbol)) {
-          // Creation completed, check if order exists now
-          const checkOrderId = stopLimitOrderIdsBySymbol.get(normalizedSymbol) || earlyPendingCheck;
-          if (checkOrderId) {
-            const checkOrder = ordersCache.get(checkOrderId);
-            if (checkOrder && isActiveOrderStatus(checkOrder.Status)) {
-              console.log(`✅ [DEBUG] Found active StopLimit order ${checkOrderId} after creation completed. Updating quantity...`);
-              const leg = checkOrder.Legs?.[0];
+          // Creation completed, use unified search to check if order exists now
+          const completedCheck = findExistingStopLimitSellForSymbol(normalizedSymbol);
+          if (completedCheck) {
+            const { orderId: completedOrderId, order: completedOrder } = completedCheck;
+            const completedStatus = (completedOrder?.Status || '').toUpperCase();
+            const isActive = isActiveOrderStatus(completedStatus);
+            const isPending = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(completedStatus);
+            
+            if (isActive || isPending) {
+              console.log(`✅ [DEBUG] Found active StopLimit order ${completedOrderId} after creation completed (status: ${completedStatus}). Updating quantity...`);
+              const leg = completedOrder.Legs?.[0];
               const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
               const newQty = existingQty + quantity;
-              await modifyOrderQuantity(checkOrderId, newQty);
-              stopLimitOrderIdsBySymbol.set(normalizedSymbol, checkOrderId);
+              await modifyOrderQuantity(completedOrderId, newQty);
+              stopLimitOrderIdsBySymbol.set(normalizedSymbol, completedOrderId);
               pendingStopLimitOrderIds.delete(normalizedSymbol);
               return;
             }
@@ -4255,133 +4343,108 @@ async function handleManualBuyFilled(orderId, order, pending) {
         }
       }
       
-      // If we've waited and still in progress, check one more time before proceeding
-      const finalCheckId = stopLimitOrderIdsBySymbol.get(normalizedSymbol) || pendingStopLimitOrderIds.get(normalizedSymbol);
-      if (finalCheckId) {
-        const finalCheckOrder = ordersCache.get(finalCheckId);
-        if (finalCheckOrder && isActiveOrderStatus(finalCheckOrder.Status)) {
-          console.log(`✅ [DEBUG] Found active StopLimit order ${finalCheckId} in final check. Updating quantity...`);
-          const leg = finalCheckOrder.Legs?.[0];
+      // If we've waited and still in progress, check one more time before proceeding using unified search
+      const finalWaitCheck = findExistingStopLimitSellForSymbol(normalizedSymbol);
+      if (finalWaitCheck) {
+        const { orderId: finalWaitOrderId, order: finalWaitOrder } = finalWaitCheck;
+        const finalWaitStatus = (finalWaitOrder?.Status || '').toUpperCase();
+        const isActive = isActiveOrderStatus(finalWaitStatus);
+        const isPending = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(finalWaitStatus);
+        
+        if (isActive || isPending) {
+          console.log(`✅ [DEBUG] Found active StopLimit order ${finalWaitOrderId} in final wait check (status: ${finalWaitStatus}). Updating quantity...`);
+          const leg = finalWaitOrder.Legs?.[0];
           const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
           const newQty = existingQty + quantity;
-          await modifyOrderQuantity(finalCheckId, newQty);
-          stopLimitOrderIdsBySymbol.set(normalizedSymbol, finalCheckId);
+          await modifyOrderQuantity(finalWaitOrderId, newQty);
+          stopLimitOrderIdsBySymbol.set(normalizedSymbol, finalWaitOrderId);
           pendingStopLimitOrderIds.delete(normalizedSymbol);
           return;
         }
       }
     }
     
-    // CRITICAL: Check if we already have an active StopLimit sell order for this symbol
-    // Only one active sell order per symbol is allowed
-    // First check tracking map (ACK'd orders), then pending map (created but not ACK'd), then cache
-    let existingOrderId = stopLimitOrderIdsBySymbol.get(normalizedSymbol);
-      let existingOrder = existingOrderId ? ordersCache.get(existingOrderId) : null;
+    // CRITICAL: Unified check for existing StopLimit order
+    // Use the improved findExistingStopLimitSellForSymbol which checks maps AND cache
+    // This ensures we catch orders regardless of where they are in the system
+    console.log(`🔍 [DEBUG] Starting unified check for existing StopLimit for ${normalizedSymbol}...`);
+    const existingStopLimit = findExistingStopLimitSellForSymbol(normalizedSymbol);
+    
+    if (existingStopLimit) {
+      const { orderId: existingOrderId, quantity: existingQty, order: existingOrder } = existingStopLimit;
+      const currentStatus = (existingOrder?.Status || '').toUpperCase();
       
-      // If not found in tracking map, check pending map
-      if (!existingOrderId) {
-        const pendingOrderId = pendingStopLimitOrderIds.get(normalizedSymbol);
-        if (pendingOrderId) {
-          existingOrderId = pendingOrderId;
-          existingOrder = ordersCache.get(existingOrderId);
-          console.log(`⏳ [DEBUG] Found pending StopLimit order ${existingOrderId} for ${normalizedSymbol} (not yet ACK'd)`);
-          // If order is in pending but not in cache yet, wait a bit for it to arrive
-          if (!existingOrder) {
-            console.log(`⏳ [DEBUG] Pending order ${existingOrderId} not in cache yet, waiting for WebSocket update...`);
-            // Wait up to 3 seconds for the order to appear in cache
-            for (let i = 0; i < 6; i++) {
-              await new Promise(resolve => setTimeout(resolve, 500));
-              existingOrder = ordersCache.get(existingOrderId);
-              if (existingOrder) {
-                console.log(`✅ [DEBUG] Pending order ${existingOrderId} now in cache (status: ${existingOrder.Status})`);
-                break;
-              }
+      // Check if order is active or pending (ACK, DON, etc.)
+      const isActive = isActiveOrderStatus(currentStatus);
+      const isPending = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(currentStatus);
+      
+      if (isActive || isPending) {
+        console.log(`✅ [DEBUG] Found existing StopLimit order ${existingOrderId} (status: ${currentStatus}, qty: ${existingQty}). Updating quantity...`);
+        
+        // If order is pending (not yet fully active), wait a moment for it to stabilize
+        if (isPending && !isActive) {
+          console.log(`⏳ [DEBUG] Order ${existingOrderId} is pending (${currentStatus}), waiting for stabilization...`);
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          // Re-fetch order to get latest status
+          const updatedOrder = ordersCache.get(existingOrderId);
+          if (updatedOrder) {
+            const updatedStatus = (updatedOrder.Status || '').toUpperCase();
+            if (!isActiveOrderStatus(updatedStatus) && !['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(updatedStatus)) {
+              console.log(`⚠️ [DEBUG] Order ${existingOrderId} status changed to ${updatedStatus} (not active). Will create new one.`);
+              // Remove from tracking and continue to create new
+              stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
+              pendingStopLimitOrderIds.delete(normalizedSymbol);
+            } else {
+              // Order is still active/pending, proceed with update
+              const leg = updatedOrder.Legs?.[0];
+              const currentQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
+              const newQty = currentQty + quantity;
+              const result = await modifyOrderQuantity(existingOrderId, newQty);
+              console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
+              stopLimitOrderIdsBySymbol.set(normalizedSymbol, existingOrderId);
+              pendingStopLimitOrderIds.delete(normalizedSymbol);
+              return;
             }
           }
-        }
-      }
-      
-      // If still not found or order is not active, search cache
-      // ALWAYS search cache as a fallback to catch orders not in tracking maps
-      if (!existingOrderId || !existingOrder || !isActiveOrderStatus(existingOrder.Status)) {
-        const existingFromCache = findExistingStopLimitSellForSymbol(normalizedSymbol);
-        if (existingFromCache) {
-          // Found in cache - use this order ID
-          existingOrderId = existingFromCache.orderId;
-          existingOrder = ordersCache.get(existingOrderId);
-          // Update tracking map with found order ID
-          stopLimitOrderIdsBySymbol.set(normalizedSymbol, existingOrderId);
-          // Remove from pending if it was there
-          pendingStopLimitOrderIds.delete(normalizedSymbol);
-          console.log(`🔄 [DEBUG] Found active StopLimit order ${existingOrderId} in cache and updated tracking map for ${normalizedSymbol}`);
-        }
-      }
-      
-      // CRITICAL: Final check - if there's a pending order but we couldn't find it in cache,
-      // it means it was just created and we should wait/retry rather than creating a duplicate
-      const pendingCheck = pendingStopLimitOrderIds.get(normalizedSymbol);
-      if (pendingCheck && (!existingOrderId || existingOrderId !== pendingCheck)) {
-        console.log(`⏸️ [DEBUG] StopLimit order ${pendingCheck} is pending for ${normalizedSymbol}. Waiting before creating new one...`);
-        // Wait a bit more and check again
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        const retryOrder = ordersCache.get(pendingCheck);
-        if (retryOrder && isActiveOrderStatus(retryOrder.Status)) {
-          existingOrderId = pendingCheck;
-          existingOrder = retryOrder;
-          stopLimitOrderIdsBySymbol.set(normalizedSymbol, existingOrderId);
-          pendingStopLimitOrderIds.delete(normalizedSymbol);
-          console.log(`✅ [DEBUG] Pending order ${pendingCheck} is now active, will update quantity`);
-        } else if (retryOrder) {
-          console.log(`⚠️ [DEBUG] Pending order ${pendingCheck} found but status is ${retryOrder.Status} (not active)`);
-          // Remove from pending if not active
-          if (pendingStopLimitOrderIds.get(normalizedSymbol) === pendingCheck) {
-            pendingStopLimitOrderIds.delete(normalizedSymbol);
-          }
-        }
-      }
-      
-      // If we found an existing active StopLimit order, update it with new quantity
-      if (existingOrderId && existingOrder) {
-        // Double-check the order is still active (status might have changed)
-        const currentStatus = (existingOrder.Status || '').toUpperCase();
-        if (isActiveOrderStatus(currentStatus)) {
-          console.log(`📝 [DEBUG] Existing active StopLimit found (${existingOrderId}, status ${currentStatus}). Updating quantity by adding ${quantity}...`);
+        } else {
+          // Order is active, update immediately
           const leg = existingOrder.Legs?.[0];
-          const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
-          const newQty = existingQty + quantity;
+          const currentQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
+          const newQty = currentQty + quantity;
           const result = await modifyOrderQuantity(existingOrderId, newQty);
           console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
-          // Ensure order ID is in tracking map
           stopLimitOrderIdsBySymbol.set(normalizedSymbol, existingOrderId);
           pendingStopLimitOrderIds.delete(normalizedSymbol);
           return;
-        } else {
-          console.log(`⚠️ [DEBUG] StopLimit order ${existingOrderId} found but status is ${currentStatus} (not active). Will create new one.`);
-          // Remove from tracking maps since it's not active
-          if (stopLimitOrderIdsBySymbol.get(normalizedSymbol) === existingOrderId) {
-            stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
-          }
-          if (pendingStopLimitOrderIds.get(normalizedSymbol) === existingOrderId) {
-            pendingStopLimitOrderIds.delete(normalizedSymbol);
-          }
         }
+      } else {
+        console.log(`⚠️ [DEBUG] StopLimit order ${existingOrderId} found but status is ${currentStatus} (not active/pending). Removing from tracking and creating new one.`);
+        // Remove from tracking maps since it's not active
+        stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
+        pendingStopLimitOrderIds.delete(normalizedSymbol);
       }
+    } else {
+      console.log(`ℹ️ [DEBUG] No existing StopLimit found for ${normalizedSymbol} in unified check`);
+    }
     
     // No existing active StopLimit order found - create new one
     // Check if StopLimit creation is already in progress for this symbol (prevent loops)
     if (stopLimitCreationBySymbol.has(normalizedSymbol)) {
       console.log(`⏸️ [DEBUG] StopLimit creation already in progress for ${normalizedSymbol}, waiting...`);
-      // Wait a bit and check again
-      await new Promise(resolve => setTimeout(resolve, 500));
-      existingOrderId = stopLimitOrderIdsBySymbol.get(normalizedSymbol);
-      if (existingOrderId) {
-        existingOrder = ordersCache.get(existingOrderId);
-        if (existingOrder && isActiveOrderStatus(existingOrder.Status)) {
-          console.log(`✅ [DEBUG] StopLimit was created while waiting, modifying existing order`);
-          const leg = existingOrder.Legs?.[0];
+      // Wait a bit and check again using unified search
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const waitCheck = findExistingStopLimitSellForSymbol(normalizedSymbol);
+      if (waitCheck) {
+        const { orderId: waitOrderId, order: waitOrder } = waitCheck;
+        const waitStatus = (waitOrder?.Status || '').toUpperCase();
+        if (isActiveOrderStatus(waitStatus) || ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(waitStatus)) {
+          console.log(`✅ [DEBUG] StopLimit was created while waiting (${waitOrderId}), modifying existing order`);
+          const leg = waitOrder.Legs?.[0];
           const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
           const newQty = existingQty + quantity;
-          await modifyOrderQuantity(existingOrderId, newQty);
+          await modifyOrderQuantity(waitOrderId, newQty);
+          stopLimitOrderIdsBySymbol.set(normalizedSymbol, waitOrderId);
+          pendingStopLimitOrderIds.delete(normalizedSymbol);
           return;
         }
       }
@@ -4392,17 +4455,18 @@ async function handleManualBuyFilled(orderId, order, pending) {
     if (stopLimitCreationBySymbol.has(normalizedSymbol)) {
       console.log(`⚠️ [DEBUG] StopLimit creation already in progress for ${normalizedSymbol} (race condition detected). Waiting...`);
       await new Promise(resolve => setTimeout(resolve, 1000));
-      // Check again after waiting
-      const raceCheckId = stopLimitOrderIdsBySymbol.get(normalizedSymbol) || pendingStopLimitOrderIds.get(normalizedSymbol);
-      if (raceCheckId) {
-        const raceCheckOrder = ordersCache.get(raceCheckId);
-        if (raceCheckOrder && isActiveOrderStatus(raceCheckOrder.Status)) {
-          console.log(`✅ [DEBUG] Found active StopLimit order ${raceCheckId} after race condition wait. Updating quantity...`);
-          const leg = raceCheckOrder.Legs?.[0];
+      // Use unified search to check again after waiting
+      const raceCheck = findExistingStopLimitSellForSymbol(normalizedSymbol);
+      if (raceCheck) {
+        const { orderId: raceOrderId, order: raceOrder } = raceCheck;
+        const raceStatus = (raceOrder?.Status || '').toUpperCase();
+        if (isActiveOrderStatus(raceStatus) || ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(raceStatus)) {
+          console.log(`✅ [DEBUG] Found active StopLimit order ${raceOrderId} after race condition wait. Updating quantity...`);
+          const leg = raceOrder.Legs?.[0];
           const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
           const newQty = existingQty + quantity;
-          await modifyOrderQuantity(raceCheckId, newQty);
-          stopLimitOrderIdsBySymbol.set(normalizedSymbol, raceCheckId);
+          await modifyOrderQuantity(raceOrderId, newQty);
+          stopLimitOrderIdsBySymbol.set(normalizedSymbol, raceOrderId);
           pendingStopLimitOrderIds.delete(normalizedSymbol);
           return;
         }
@@ -4413,9 +4477,32 @@ async function handleManualBuyFilled(orderId, order, pending) {
       }
     }
     
+    // CRITICAL: One final check before marking as in progress
+    // This catches any orders that might have been created between our checks and now
+    const absoluteFinalCheck = findExistingStopLimitSellForSymbol(normalizedSymbol);
+    if (absoluteFinalCheck) {
+      const { orderId: finalOrderId, order: finalOrder } = absoluteFinalCheck;
+      const finalStatus = (finalOrder?.Status || '').toUpperCase();
+      const isActive = isActiveOrderStatus(finalStatus);
+      const isPending = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(finalStatus);
+      
+      if (isActive || isPending) {
+        console.log(`✅ [DEBUG] Absolute final check found existing StopLimit ${finalOrderId} (status: ${finalStatus}). Updating quantity...`);
+        const leg = finalOrder.Legs?.[0];
+        const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
+        const newQty = existingQty + quantity;
+        const result = await modifyOrderQuantity(finalOrderId, newQty);
+        console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
+        stopLimitOrderIdsBySymbol.set(normalizedSymbol, finalOrderId);
+        pendingStopLimitOrderIds.delete(normalizedSymbol);
+        return;
+      }
+    }
+    
     // Mark symbol as in progress - CRITICAL: Do this AFTER all checks to prevent race conditions
     stopLimitCreationBySymbol.add(normalizedSymbol);
     console.log(`🔒 [DEBUG] Marked ${normalizedSymbol} as in progress for StopLimit creation`);
+    console.log(`📊 [DEBUG] Current state - Tracking: ${stopLimitOrderIdsBySymbol.size} entries, Pending: ${pendingStopLimitOrderIds.size} entries, In Progress: ${stopLimitCreationBySymbol.size} symbols`);
     
     try {
       // CRITICAL: Before creating a new StopLimit, check for and cancel ANY active sell orders
@@ -4446,81 +4533,31 @@ async function handleManualBuyFilled(orderId, order, pending) {
         return activeOrders;
       };
       
-      // CRITICAL: Final check before creating - verify NO existing StopLimit exists
-      // Check in this order: tracking map → pending map → cache
-      // This prevents creating duplicates when an order was just created but not yet ACK'd
-      
-      // 1. Check tracking map (ACK'd orders)
-      const finalTrackingCheck = stopLimitOrderIdsBySymbol.get(normalizedSymbol);
-      if (finalTrackingCheck) {
-        const finalTrackingOrder = ordersCache.get(finalTrackingCheck);
-        if (finalTrackingOrder && isActiveOrderStatus(finalTrackingOrder.Status)) {
-          // Verify the order is actually for this symbol (safety check)
-          const leg = finalTrackingOrder.Legs?.[0];
-          const legSymbol = (leg?.Symbol || '').toUpperCase();
-          if (legSymbol === normalizedSymbol) {
-            console.log(`✅ [DEBUG] Found active StopLimit in tracking map (${finalTrackingCheck}). Updating quantity...`);
-            const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
-            const newQty = existingQty + quantity;
-            const result = await modifyOrderQuantity(finalTrackingCheck, newQty);
-            console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
-            pendingStopLimitOrderIds.delete(normalizedSymbol);
-            return;
-          } else {
-            console.error(`❌ [DEBUG] Symbol mismatch! Tracking map has ${legSymbol} but expected ${normalizedSymbol}. Removing from tracking.`);
-            stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
-          }
-        }
-      }
-      
-      // 2. Check pending map (created but not ACK'd)
-      const finalPendingCheck = pendingStopLimitOrderIds.get(normalizedSymbol);
-      if (finalPendingCheck) {
-        console.log(`⏸️ [DEBUG] Found pending StopLimit order ${finalPendingCheck} for ${normalizedSymbol} in final check. Waiting...`);
-        // Wait a bit for the order to be ACK'd and appear in cache
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        const finalOrder = ordersCache.get(finalPendingCheck);
-        if (finalOrder && isActiveOrderStatus(finalOrder.Status)) {
-          // Verify the order is actually for this symbol (safety check)
+      // CRITICAL: Final check before creating - use unified search one more time
+      // This catches any orders that might have been created/ACK'd between our earlier check and now
+      console.log(`🔍 [DEBUG] Final check before creating StopLimit for ${normalizedSymbol}...`);
+      const finalCheck = findExistingStopLimitSellForSymbol(normalizedSymbol);
+      if (finalCheck) {
+        const { orderId: finalOrderId, order: finalOrder } = finalCheck;
+        const finalStatus = (finalOrder?.Status || '').toUpperCase();
+        const isActive = isActiveOrderStatus(finalStatus);
+        const isPending = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(finalStatus);
+        
+        if (isActive || isPending) {
+          console.log(`✅ [DEBUG] Found existing StopLimit ${finalOrderId} in final check (status: ${finalStatus}). Updating quantity...`);
           const leg = finalOrder.Legs?.[0];
-          const legSymbol = (leg?.Symbol || '').toUpperCase();
-          if (legSymbol === normalizedSymbol) {
-            console.log(`✅ [DEBUG] Pending order ${finalPendingCheck} is now active. Updating quantity...`);
-            const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
-            const newQty = existingQty + quantity;
-            const result = await modifyOrderQuantity(finalPendingCheck, newQty);
-            console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
-            stopLimitOrderIdsBySymbol.set(normalizedSymbol, finalPendingCheck);
-            pendingStopLimitOrderIds.delete(normalizedSymbol);
-            return;
-          } else {
-            console.error(`❌ [DEBUG] Symbol mismatch! Pending order has ${legSymbol} but expected ${normalizedSymbol}. Removing from pending.`);
-            pendingStopLimitOrderIds.delete(normalizedSymbol);
-          }
+          const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
+          const newQty = existingQty + quantity;
+          const result = await modifyOrderQuantity(finalOrderId, newQty);
+          console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
+          stopLimitOrderIdsBySymbol.set(normalizedSymbol, finalOrderId);
+          pendingStopLimitOrderIds.delete(normalizedSymbol);
+          return;
+        } else {
+          console.log(`⚠️ [DEBUG] Final check found order ${finalOrderId} but status ${finalStatus} is not active/pending. Will create new.`);
         }
-      }
-      
-      // 3. Check cache (fallback)
-      const existingStopLimit = findExistingStopLimitSellForSymbol(normalizedSymbol);
-      if (existingStopLimit) {
-        // Verify the order is actually for this symbol (safety check)
-        const cacheOrder = ordersCache.get(existingStopLimit.orderId);
-        if (cacheOrder) {
-          const leg = cacheOrder.Legs?.[0];
-          const legSymbol = (leg?.Symbol || '').toUpperCase();
-          if (legSymbol === normalizedSymbol) {
-            console.log(`📝 [DEBUG] Found existing StopLimit in cache (${existingStopLimit.orderId}, qty ${existingStopLimit.quantity}). Adding ${quantity}...`);
-            const newQty = existingStopLimit.quantity + quantity;
-            const result = await modifyOrderQuantity(existingStopLimit.orderId, newQty);
-            console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
-            // Ensure the order ID is saved in our tracking map
-            stopLimitOrderIdsBySymbol.set(normalizedSymbol, existingStopLimit.orderId);
-            pendingStopLimitOrderIds.delete(normalizedSymbol);
-            return;
-          } else {
-            console.error(`❌ [DEBUG] Symbol mismatch! Cache order has ${legSymbol} but expected ${normalizedSymbol}.`);
-          }
-        }
+      } else {
+        console.log(`✅ [DEBUG] Final check confirmed: No existing StopLimit for ${normalizedSymbol}. Proceeding with creation.`);
       }
       
       // Check for any active sell orders (not StopLimit - we already checked for that above)
@@ -4567,32 +4604,11 @@ async function handleManualBuyFilled(orderId, order, pending) {
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
       
-      // ABSOLUTE FINAL CHECK: Verify symbol is NOT tracked before creating
-      // This is the last safeguard to prevent duplicate creation
-      // Check both tracking maps one more time
-      const absoluteFinalTrackingCheck = stopLimitOrderIdsBySymbol.get(normalizedSymbol);
-      const absoluteFinalPendingCheck = pendingStopLimitOrderIds.get(normalizedSymbol);
-      
-      if (absoluteFinalTrackingCheck || absoluteFinalPendingCheck) {
-        const finalOrderId = absoluteFinalTrackingCheck || absoluteFinalPendingCheck;
-        const finalOrder = ordersCache.get(finalOrderId);
-        if (finalOrder && isActiveOrderStatus(finalOrder.Status)) {
-          console.log(`🔒 [ABSOLUTE FINAL CHECK] Symbol ${normalizedSymbol} IS TRACKED with order ${finalOrderId}. Aborting creation, updating instead.`);
-          const finalLeg = finalOrder.Legs?.[0];
-          const existingQty = parseInt(finalLeg?.QuantityRemaining || finalLeg?.QuantityOrdered || '0', 10) || 0;
-          const newQty = existingQty + quantity;
-          await modifyOrderQuantity(finalOrderId, newQty);
-          stopLimitOrderIdsBySymbol.set(normalizedSymbol, finalOrderId);
-          pendingStopLimitOrderIds.delete(normalizedSymbol);
-          return;
-        }
-      }
-      
       // No existing StopLimit found - create new one
       // stop_price = buy_price - 0.15, limit_price = stop_price - 0.05
       const calculatedStopPrice = Math.max(0, fillPrice - 0.15);
       const calculatedLimitPrice = Math.max(0, calculatedStopPrice - 0.05);
-      console.log(`📝 [DEBUG] No existing StopLimit found after all checks. Creating new StopLimit SELL for ${normalizedSymbol} (buy: $${fillPrice.toFixed(2)}, stop: $${calculatedStopPrice.toFixed(2)}, limit: $${calculatedLimitPrice.toFixed(2)})...`);
+      console.log(`📝 [DEBUG] No existing StopLimit found. Creating new StopLimit SELL for ${normalizedSymbol} (buy: $${fillPrice.toFixed(2)}, stop: $${calculatedStopPrice.toFixed(2)}, limit: $${calculatedLimitPrice.toFixed(2)})...`);
       const result = await createStopLimitSellOrder(normalizedSymbol, quantity, fillPrice);
       console.log(`📝 [DEBUG] Create StopLimit result:`, JSON.stringify(result, null, 2));
       
@@ -4893,6 +4909,160 @@ app.get('/api/orders/:orderId/status', requireAuth, (req, res) => {
     return res.status(404).json({ success: false, error: 'Order not found', data: { orderId } });
   } catch (e) {
     console.error('Error getting order status:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// Test endpoint: Simulate buy fill to test StopLimit logic
+app.post('/api/debug/stoplimit/test', requireAuth, async (req, res) => {
+  try {
+    const { symbol, orderId, fillPrice, quantity } = req.body;
+    if (!symbol || !orderId || !fillPrice || !quantity) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required fields: symbol, orderId, fillPrice, quantity' 
+      });
+    }
+    
+    const normalizedSymbol = (symbol || '').toUpperCase();
+    const mockOrder = {
+      OrderID: orderId,
+      Status: 'FLL',
+      OrderType: 'Limit',
+      FilledPrice: fillPrice,
+      LimitPrice: fillPrice,
+      Legs: [{
+        Symbol: normalizedSymbol,
+        BuyOrSell: 'BUY',
+        QuantityOrdered: quantity,
+        ExecQuantity: quantity
+      }]
+    };
+    
+    const mockPending = {
+      symbol: normalizedSymbol,
+      quantity: quantity,
+      limitPrice: fillPrice
+    };
+    
+    console.log(`🧪 [TEST] Simulating buy fill for ${normalizedSymbol}...`);
+    console.log(`🧪 [TEST] Mock order:`, JSON.stringify(mockOrder, null, 2));
+    console.log(`🧪 [TEST] Mock pending:`, JSON.stringify(mockPending, null, 2));
+    
+    // Check current state
+    const beforeState = {
+      inTracking: stopLimitOrderIdsBySymbol.get(normalizedSymbol) || null,
+      inPending: pendingStopLimitOrderIds.get(normalizedSymbol) || null,
+      inProgress: stopLimitCreationBySymbol.has(normalizedSymbol),
+      existingInCache: findExistingStopLimitSellForSymbol(normalizedSymbol)
+    };
+    
+    console.log(`🧪 [TEST] State before:`, JSON.stringify(beforeState, null, 2));
+    
+    // Simulate the call
+    await handleManualBuyFilled(orderId, mockOrder, mockPending);
+    
+    // Check state after
+    await new Promise(resolve => setTimeout(resolve, 2000)); // Wait for async operations
+    
+    const afterState = {
+      inTracking: stopLimitOrderIdsBySymbol.get(normalizedSymbol) || null,
+      inPending: pendingStopLimitOrderIds.get(normalizedSymbol) || null,
+      inProgress: stopLimitCreationBySymbol.has(normalizedSymbol),
+      existingInCache: findExistingStopLimitSellForSymbol(normalizedSymbol)
+    };
+    
+    console.log(`🧪 [TEST] State after:`, JSON.stringify(afterState, null, 2));
+    
+    res.json({
+      success: true,
+      data: {
+        before: beforeState,
+        after: afterState,
+        test: {
+          symbol: normalizedSymbol,
+          orderId,
+          fillPrice,
+          quantity
+        }
+      }
+    });
+  } catch (e) {
+    console.error('Error in StopLimit test:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// Debug endpoint: View StopLimit tracking state
+app.get('/api/debug/stoplimit', requireAuth, (req, res) => {
+  try {
+    const trackingMap = Array.from(stopLimitOrderIdsBySymbol.entries()).map(([symbol, orderId]) => {
+      const order = ordersCache.get(orderId);
+      return {
+        symbol,
+        orderId,
+        status: order?.Status || 'NOT_IN_CACHE',
+        orderType: order?.OrderType || 'UNKNOWN',
+        quantity: order?.Legs?.[0]?.QuantityRemaining || order?.Legs?.[0]?.QuantityOrdered || 0,
+        isActive: order ? isActiveOrderStatus(order.Status) : false
+      };
+    });
+    
+    const pendingMap = Array.from(pendingStopLimitOrderIds.entries()).map(([symbol, orderId]) => {
+      const order = ordersCache.get(orderId);
+      return {
+        symbol,
+        orderId,
+        status: order?.Status || 'NOT_IN_CACHE',
+        orderType: order?.OrderType || 'UNKNOWN',
+        quantity: order?.Legs?.[0]?.QuantityRemaining || order?.Legs?.[0]?.QuantityOrdered || 0,
+        isActive: order ? isActiveOrderStatus(order.Status) : false
+      };
+    });
+    
+    const inProgressSymbols = Array.from(stopLimitCreationBySymbol);
+    const inProgressOrders = Array.from(stopLimitCreationInProgress);
+    
+    // Find all StopLimit orders in cache
+    const allStopLimits = [];
+    for (const [orderId, order] of ordersCache.entries()) {
+      const orderType = (order?.OrderType || '').toUpperCase();
+      if (orderType === 'STOPLIMIT' || orderType === 'STOP_LIMIT') {
+        const leg = order.Legs?.[0];
+        const side = (leg?.BuyOrSell || '').toUpperCase();
+        if (side === 'SELL') {
+          allStopLimits.push({
+            orderId,
+            symbol: leg?.Symbol || 'UNKNOWN',
+            status: order.Status || 'UNKNOWN',
+            quantity: leg?.QuantityRemaining || leg?.QuantityOrdered || 0,
+            isActive: isActiveOrderStatus(order.Status),
+            inTracking: stopLimitOrderIdsBySymbol.get((leg?.Symbol || '').toUpperCase()) === orderId,
+            inPending: pendingStopLimitOrderIds.get((leg?.Symbol || '').toUpperCase()) === orderId
+          });
+        }
+      }
+    }
+    
+    res.json({
+      success: true,
+      data: {
+        trackingMap,
+        pendingMap,
+        inProgressSymbols,
+        inProgressOrders,
+        allStopLimitsInCache: allStopLimits,
+        stats: {
+          trackingCount: trackingMap.length,
+          pendingCount: pendingMap.length,
+          inProgressSymbolsCount: inProgressSymbols.length,
+          inProgressOrdersCount: inProgressOrders.length,
+          totalStopLimitsInCache: allStopLimits.length
+        }
+      }
+    });
+  } catch (e) {
+    console.error('Error getting StopLimit debug info:', e);
     res.status(500).json({ success: false, error: e.message });
   }
 });
