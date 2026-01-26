@@ -3,7 +3,6 @@ import { useAuth } from '../auth/AuthContext';
 import NotificationContainer from './NotificationContainer';
 import type { NotificationProps } from './Notification';
 import ManualConfigPanel from './ManualConfigPanel';
-import StopLimitConfigPanel from './StopLimitConfigPanel';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
@@ -94,7 +93,6 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
   const [sellStatuses, setSellStatuses] = useState<Record<string, 'success' | 'error' | null>>({});
   const [notifications, setNotifications] = useState<NotificationProps[]>([]);
   const [showConfigModal, setShowConfigModal] = useState(false);
-  const [showStopLimitConfigModal, setShowStopLimitConfigModal] = useState(false);
   const [buyQuantities, setBuyQuantities] = useState<Record<string, number>>({});
   const [editingQuantity, setEditingQuantity] = useState<string | null>(null);
   const [tempQuantity, setTempQuantity] = useState<Record<string, string>>({});
@@ -374,13 +372,6 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                 title="Open scoring configuration"
               >
                 Config
-              </button>
-              <button
-                className="px-3 py-1 rounded-sm text-[11px] font-bold transition-all bg-[#2a2820] text-[#eae9e9] hover:bg-[#3a3830] border border-[#404040]"
-                onClick={() => setShowStopLimitConfigModal(true)}
-                title="Open StopLimit configuration"
-              >
-                StopLimit Config
               </button>
             </>
           )}
@@ -719,37 +710,6 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
         </div>
       )}
 
-      {/* StopLimit Config Modal */}
-      {showStopLimitConfigModal && (
-        <div 
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
-          onClick={() => setShowStopLimitConfigModal(false)}
-        >
-          <div 
-            className="bg-[#14130e] border border-[#2a2820] rounded-lg shadow-2xl w-[90vw] h-[90vh] max-w-6xl flex flex-col overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Modal Header */}
-            <div className="flex items-center justify-between p-4 border-b border-[#2a2820]">
-              <h3 className="text-lg font-bold text-[#eae9e9]">StopLimit Configuration</h3>
-              <button
-                onClick={() => setShowStopLimitConfigModal(false)}
-                className="text-[#808080] hover:text-[#eae9e9] transition-colors p-1"
-                title="Close"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            
-            {/* Modal Content */}
-            <div className="flex-1 overflow-hidden">
-              <StopLimitConfigPanel />
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

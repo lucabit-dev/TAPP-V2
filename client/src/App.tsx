@@ -16,10 +16,9 @@ const FloatConfigPanel = lazy(() => import('./components/FloatConfigPanel'));
 const ManualConfigPanel = lazy(() => import('./components/ManualConfigPanel'));
 const BuyListSection = lazy(() => import('./components/BuyListSection'));
 // const FloatRawListsSection = lazy(() => import('./components/FloatRawListsSection'));
-const PositionsWithStopLimitSection = lazy(() => import('./components/PositionsWithStopLimitSection'));
+const PositionsWithStopLimitSection = lazy(() => import('./components/PositionsSection'));
 const OrdersSection = lazy(() => import('./components/OrdersSection'));
 const L2Section = lazy(() => import('./components/L2Section'));
-const StopLimitSection = lazy(() => import('./components/StopLimitSection'));
 const ChartsSection = lazy(() => import('./components/ChartsSection'));
 const Login = lazy(() => import('./components/Login'));
 
@@ -1115,7 +1114,6 @@ function App() {
           {selectedTab === 'manual-non-qualified' && <ManualSection viewMode="non-qualified" />}
           {selectedTab === 'buy-list' && <BuyListSection />}
           {selectedTab === 'positions' && <PositionsWithStopLimitSection />}
-          {selectedTab === 'stoplimit' && <StopLimitSection />}
           {selectedTab === 'orders' && <OrdersSection />}
           {selectedTab === 'l2' && <L2Section />}
           {selectedTab === 'charts' && <ChartsSection />}
