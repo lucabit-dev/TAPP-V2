@@ -4143,6 +4143,12 @@ async function handleManualBuyFilled(orderId, order, pending) {
     let existingOrderId = stopLimitOrderIdsBySymbol.get(normalizedSymbol);
     let existingOrder = existingOrderId ? ordersCache.get(existingOrderId) : null;
     
+    console.log(`🔍 [DEBUG] Checking for existing StopLimit for ${normalizedSymbol}:`, {
+      orderIdInTrackingMap: existingOrderId || null,
+      orderInCache: existingOrder ? { orderId: existingOrderId, status: existingOrder.Status } : null,
+      cacheSize: ordersCache.size
+    });
+    
     // If order ID exists in tracking map, verify it's still active (not REJ, CAN, etc.)
     if (existingOrderId && existingOrder) {
       const orderStatus = (existingOrder.Status || '').toUpperCase();
@@ -4154,6 +4160,13 @@ async function handleManualBuyFilled(orderId, order, pending) {
         existingOrderId = null;
         existingOrder = null;
       }
+    }
+    
+    // If we have an order ID in tracking map but order is not in cache, try to use it anyway
+    // The order might still be active on the broker side even if not in our cache
+    if (existingOrderId && !existingOrder) {
+      console.log(`⚠️ [DEBUG] StopLimit order ID ${existingOrderId} is in tracking map but not in cache. Will attempt to modify it anyway.`);
+      // We'll try to modify it later, but first check if we can find it in cache or via search
     }
     
     // If not found in tracking map, check pending map
@@ -4177,9 +4190,15 @@ async function handleManualBuyFilled(orderId, order, pending) {
     }
     
     // If still not found or order is not active, search cache
-    if (!existingOrderId || !existingOrder || !isActiveOrderStatus(existingOrder.Status)) {
+    // Also search if we have order ID but order not in cache (might be a different order)
+    if (!existingOrderId || !existingOrder || (existingOrder && !isActiveOrderStatus(existingOrder.Status))) {
+      console.log(`🔍 [DEBUG] Searching cache for existing StopLimit (existingOrderId: ${existingOrderId}, existingOrder: ${existingOrder ? 'found' : 'not found'})...`);
       const existing = findExistingStopLimitSellForSymbol(normalizedSymbol);
       if (existing) {
+        // If we found a different order in cache, use that one instead
+        if (existing.orderId !== existingOrderId) {
+          console.log(`🔄 [DEBUG] Found different StopLimit order in cache: ${existing.orderId} (was tracking ${existingOrderId}). Updating tracking map.`);
+        }
         existingOrderId = existing.orderId;
         existingOrder = ordersCache.get(existingOrderId);
         // Update tracking map with found order ID
@@ -4193,16 +4212,43 @@ async function handleManualBuyFilled(orderId, order, pending) {
     }
     
     // If we found an existing active StopLimit order, update it with new quantity
-    if (existingOrderId && existingOrder && isActiveOrderStatus(existingOrder.Status)) {
-      console.log(`📝 [DEBUG] Existing active StopLimit found (${existingOrderId}, status ${existingOrder.Status}). Updating quantity by adding ${quantity}...`);
-      const leg = existingOrder.Legs?.[0];
-      const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
-      const newQty = existingQty + quantity;
-      const result = await modifyOrderQuantity(existingOrderId, newQty);
-      console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
-      // Ensure order ID is in tracking map
-      stopLimitOrderIdsBySymbol.set(normalizedSymbol, existingOrderId);
-      return;
+    // Also handle case where we have order ID but order not in cache (try to modify anyway)
+    if (existingOrderId) {
+      if (existingOrder && isActiveOrderStatus(existingOrder.Status)) {
+        console.log(`📝 [DEBUG] Existing active StopLimit found (${existingOrderId}, status ${existingOrder.Status}). Updating quantity by adding ${quantity}...`);
+        const leg = existingOrder.Legs?.[0];
+        const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
+        const newQty = existingQty + quantity;
+        const result = await modifyOrderQuantity(existingOrderId, newQty);
+        console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
+        // Ensure order ID is in tracking map
+        stopLimitOrderIdsBySymbol.set(normalizedSymbol, existingOrderId);
+        return;
+      } else if (!existingOrder) {
+        // Order ID exists but order not in cache - try to modify anyway
+        // Get current position quantity to calculate new quantity
+        const position = positionsCache.get(normalizedSymbol);
+        const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+        const newQty = positionQty; // Use current position quantity as the new StopLimit quantity
+        console.log(`📝 [DEBUG] StopLimit order ID ${existingOrderId} exists but not in cache. Attempting to modify with new quantity ${newQty} (from position quantity ${positionQty} + buy quantity ${quantity})...`);
+        const result = await modifyOrderQuantity(existingOrderId, newQty);
+        console.log(`📝 [DEBUG] Modify order result (order not in cache):`, JSON.stringify(result, null, 2));
+        if (result.success) {
+          // Update tracking map
+          stopLimitOrderIdsBySymbol.set(normalizedSymbol, existingOrderId);
+          return;
+        } else {
+          // Modification failed - order might not exist anymore, clean up and create new one
+          console.log(`⚠️ [DEBUG] Failed to modify order ${existingOrderId} (not in cache). Will create new StopLimit.`);
+          stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
+          pendingStopLimitOrderIds.delete(normalizedSymbol);
+        }
+      } else {
+        // Order exists but status is not active
+        console.log(`⚠️ [DEBUG] StopLimit order ${existingOrderId} exists but status is ${existingOrder.Status} (not active). Will create new one.`);
+        stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
+        pendingStopLimitOrderIds.delete(normalizedSymbol);
+      }
     }
     
     // No existing active StopLimit order found - create new one
@@ -4243,6 +4289,22 @@ async function handleManualBuyFilled(orderId, order, pending) {
       }
       
       // No existing StopLimit found - create new one
+      // Wait 3 seconds before creating StopLimit to prevent broker-side rejection errors
+      // The broker needs time to process the filled buy order before accepting a new StopLimit order
+      console.log(`⏳ [DEBUG] Waiting 3 seconds before creating StopLimit SELL for ${normalizedSymbol} to prevent broker rejection...`);
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      // Re-check for existing StopLimit after delay (in case one was created during the wait)
+      const existingAfterDelay = findExistingStopLimitSellForSymbol(normalizedSymbol);
+      if (existingAfterDelay) {
+        console.log(`📝 [DEBUG] Found existing StopLimit after delay (${existingAfterDelay.orderId}, qty ${existingAfterDelay.quantity}). Adding ${quantity}...`);
+        const newQty = existingAfterDelay.quantity + quantity;
+        const result = await modifyOrderQuantity(existingAfterDelay.orderId, newQty);
+        console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
+        stopLimitOrderIdsBySymbol.set(normalizedSymbol, existingAfterDelay.orderId);
+        return;
+      }
+      
       console.log(`📝 [DEBUG] No existing StopLimit found. Creating new StopLimit SELL for ${normalizedSymbol} (stop: $${fillPrice.toFixed(2)}, limit: $${(fillPrice - 0.15).toFixed(2)})...`);
       const result = await createStopLimitSellOrder(normalizedSymbol, quantity, fillPrice);
       console.log(`📝 [DEBUG] Create StopLimit result:`, JSON.stringify(result, null, 2));
