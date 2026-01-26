@@ -2999,9 +2999,13 @@ function connectPositionsWebSocket() {
               cachePersistenceService.schedulePositionSave(symbol);
             }
             console.log(`📊 Position cache updated: ${symbol} (${quantity} shares)`);
+            // Debug: Log if this is a new position after a sell (for buy-sell-buy scenario)
+            console.log(`🔍 [DEBUG] Position exists in cache for ${symbol}: Quantity=${quantity}, AveragePrice=${dataObj.AveragePrice || 'N/A'}`);
           }
         } else {
           // Position closed or quantity is 0, remove from cache
+          const normalizedSymbol = symbol.toUpperCase(); // Normalize for StopLimit cleanup
+          console.log(`📊 Position closed or quantity is 0: ${symbol} - removing from cache`);
           positionsCache.delete(symbol);
           // Schedule save to database (to delete from DB)
           if (cachePersistenceService) {
@@ -4285,18 +4289,35 @@ async function handleManualBuyFilled(orderId, order, pending) {
   
   // CRITICAL: Verify position actually exists before creating StopLimit
   // This prevents creating StopLimit for positions that were just sold
-  const existingPosition = positionsCache.get(normalizedSymbol);
-  const hasExistingPosition = existingPosition && parseFloat(existingPosition.Quantity || '0') > 0;
+  // However, we need to wait a bit for positions WebSocket to update the cache
+  // (there's a timing difference between orders WebSocket and positions WebSocket)
+  let existingPosition = positionsCache.get(normalizedSymbol);
+  let hasExistingPosition = existingPosition && parseFloat(existingPosition.Quantity || '0') > 0;
   
-  // DEFENSIVE: If no position exists, clean up any stale StopLimit tracking and abort
-  // This can happen if position was sold between buy fill and this function call
+  // If position not found immediately, wait for positions WebSocket to update (up to 3 seconds)
+  // This handles the race condition where buy order fills before position appears in cache
   if (!hasExistingPosition) {
-    console.warn(`⚠️ [DEBUG] handleManualBuyFilled: No position found for ${normalizedSymbol} - position may have been sold. Cleaning up any stale StopLimit tracking...`);
+    console.log(`⏳ [DEBUG] Position not found in cache for ${normalizedSymbol} immediately. Waiting for positions WebSocket update...`);
+    for (let i = 0; i < 6; i++) {
+      await new Promise(resolve => setTimeout(resolve, 500)); // Wait 500ms between checks
+      existingPosition = positionsCache.get(normalizedSymbol);
+      hasExistingPosition = existingPosition && parseFloat(existingPosition.Quantity || '0') > 0;
+      if (hasExistingPosition) {
+        console.log(`✅ [DEBUG] Position found in cache for ${normalizedSymbol} after ${(i + 1) * 500}ms wait`);
+        break;
+      }
+    }
+  }
+  
+  // DEFENSIVE: If position still doesn't exist after waiting, it was likely sold
+  // Clean up any stale StopLimit tracking and abort
+  if (!hasExistingPosition) {
+    console.warn(`⚠️ [DEBUG] handleManualBuyFilled: No position found for ${normalizedSymbol} after waiting - position may have been sold. Cleaning up any stale StopLimit tracking...`);
     // Clean up any stale tracking
     stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
     pendingStopLimitOrderIds.delete(normalizedSymbol);
     stopLimitCreationBySymbol.delete(normalizedSymbol);
-    console.log(`🧹 [DEBUG] Cleaned up stale StopLimit tracking for ${normalizedSymbol} (no position exists)`);
+    console.log(`🧹 [DEBUG] Cleaned up stale StopLimit tracking for ${normalizedSymbol} (no position exists after wait)`);
     return;
   }
   
@@ -4344,13 +4365,19 @@ async function handleManualBuyFilled(orderId, order, pending) {
           
           if (isActive || isPending) {
             console.log(`✅ [DEBUG] Found active StopLimit order ${waitOrderId} after waiting (status: ${waitStatus}). Updating quantity...`);
-            const leg = waitOrder.Legs?.[0];
-            const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
-            const newQty = existingQty + quantity;
-            await modifyOrderQuantity(waitOrderId, newQty);
-            stopLimitOrderIdsBySymbol.set(normalizedSymbol, waitOrderId);
-            pendingStopLimitOrderIds.delete(normalizedSymbol);
-            return;
+            // CRITICAL: Use actual position quantity, not order quantity
+            // The position quantity reflects the total shares owned (including the new buy)
+            const position = positionsCache.get(normalizedSymbol);
+            const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+            if (positionQty > 0) {
+              console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares (was: ${waitOrder.Legs?.[0]?.QuantityRemaining || waitOrder.Legs?.[0]?.QuantityOrdered || 0})`);
+              await modifyOrderQuantity(waitOrderId, positionQty);
+              stopLimitOrderIdsBySymbol.set(normalizedSymbol, waitOrderId);
+              pendingStopLimitOrderIds.delete(normalizedSymbol);
+              return;
+            } else {
+              console.warn(`⚠️ [DEBUG] Position quantity is 0 or not found for ${normalizedSymbol}, cannot update StopLimit`);
+            }
           }
         }
         
@@ -4366,13 +4393,18 @@ async function handleManualBuyFilled(orderId, order, pending) {
             
             if (isActive || isPending) {
               console.log(`✅ [DEBUG] Found active StopLimit order ${completedOrderId} after creation completed (status: ${completedStatus}). Updating quantity...`);
-              const leg = completedOrder.Legs?.[0];
-              const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
-              const newQty = existingQty + quantity;
-              await modifyOrderQuantity(completedOrderId, newQty);
-              stopLimitOrderIdsBySymbol.set(normalizedSymbol, completedOrderId);
-              pendingStopLimitOrderIds.delete(normalizedSymbol);
-              return;
+              // CRITICAL: Use actual position quantity, not order quantity
+              const position = positionsCache.get(normalizedSymbol);
+              const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+              if (positionQty > 0) {
+                console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares`);
+                await modifyOrderQuantity(completedOrderId, positionQty);
+                stopLimitOrderIdsBySymbol.set(normalizedSymbol, completedOrderId);
+                pendingStopLimitOrderIds.delete(normalizedSymbol);
+                return;
+              } else {
+                console.warn(`⚠️ [DEBUG] Position quantity is 0 or not found for ${normalizedSymbol}, cannot update StopLimit`);
+              }
             }
           }
           break;
@@ -4389,13 +4421,18 @@ async function handleManualBuyFilled(orderId, order, pending) {
         
         if (isActive || isPending) {
           console.log(`✅ [DEBUG] Found active StopLimit order ${finalWaitOrderId} in final wait check (status: ${finalWaitStatus}). Updating quantity...`);
-          const leg = finalWaitOrder.Legs?.[0];
-          const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
-          const newQty = existingQty + quantity;
-          await modifyOrderQuantity(finalWaitOrderId, newQty);
-          stopLimitOrderIdsBySymbol.set(normalizedSymbol, finalWaitOrderId);
-          pendingStopLimitOrderIds.delete(normalizedSymbol);
-          return;
+          // CRITICAL: Use actual position quantity, not order quantity
+          const position = positionsCache.get(normalizedSymbol);
+          const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+          if (positionQty > 0) {
+            console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares`);
+            await modifyOrderQuantity(finalWaitOrderId, positionQty);
+            stopLimitOrderIdsBySymbol.set(normalizedSymbol, finalWaitOrderId);
+            pendingStopLimitOrderIds.delete(normalizedSymbol);
+            return;
+          } else {
+            console.warn(`⚠️ [DEBUG] Position quantity is 0 or not found for ${normalizedSymbol}, cannot update StopLimit`);
+          }
         }
       }
     }
@@ -4432,26 +4469,38 @@ async function handleManualBuyFilled(orderId, order, pending) {
               pendingStopLimitOrderIds.delete(normalizedSymbol);
             } else {
               // Order is still active/pending, proceed with update
-              const leg = updatedOrder.Legs?.[0];
-              const currentQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
-              const newQty = currentQty + quantity;
-              const result = await modifyOrderQuantity(existingOrderId, newQty);
-              console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
-              stopLimitOrderIdsBySymbol.set(normalizedSymbol, existingOrderId);
-              pendingStopLimitOrderIds.delete(normalizedSymbol);
-              return;
+              // CRITICAL: Use actual position quantity, not order quantity
+              const position = positionsCache.get(normalizedSymbol);
+              const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+              if (positionQty > 0) {
+                console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares (order was: ${updatedOrder.Legs?.[0]?.QuantityRemaining || updatedOrder.Legs?.[0]?.QuantityOrdered || 0})`);
+                const result = await modifyOrderQuantity(existingOrderId, positionQty);
+                console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
+                stopLimitOrderIdsBySymbol.set(normalizedSymbol, existingOrderId);
+                pendingStopLimitOrderIds.delete(normalizedSymbol);
+                return;
+              } else {
+                console.warn(`⚠️ [DEBUG] Position quantity is 0 or not found for ${normalizedSymbol}, cannot update StopLimit`);
+              }
             }
           }
         } else {
           // Order is active, update immediately
-          const leg = existingOrder.Legs?.[0];
-          const currentQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
-          const newQty = currentQty + quantity;
-          const result = await modifyOrderQuantity(existingOrderId, newQty);
-          console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
-          stopLimitOrderIdsBySymbol.set(normalizedSymbol, existingOrderId);
-          pendingStopLimitOrderIds.delete(normalizedSymbol);
-          return;
+          // CRITICAL: Use actual position quantity, not order quantity
+          // The position quantity reflects the total shares owned (including the new buy)
+          const position = positionsCache.get(normalizedSymbol);
+          const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+          if (positionQty > 0) {
+            const orderQty = parseInt(existingOrder.Legs?.[0]?.QuantityRemaining || existingOrder.Legs?.[0]?.QuantityOrdered || '0', 10) || 0;
+            console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares (order currently has: ${orderQty})`);
+            const result = await modifyOrderQuantity(existingOrderId, positionQty);
+            console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
+            stopLimitOrderIdsBySymbol.set(normalizedSymbol, existingOrderId);
+            pendingStopLimitOrderIds.delete(normalizedSymbol);
+            return;
+          } else {
+            console.warn(`⚠️ [DEBUG] Position quantity is 0 or not found for ${normalizedSymbol}, cannot update StopLimit`);
+          }
         }
       } else {
         console.log(`⚠️ [DEBUG] StopLimit order ${existingOrderId} found but status is ${currentStatus} (not active/pending). Removing from tracking and creating new one.`);
@@ -4475,13 +4524,18 @@ async function handleManualBuyFilled(orderId, order, pending) {
         const waitStatus = (waitOrder?.Status || '').toUpperCase();
         if (isActiveOrderStatus(waitStatus) || ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(waitStatus)) {
           console.log(`✅ [DEBUG] StopLimit was created while waiting (${waitOrderId}), modifying existing order`);
-          const leg = waitOrder.Legs?.[0];
-          const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
-          const newQty = existingQty + quantity;
-          await modifyOrderQuantity(waitOrderId, newQty);
-          stopLimitOrderIdsBySymbol.set(normalizedSymbol, waitOrderId);
-          pendingStopLimitOrderIds.delete(normalizedSymbol);
-          return;
+          // CRITICAL: Use actual position quantity, not order quantity
+          const position = positionsCache.get(normalizedSymbol);
+          const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+          if (positionQty > 0) {
+            console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares`);
+            await modifyOrderQuantity(waitOrderId, positionQty);
+            stopLimitOrderIdsBySymbol.set(normalizedSymbol, waitOrderId);
+            pendingStopLimitOrderIds.delete(normalizedSymbol);
+            return;
+          } else {
+            console.warn(`⚠️ [DEBUG] Position quantity is 0 or not found for ${normalizedSymbol}, cannot update StopLimit`);
+          }
         }
       }
     }
@@ -4498,13 +4552,18 @@ async function handleManualBuyFilled(orderId, order, pending) {
         const raceStatus = (raceOrder?.Status || '').toUpperCase();
         if (isActiveOrderStatus(raceStatus) || ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(raceStatus)) {
           console.log(`✅ [DEBUG] Found active StopLimit order ${raceOrderId} after race condition wait. Updating quantity...`);
-          const leg = raceOrder.Legs?.[0];
-          const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
-          const newQty = existingQty + quantity;
-          await modifyOrderQuantity(raceOrderId, newQty);
-          stopLimitOrderIdsBySymbol.set(normalizedSymbol, raceOrderId);
-          pendingStopLimitOrderIds.delete(normalizedSymbol);
-          return;
+          // CRITICAL: Use actual position quantity, not order quantity
+          const position = positionsCache.get(normalizedSymbol);
+          const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+          if (positionQty > 0) {
+            console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares`);
+            await modifyOrderQuantity(raceOrderId, positionQty);
+            stopLimitOrderIdsBySymbol.set(normalizedSymbol, raceOrderId);
+            pendingStopLimitOrderIds.delete(normalizedSymbol);
+            return;
+          } else {
+            console.warn(`⚠️ [DEBUG] Position quantity is 0 or not found for ${normalizedSymbol}, cannot update StopLimit`);
+          }
         }
       }
       // If still in progress and no order found, log warning but continue (shouldn't happen)
@@ -4524,14 +4583,19 @@ async function handleManualBuyFilled(orderId, order, pending) {
       
       if (isActive || isPending) {
         console.log(`✅ [DEBUG] Absolute final check found existing StopLimit ${finalOrderId} (status: ${finalStatus}). Updating quantity...`);
-        const leg = finalOrder.Legs?.[0];
-        const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
-        const newQty = existingQty + quantity;
-        const result = await modifyOrderQuantity(finalOrderId, newQty);
-        console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
-        stopLimitOrderIdsBySymbol.set(normalizedSymbol, finalOrderId);
-        pendingStopLimitOrderIds.delete(normalizedSymbol);
-        return;
+        // CRITICAL: Use actual position quantity, not order quantity
+        const position = positionsCache.get(normalizedSymbol);
+        const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+        if (positionQty > 0) {
+          console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares`);
+          const result = await modifyOrderQuantity(finalOrderId, positionQty);
+          console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
+          stopLimitOrderIdsBySymbol.set(normalizedSymbol, finalOrderId);
+          pendingStopLimitOrderIds.delete(normalizedSymbol);
+          return;
+        } else {
+          console.warn(`⚠️ [DEBUG] Position quantity is 0 or not found for ${normalizedSymbol}, cannot update StopLimit`);
+        }
       }
     }
     
@@ -4581,14 +4645,19 @@ async function handleManualBuyFilled(orderId, order, pending) {
         
         if (isActive || isPending) {
           console.log(`✅ [DEBUG] Found existing StopLimit ${finalOrderId} in final check (status: ${finalStatus}). Updating quantity...`);
-          const leg = finalOrder.Legs?.[0];
-          const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
-          const newQty = existingQty + quantity;
-          const result = await modifyOrderQuantity(finalOrderId, newQty);
-          console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
-          stopLimitOrderIdsBySymbol.set(normalizedSymbol, finalOrderId);
-          pendingStopLimitOrderIds.delete(normalizedSymbol);
-          return;
+          // CRITICAL: Use actual position quantity, not order quantity
+          const position = positionsCache.get(normalizedSymbol);
+          const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+          if (positionQty > 0) {
+            console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares`);
+            const result = await modifyOrderQuantity(finalOrderId, positionQty);
+            console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
+            stopLimitOrderIdsBySymbol.set(normalizedSymbol, finalOrderId);
+            pendingStopLimitOrderIds.delete(normalizedSymbol);
+            return;
+          } else {
+            console.warn(`⚠️ [DEBUG] Position quantity is 0 or not found for ${normalizedSymbol}, cannot update StopLimit`);
+          }
         } else {
           console.log(`⚠️ [DEBUG] Final check found order ${finalOrderId} but status ${finalStatus} is not active/pending. Will create new.`);
         }
@@ -5461,16 +5530,62 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
       let cancellationError = null;
       
       try {
+        // CRITICAL: Re-check for StopLimit orders one more time before general cancellation
+        // This catches any StopLimit orders that might not have been found in the initial check
+        // (e.g., if they were just added to cache via WebSocket)
+        const additionalStopLimitCheck = findExistingStopLimitSellForSymbol(normalizedSymbol);
+        if (additionalStopLimitCheck && additionalStopLimitCheck.orderId) {
+          const stopLimitId = additionalStopLimitCheck.orderId;
+          const stopLimitStatus = (additionalStopLimitCheck.order?.Status || '').toUpperCase();
+          const isActive = isActiveOrderStatus(stopLimitStatus);
+          const isPending = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(stopLimitStatus);
+          
+          if (isActive || isPending) {
+            console.log(`🛑 [DEBUG] Found additional StopLimit order ${stopLimitId} (status: ${stopLimitStatus}) - cancelling before general cleanup...`);
+            try {
+              const cancelResp = await fetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(stopLimitId)}`, {
+                method: 'DELETE',
+                headers: { 'Accept': '*/*' }
+              });
+              if (cancelResp.ok || cancelResp.status === 200 || cancelResp.status === 204 || cancelResp.status === 404) {
+                console.log(`✅ Additional StopLimit order ${stopLimitId} cancelled successfully`);
+                stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
+                pendingStopLimitOrderIds.delete(normalizedSymbol);
+                stopLimitCreationBySymbol.delete(normalizedSymbol);
+                ordersCache.delete(stopLimitId);
+                if (cachePersistenceService) {
+                  cachePersistenceService.scheduleOrderSave(stopLimitId);
+                }
+              }
+            } catch (err) {
+              console.error(`❌ Error cancelling additional StopLimit order ${stopLimitId}:`, err.message);
+            }
+            // Wait a bit for cancellation to propagate
+            await new Promise(resolve => setTimeout(resolve, 500));
+          }
+        }
+        
         // First, find all active sell orders in the global cache
         let activeSellOrders = findActiveSellOrdersInCache(symbol);
         console.log(`🔍 Found ${activeSellOrders.length} active sell order(s) for ${symbol} in orders cache`);
+        
+        // Log StopLimit orders specifically for debugging
+        const stopLimitOrders = activeSellOrders.filter(o => {
+          const ot = (o.order?.OrderType || '').toUpperCase();
+          return ot === 'STOPLIMIT' || ot === 'STOP_LIMIT';
+        });
+        if (stopLimitOrders.length > 0) {
+          console.log(`🛑 [DEBUG] Found ${stopLimitOrders.length} StopLimit order(s) in active sell orders:`, stopLimitOrders.map(o => `${o.orderId} (${o.status})`).join(', '));
+        }
         
         // Cancel all active sell orders directly
         if (activeSellOrders.length > 0) {
           console.log(`🗑️ Cancelling ${activeSellOrders.length} active sell order(s) for ${symbol}...`);
           // Log each order being cancelled for debugging
           for (const order of activeSellOrders) {
-            console.log(`   - Order ${order.orderId} (Status: ${order.status})`);
+            const orderType = (order.order?.OrderType || '').toUpperCase();
+            const isStopLimit = orderType === 'STOPLIMIT' || orderType === 'STOP_LIMIT';
+            console.log(`   - Order ${order.orderId} (Type: ${orderType}, Status: ${order.status})${isStopLimit ? ' [STOPLIMIT]' : ''}`);
           }
           
           const cancelResults = await Promise.allSettled(
@@ -5554,14 +5669,59 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
       
       // CRITICAL: One final check right before placing the order to catch any orders that were re-added
       // This is especially important for ACK orders that might be re-added via WebSocket
+      // Also specifically check for StopLimit orders one more time
+      const finalStopLimitCheck = findExistingStopLimitSellForSymbol(normalizedSymbol);
+      if (finalStopLimitCheck && finalStopLimitCheck.orderId) {
+        const finalStopLimitId = finalStopLimitCheck.orderId;
+        const finalStopLimitStatus = (finalStopLimitCheck.order?.Status || '').toUpperCase();
+        const isActive = isActiveOrderStatus(finalStopLimitStatus);
+        const isPending = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(finalStopLimitStatus);
+        
+        if (isActive || isPending) {
+          console.warn(`🛑 [DEBUG] CRITICAL: Found StopLimit order ${finalStopLimitId} (status: ${finalStopLimitStatus}) right before placing sell order! Cancelling immediately...`);
+          try {
+            const cancelResp = await fetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(finalStopLimitId)}`, {
+              method: 'DELETE',
+              headers: { 'Accept': '*/*' }
+            });
+            if (cancelResp.ok || cancelResp.status === 200 || cancelResp.status === 204 || cancelResp.status === 404) {
+              console.log(`✅ Final StopLimit order ${finalStopLimitId} cancelled successfully`);
+              stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
+              pendingStopLimitOrderIds.delete(normalizedSymbol);
+              stopLimitCreationBySymbol.delete(normalizedSymbol);
+              ordersCache.delete(finalStopLimitId);
+              if (cachePersistenceService) {
+                cachePersistenceService.scheduleOrderSave(finalStopLimitId);
+              }
+            } else {
+              console.error(`❌ Failed to cancel final StopLimit order ${finalStopLimitId} (HTTP ${cancelResp.status})`);
+            }
+          } catch (err) {
+            console.error(`❌ Error cancelling final StopLimit order ${finalStopLimitId}:`, err.message);
+          }
+          // Wait for cancellation to propagate
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      }
+      
       let preOrderCheck = findActiveSellOrdersInCache(symbol);
       
       if (preOrderCheck.length > 0) {
         console.warn(`⚠️ P&L Sell: Found ${preOrderCheck.length} active sell order(s) right before placing new order. Cancelling immediately...`);
+        // Check for StopLimit orders specifically
+        const stopLimitInPreCheck = preOrderCheck.filter(o => {
+          const ot = (o.order?.OrderType || '').toUpperCase();
+          return ot === 'STOPLIMIT' || ot === 'STOP_LIMIT';
+        });
+        if (stopLimitInPreCheck.length > 0) {
+          console.warn(`🛑 [DEBUG] CRITICAL: Found ${stopLimitInPreCheck.length} StopLimit order(s) in pre-order check!`, stopLimitInPreCheck.map(o => `${o.orderId} (${o.status})`).join(', '));
+        }
         // Cancel all in parallel for speed
         await Promise.allSettled(
           preOrderCheck.map(order => {
-            console.log(`   - Order ${order.orderId} (Status: ${order.status})`);
+            const orderType = (order.order?.OrderType || '').toUpperCase();
+            const isStopLimit = orderType === 'STOPLIMIT' || orderType === 'STOP_LIMIT';
+            console.log(`   - Order ${order.orderId} (Type: ${orderType}, Status: ${order.status})${isStopLimit ? ' [STOPLIMIT - CRITICAL]' : ''}`);
             return cancelOrderDirectly(order.orderId);
           })
         );
