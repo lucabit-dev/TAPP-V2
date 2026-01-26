@@ -519,8 +519,8 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                             }
                             
                             const orderId = lastOrderIdBySymbol[cleanSymbol];
-                            const status = orderStatusBySymbol[cleanSymbol];
-                            const statusHint = status === 'ACK' ? 'Received' : status === 'DON' ? 'Queued' : status === 'FLL' || status === 'FIL' ? 'Filled' : status === 'REJ' ? 'Rejected' : status === 'PENDING' ? '…' : '';
+                            const orderStatus = orderStatusBySymbol[cleanSymbol];
+                            const statusHint = orderStatus === 'ACK' ? 'Received' : orderStatus === 'DON' ? 'Queued' : orderStatus === 'FLL' || orderStatus === 'FIL' ? 'Filled' : orderStatus === 'REJ' ? 'Rejected' : orderStatus === 'PENDING' ? '…' : '';
                             return (
                               <div className="flex flex-col items-center gap-0.5">
                                 <button
@@ -537,8 +537,8 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                                   {buttonText}
                                 </button>
                                 {orderId && (
-                                  <span className="text-[9px] text-[#808080]" title={`Order ${orderId} · ${status || '—'}`}>
-                                    {statusHint || status || '—'}
+                                  <span className="text-[9px] text-[#808080]" title={`Order ${orderId} · ${orderStatus || '—'}`}>
+                                    {statusHint || orderStatus || '—'}
                                   </span>
                                 )}
                               </div>
