@@ -3089,6 +3089,11 @@ function connectOrdersWebSocket() {
           // When a tracked manual BUY reaches FLL/FIL: create or modify StopLimit SELL
           if (isFilled && isBuy && pending) {
             console.log(`🚀 [DEBUG] Triggering StopLimit creation/modification for filled manual buy ${orderId} (${symbol})`);
+            // CRITICAL: Remove from pendingManualBuyOrders FIRST to prevent duplicate processing
+            // This ensures that even if WebSocket sends multiple FLL updates, we only process once
+            pendingManualBuyOrders.delete(orderId);
+            console.log(`✅ [DEBUG] Removed ${orderId} from pendingManualBuyOrders. Remaining: ${pendingManualBuyOrders.size}`);
+            
             // Don't remove from cache yet - let handleManualBuyFilled complete first
             // The order will be removed from cache after this block if status is terminal
             // Only call if not already in progress (prevent duplicate calls)
@@ -3100,8 +3105,6 @@ function connectOrdersWebSocket() {
             } else {
               console.log(`⏸️ [DEBUG] StopLimit creation already in progress for ${orderId}, skipping WebSocket trigger`);
             }
-            pendingManualBuyOrders.delete(orderId);
-            console.log(`✅ [DEBUG] Removed ${orderId} from pendingManualBuyOrders. Remaining: ${pendingManualBuyOrders.size}`);
           }
 
           // Log order updates for debugging (only for active orders)
@@ -3112,20 +3115,27 @@ function connectOrdersWebSocket() {
           // Remove order from cache if it's cancelled or filled (status indicates completion)
           // NOTE: For FLL/FIL orders, we keep it in cache briefly so handleManualBuyFilled can find existing StopLimits
           // The order will be cleaned up on next status update or after a delay
+          // CRITICAL: Only remove filled orders if they're NOT tracked manual buys (already processed)
+          // Tracked manual buys are removed from pendingManualBuyOrders when FLL is detected, so pending will be null
           if (status === 'CAN' || status === 'EXP') {
             ordersCache.delete(orderId);
             if (cachePersistenceService) {
               cachePersistenceService.scheduleOrderSave(orderId);
             }
             console.log(`📋 Order removed from cache: ${orderId} (Status: ${order.Status})`);
-          } else if ((status === 'FIL' || status === 'FLL') && !(isFilled && isBuy && pending)) {
+          } else if ((status === 'FIL' || status === 'FLL') && !pending) {
             // Only remove filled orders from cache if they're not tracked manual buys
-            // Tracked manual buys are handled above and will be cleaned up later
-            ordersCache.delete(orderId);
-            if (cachePersistenceService) {
-              cachePersistenceService.scheduleOrderSave(orderId);
-            }
-            console.log(`📋 Order removed from cache: ${orderId} (Status: ${order.Status})`);
+            // If pending is null, it means we already processed this order (removed from pendingManualBuyOrders)
+            // Wait a bit before removing to ensure handleManualBuyFilled has time to complete
+            setTimeout(() => {
+              if (ordersCache.has(orderId)) {
+                ordersCache.delete(orderId);
+                if (cachePersistenceService) {
+                  cachePersistenceService.scheduleOrderSave(orderId);
+                }
+                console.log(`📋 Order removed from cache after delay: ${orderId} (Status: ${order.Status})`);
+              }
+            }, 5000); // 5 second delay to allow StopLimit creation to complete
           }
         }
       } catch (err) {
@@ -4024,16 +4034,26 @@ async function handleManualBuyFilled(orderId, order, pending) {
   const leg = order.Legs && order.Legs[0] ? order.Legs[0] : null;
   const quantity = Math.floor(Number(pending.quantity || leg?.ExecQuantity || leg?.QuantityOrdered || 0)) || 0;
   
-  // IMPORTANT: Use the buy order's limitPrice (pending.limitPrice) as the stop price
+  // CRITICAL: Always use pending.limitPrice (the buy order's limit price) as the stop price
   // This is the price at which we bought, so we want to set stop at this price
-  // The FilledPrice might be slightly different, but we use limitPrice for consistency
+  // DO NOT use order.FilledPrice or order.LimitPrice as they might be different or stale
   // StopLimit stop_price = buy limit price, limit_price = stop_price - 0.05
-  const fillPrice = parseFloat(pending.limitPrice || order.FilledPrice || order.LimitPrice || 0) || 0;
+  const fillPrice = parseFloat(pending.limitPrice || 0) || 0;
   
-  // Validate fillPrice - must be positive
+  // Validate fillPrice - must be positive and match the buy order price
   if (fillPrice <= 0) {
-    console.error(`❌ [DEBUG] handleManualBuyFilled: Invalid fillPrice ${fillPrice} for ${symbol}. Order:`, JSON.stringify(order, null, 2), `Pending:`, JSON.stringify(pending, null, 2));
+    console.error(`❌ [DEBUG] handleManualBuyFilled: Invalid fillPrice ${fillPrice} for ${symbol}. Pending:`, JSON.stringify(pending, null, 2), `Order:`, JSON.stringify(order, null, 2));
     return;
+  }
+  
+  // Log warning if order prices don't match pending price (for debugging)
+  const orderFilledPrice = parseFloat(order.FilledPrice || 0) || 0;
+  const orderLimitPrice = parseFloat(order.LimitPrice || 0) || 0;
+  if (orderFilledPrice > 0 && Math.abs(orderFilledPrice - fillPrice) > 0.01) {
+    console.warn(`⚠️ [DEBUG] Price mismatch: pending.limitPrice=${fillPrice}, order.FilledPrice=${orderFilledPrice} for ${symbol}`);
+  }
+  if (orderLimitPrice > 0 && Math.abs(orderLimitPrice - fillPrice) > 0.01) {
+    console.warn(`⚠️ [DEBUG] Price mismatch: pending.limitPrice=${fillPrice}, order.LimitPrice=${orderLimitPrice} for ${symbol}`);
   }
   
   console.log(`🎯 [DEBUG] Extracted values:`, {
