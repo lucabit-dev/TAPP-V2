@@ -2929,6 +2929,21 @@ function connectPositionsWebSocket() {
           if (cachePersistenceService) {
             cachePersistenceService.schedulePositionSave(symbol);
           }
+          
+          // CRITICAL: Clean up StopLimit order tracking when position is sold/closed
+          // When a position is sold, its StopLimit order should be cancelled/removed
+          // Clean up both tracking maps to prevent stale references
+          const stopLimitOrderId = stopLimitOrderIdsBySymbol.get(symbol);
+          if (stopLimitOrderId) {
+            stopLimitOrderIdsBySymbol.delete(symbol);
+            console.log(`🧹 [DEBUG] Removed StopLimit order tracking for ${symbol} (position closed)`);
+          }
+          const pendingStopLimitOrderId = pendingStopLimitOrderIds.get(symbol);
+          if (pendingStopLimitOrderId) {
+            pendingStopLimitOrderIds.delete(symbol);
+            console.log(`🧹 [DEBUG] Removed pending StopLimit order tracking for ${symbol} (position closed)`);
+          }
+          
           if (typeof lastBuyTsByTicker !== 'undefined' && lastBuyTsByTicker.has(symbol)) {
             lastBuyTsByTicker.delete(symbol);
             console.log(`🔁 Reset buy lock for ${symbol} (position closed)`);
@@ -3920,7 +3935,14 @@ function findExistingStopLimitSellForSymbol(symbol) {
   console.log(`🔍 [DEBUG] Orders cache size: ${ordersCache.size}`);
   
   for (const [oid, order] of ordersCache.entries()) {
-    if (!order?.Legs?.length || !isActiveOrderStatus(order.Status)) continue;
+    if (!order?.Legs?.length) continue;
+    
+    // CRITICAL: Only consider ACTIVE orders (ACK, DON, etc.) - exclude REJ, CAN, FLL, FIL
+    // REJ orders should not be considered as existing orders
+    if (!isActiveOrderStatus(order.Status)) {
+      continue;
+    }
+    
     const ot = (order.OrderType || '').toUpperCase();
     if (ot !== 'STOPLIMIT' && ot !== 'STOP_LIMIT') continue;
     const leg = order.Legs[0];
@@ -3928,11 +3950,11 @@ function findExistingStopLimitSellForSymbol(symbol) {
     const side = (leg.BuyOrSell || '').toUpperCase();
     if (legSymbol === normalized && side === 'SELL') {
       const qty = parseInt(leg.QuantityRemaining || leg.QuantityOrdered || '0', 10) || 0;
-      console.log(`✅ [DEBUG] Found existing StopLimit SELL: ${oid} for ${normalized} (qty ${qty}, status ${order.Status})`);
+      console.log(`✅ [DEBUG] Found existing active StopLimit SELL: ${oid} for ${normalized} (qty ${qty}, status ${order.Status})`);
       return { orderId: oid, quantity: qty };
     }
   }
-  console.log(`ℹ️ [DEBUG] No existing StopLimit SELL found for ${normalized}`);
+  console.log(`ℹ️ [DEBUG] No existing active StopLimit SELL found for ${normalized}`);
   return null;
 }
 
@@ -4117,16 +4139,40 @@ async function handleManualBuyFilled(orderId, order, pending) {
     // CRITICAL: Check if we already have an active StopLimit sell order for this symbol
     // Only one active sell order per symbol is allowed
     // First check tracking map (ACK'd orders), then pending map (created but not ACK'd), then cache
+    // IMPORTANT: If tracking map has a REJ order ID, we need to clean it up first
     let existingOrderId = stopLimitOrderIdsBySymbol.get(normalizedSymbol);
     let existingOrder = existingOrderId ? ordersCache.get(existingOrderId) : null;
+    
+    // If order ID exists in tracking map, verify it's still active (not REJ, CAN, etc.)
+    if (existingOrderId && existingOrder) {
+      const orderStatus = (existingOrder.Status || '').toUpperCase();
+      if (orderStatus === 'REJ' || orderStatus === 'CAN' || orderStatus === 'EXP' || orderStatus === 'FIL' || orderStatus === 'FLL') {
+        // Order is no longer active - clean up tracking
+        console.log(`🧹 [DEBUG] StopLimit order ${existingOrderId} in tracking map has status ${orderStatus} - cleaning up tracking`);
+        stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
+        pendingStopLimitOrderIds.delete(normalizedSymbol);
+        existingOrderId = null;
+        existingOrder = null;
+      }
+    }
     
     // If not found in tracking map, check pending map
     if (!existingOrderId) {
       const pendingOrderId = pendingStopLimitOrderIds.get(normalizedSymbol);
       if (pendingOrderId) {
-        existingOrderId = pendingOrderId;
-        existingOrder = ordersCache.get(existingOrderId);
-        console.log(`⏳ [DEBUG] Found pending StopLimit order ${existingOrderId} for ${normalizedSymbol} (not yet ACK'd)`);
+        existingOrder = ordersCache.get(pendingOrderId);
+        if (existingOrder) {
+          const orderStatus = (existingOrder.Status || '').toUpperCase();
+          if (orderStatus === 'REJ' || orderStatus === 'CAN' || orderStatus === 'EXP' || orderStatus === 'FIL' || orderStatus === 'FLL') {
+            // Pending order was rejected/cancelled - clean up
+            console.log(`🧹 [DEBUG] Pending StopLimit order ${pendingOrderId} has status ${orderStatus} - cleaning up`);
+            pendingStopLimitOrderIds.delete(normalizedSymbol);
+            existingOrder = null;
+          } else if (isActiveOrderStatus(existingOrder.Status)) {
+            existingOrderId = pendingOrderId;
+            console.log(`⏳ [DEBUG] Found pending StopLimit order ${existingOrderId} for ${normalizedSymbol} (not yet ACK'd, status: ${existingOrder.Status})`);
+          }
+        }
       }
     }
     
