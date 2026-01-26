@@ -16,11 +16,11 @@ const FloatConfigPanel = lazy(() => import('./components/FloatConfigPanel'));
 const ManualConfigPanel = lazy(() => import('./components/ManualConfigPanel'));
 const BuyListSection = lazy(() => import('./components/BuyListSection'));
 // const FloatRawListsSection = lazy(() => import('./components/FloatRawListsSection'));
-const PositionsSection = lazy(() => import('./components/PositionsSection'));
+const PositionsWithStopLimitSection = lazy(() => import('./components/PositionsWithStopLimitSection'));
 const OrdersSection = lazy(() => import('./components/OrdersSection'));
 const L2Section = lazy(() => import('./components/L2Section'));
+const StopLimitSection = lazy(() => import('./components/StopLimitSection'));
 const ChartsSection = lazy(() => import('./components/ChartsSection'));
-const StopLimitTrackingSection = lazy(() => import('./components/StopLimitTrackingSection'));
 const Login = lazy(() => import('./components/Login'));
 
 // Loading fallback component - Minimalistic design
@@ -699,7 +699,7 @@ function App() {
                     { key: 'manual-non-qualified', label: 'NON-QUALIFIED', count: 0 },
                     { key: 'positions', label: 'Positions', count: 0 },
                     { key: 'orders', label: 'Orders', count: 0 },
-                    { key: 'stoplimit', label: 'StopLimit', count: 0 },
+                    { key: 'stoplimit', label: 'Stop Limit', count: 0 },
                     { key: 'l2', label: 'L2', count: 0 },
                     { key: 'charts', label: 'Charts', count: 0 },
                   ].map(tab => (
@@ -1114,9 +1114,9 @@ function App() {
           {selectedTab === 'manual' && <ManualSection viewMode="qualified" />}
           {selectedTab === 'manual-non-qualified' && <ManualSection viewMode="non-qualified" />}
           {selectedTab === 'buy-list' && <BuyListSection />}
-          {selectedTab === 'positions' && <PositionsSection />}
+          {selectedTab === 'positions' && <PositionsWithStopLimitSection />}
+          {selectedTab === 'stoplimit' && <StopLimitSection />}
           {selectedTab === 'orders' && <OrdersSection />}
-          {selectedTab === 'stoplimit' && <StopLimitTrackingSection />}
           {selectedTab === 'l2' && <L2Section />}
           {selectedTab === 'charts' && <ChartsSection />}
           {!['dashboard', 'config-float', 'listas-float-raw', 'buy-list', 'positions', 'orders', 'stoplimit', 'l2', 'charts', 'sold', 'manual', 'manual-non-qualified'].includes(selectedTab) && (

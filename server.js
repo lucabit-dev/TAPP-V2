@@ -4009,7 +4009,6 @@ async function createStopLimitSellOrder(symbol, quantity, buyPrice) {
   
   console.log(`✅ [DEBUG] StopLimit SELL created successfully for ${normalizedSymbol}:`, {
     qty: body.quantity,
-    buy_price: `$${buy.toFixed(2)}`,
     stop_price: `$${body.stop_price.toFixed(2)}`,
     limit_price: `$${body.limit_price.toFixed(2)}`,
     orderId: orderId,
@@ -4760,11 +4759,17 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
             method: 'DELETE',
             headers: { 'Accept': '*/*' }
           });
-          if (cancelResp.ok || cancelResp.status === 200 || cancelResp.status === 204) {
+          if (cancelResp.ok || cancelResp.status === 200 || cancelResp.status === 204 || cancelResp.status === 404) {
             console.log(`✅ StopLimit order ${stopLimitOrderId} cancelled successfully for ${normalizedSymbol}`);
+            // Remove from all tracking maps
             stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
+            pendingStopLimitOrderIds.delete(normalizedSymbol);
             // Remove from cache
             ordersCache.delete(stopLimitOrderId);
+            if (cachePersistenceService) {
+              cachePersistenceService.scheduleOrderSave(stopLimitOrderId);
+            }
+            console.log(`🗑️ [DEBUG] Removed StopLimit tracking for ${normalizedSymbol} from all maps`);
           } else {
             console.warn(`⚠️ Failed to cancel StopLimit order ${stopLimitOrderId} for ${normalizedSymbol} (HTTP ${cancelResp.status})`);
           }
@@ -4773,6 +4778,9 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
         }
       } else {
         console.log(`ℹ️ No StopLimit order found in tracking map or cache for ${normalizedSymbol}`);
+        // Even if not found, ensure it's removed from both tracking maps (cleanup)
+        stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
+        pendingStopLimitOrderIds.delete(normalizedSymbol);
       }
       
       // Helper function to find active sell orders in the global orders cache

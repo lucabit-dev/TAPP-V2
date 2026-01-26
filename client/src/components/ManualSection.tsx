@@ -3,6 +3,7 @@ import { useAuth } from '../auth/AuthContext';
 import NotificationContainer from './NotificationContainer';
 import type { NotificationProps } from './Notification';
 import ManualConfigPanel from './ManualConfigPanel';
+import StopLimitConfigPanel from './StopLimitConfigPanel';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
@@ -93,12 +94,10 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
   const [sellStatuses, setSellStatuses] = useState<Record<string, 'success' | 'error' | null>>({});
   const [notifications, setNotifications] = useState<NotificationProps[]>([]);
   const [showConfigModal, setShowConfigModal] = useState(false);
+  const [showStopLimitConfigModal, setShowStopLimitConfigModal] = useState(false);
   const [buyQuantities, setBuyQuantities] = useState<Record<string, number>>({});
   const [editingQuantity, setEditingQuantity] = useState<string | null>(null);
   const [tempQuantity, setTempQuantity] = useState<Record<string, string>>({});
-  const [lastOrderIdBySymbol, setLastOrderIdBySymbol] = useState<Record<string, string>>({});
-  const [orderStatusBySymbol, setOrderStatusBySymbol] = useState<Record<string, string>>({});
-  const orderPollRef = useRef<Record<string, { orderId: string; until: number }>>({});
 
   useEffect(() => {
     // Initial load of buys enabled status
@@ -163,33 +162,6 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
       wsRef.current?.close();
     };
   }, []);
-
-  // Poll order status (ACK/DON/FLL/REJ) for recently sent manual buys
-  useEffect(() => {
-    const terminal = new Set(['FLL', 'FIL', 'REJ']);
-    const syms = Object.keys(orderPollRef.current);
-    if (syms.length === 0) return;
-    const id = setInterval(async () => {
-      const now = Date.now();
-      for (const sym of [...syms]) {
-        const ent = orderPollRef.current[sym];
-        if (!ent || now > ent.until) {
-          delete orderPollRef.current[sym];
-          continue;
-        }
-        try {
-          const r = await fetchWithAuth(`${API_BASE_URL}/orders/${encodeURIComponent(ent.orderId)}/status`);
-          const j = await r.json().catch(() => ({}));
-          const status = (j?.data?.status ?? '').toUpperCase();
-          if (status) setOrderStatusBySymbol(prev => ({ ...prev, [sym]: status }));
-          if (terminal.has(status)) delete orderPollRef.current[sym];
-        } catch {
-          /* ignore */
-        }
-      }
-    }, 2000);
-    return () => clearInterval(id);
-  }, [lastOrderIdBySymbol, fetchWithAuth]);
 
   const formatNumber = (num: number, decimals = 2) => num.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 
@@ -258,15 +230,9 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
       if (data?.success) {
         const quantity = data.data?.quantity || 'N/A';
         const limitPrice = data.data?.limitPrice ? `$${parseFloat(data.data.limitPrice).toFixed(2)}` : 'N/A';
-        const orderId = data.data?.orderId ?? null;
-        console.log(`✅ Buy signal sent for ${cleanSymbol}:`, data.data?.notifyStatus, orderId ? `orderId=${orderId}` : '');
-        addNotification(`Buy order sent for ${quantity} ${cleanSymbol} at ${limitPrice}${orderId ? ` · Order ${String(orderId).slice(0, 8)}…` : ''}`, 'success');
+        console.log(`✅ Buy signal sent for ${cleanSymbol}:`, data.data?.notifyStatus);
+        addNotification(`Buy order sent successfully for ${quantity} ${cleanSymbol} at ${limitPrice}`, 'success');
         setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'success' }));
-        if (orderId) {
-          setLastOrderIdBySymbol(prev => ({ ...prev, [cleanSymbol]: String(orderId) }));
-          setOrderStatusBySymbol(prev => ({ ...prev, [cleanSymbol]: 'PENDING' }));
-          orderPollRef.current[cleanSymbol] = { orderId: String(orderId), until: Date.now() + 90000 };
-        }
         // Clear status after 3 seconds
         setTimeout(() => {
           setBuyStatuses(prev => {
@@ -409,6 +375,13 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
               >
                 Config
               </button>
+              <button
+                className="px-3 py-1 rounded-sm text-[11px] font-bold transition-all bg-[#2a2820] text-[#eae9e9] hover:bg-[#3a3830] border border-[#404040]"
+                onClick={() => setShowStopLimitConfigModal(true)}
+                title="Open StopLimit configuration"
+              >
+                StopLimit Config
+              </button>
             </>
           )}
 
@@ -518,30 +491,20 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                               buttonClass += ' bg-[#4ade80] text-[#14130e] hover:bg-[#22c55e]';
                             }
                             
-                            const orderId = lastOrderIdBySymbol[cleanSymbol];
-                            const orderStatus = orderStatusBySymbol[cleanSymbol];
-                            const statusHint = orderStatus === 'ACK' ? 'Received' : orderStatus === 'DON' ? 'Queued' : orderStatus === 'FLL' || orderStatus === 'FIL' ? 'Filled' : orderStatus === 'REJ' ? 'Rejected' : orderStatus === 'PENDING' ? '…' : '';
                             return (
-                              <div className="flex flex-col items-center gap-0.5">
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    if (!isDisabled) {
-                                      handleBuyClick(symbolVal);
-                                    }
-                                  }}
-                                  disabled={isDisabled}
-                                  className={buttonClass}
-                                  title={buttonTitle}
-                                >
-                                  {buttonText}
-                                </button>
-                                {orderId && (
-                                  <span className="text-[9px] text-[#808080]" title={`Order ${orderId} · ${orderStatus || '—'}`}>
-                                    {statusHint || orderStatus || '—'}
-                                  </span>
-                                )}
-                              </div>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (!isDisabled) {
+                                    handleBuyClick(symbolVal);
+                                  }
+                                }}
+                                disabled={isDisabled}
+                                className={buttonClass}
+                                title={buttonTitle}
+                              >
+                                {buttonText}
+                              </button>
                             );
                           })()}
                           
@@ -751,6 +714,38 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
             {/* Modal Content */}
             <div className="flex-1 overflow-hidden">
               <ManualConfigPanel />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* StopLimit Config Modal */}
+      {showStopLimitConfigModal && (
+        <div 
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+          onClick={() => setShowStopLimitConfigModal(false)}
+        >
+          <div 
+            className="bg-[#14130e] border border-[#2a2820] rounded-lg shadow-2xl w-[90vw] h-[90vh] max-w-6xl flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between p-4 border-b border-[#2a2820]">
+              <h3 className="text-lg font-bold text-[#eae9e9]">StopLimit Configuration</h3>
+              <button
+                onClick={() => setShowStopLimitConfigModal(false)}
+                className="text-[#808080] hover:text-[#eae9e9] transition-colors p-1"
+                title="Close"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            
+            {/* Modal Content */}
+            <div className="flex-1 overflow-hidden">
+              <StopLimitConfigPanel />
             </div>
           </div>
         </div>

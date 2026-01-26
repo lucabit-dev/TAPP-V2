@@ -37,7 +37,7 @@ interface MergedPosition extends Position {
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
 
-const PositionsSection: React.FC = () => {
+const PositionsWithStopLimitSection: React.FC = () => {
   const { fetchWithAuth } = useAuth();
   const [positions, setPositions] = useState<Map<string, Position>>(new Map());
   const [isConnected, setIsConnected] = useState(false);
@@ -513,6 +513,8 @@ const PositionsSection: React.FC = () => {
     });
   };
 
+  }, [mergedPositions]);
+
   return (
     <div className="h-full flex flex-col bg-[#14130e]">
       <NotificationContainer notifications={notifications} onRemove={removeNotification} />
@@ -786,4 +788,4 @@ const PositionsSection: React.FC = () => {
   );
 };
 
-export default PositionsSection;
+export default PositionsWithStopLimitSection;
