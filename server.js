@@ -3022,6 +3022,28 @@ function connectOrdersWebSocket() {
           const isFilled = (status === 'FLL' || status === 'FIL');
           const isBuy = (order.Legs?.[0]?.BuyOrSell || '').toUpperCase() === 'BUY';
           const pending = pendingManualBuyOrders.get(orderId);
+          const symbol = order.Legs?.[0]?.Symbol || 'UNKNOWN';
+
+          // Debug logging for tracked orders
+          if (pending) {
+            console.log(`🔍 [DEBUG] Order update for TRACKED manual buy: ${orderId} (${symbol}, Status: ${status})`);
+            console.log(`🔍 [DEBUG] Order details:`, JSON.stringify({
+              OrderID: order.OrderID,
+              Status: order.Status,
+              OrderType: order.OrderType,
+              Symbol: symbol,
+              Legs: order.Legs?.map(l => ({
+                Symbol: l.Symbol,
+                BuyOrSell: l.BuyOrSell,
+                QuantityOrdered: l.QuantityOrdered,
+                QuantityRemaining: l.QuantityRemaining,
+                ExecQuantity: l.ExecQuantity,
+                FilledPrice: order.FilledPrice
+              }))
+            }, null, 2));
+            console.log(`🔍 [DEBUG] Pending data:`, JSON.stringify(pending, null, 2));
+            console.log(`🔍 [DEBUG] isFilled=${isFilled}, isBuy=${isBuy}, willTriggerStopLimit=${isFilled && isBuy && pending}`);
+          }
 
           // Update last order update time to track websocket activity
           lastOrderUpdateTime = Date.now();
@@ -3038,18 +3060,34 @@ function connectOrdersWebSocket() {
 
           // When a tracked manual BUY reaches FLL/FIL: create or modify StopLimit SELL
           if (isFilled && isBuy && pending) {
-            handleManualBuyFilled(orderId, order, pending).catch(err => console.error('handleManualBuyFilled:', err));
+            console.log(`🚀 [DEBUG] Triggering StopLimit creation/modification for filled manual buy ${orderId} (${symbol})`);
+            // Don't remove from cache yet - let handleManualBuyFilled complete first
+            // The order will be removed from cache after this block if status is terminal
+            handleManualBuyFilled(orderId, order, pending).catch(err => {
+              console.error(`❌ [DEBUG] Error in handleManualBuyFilled for ${orderId}:`, err);
+              console.error(`❌ [DEBUG] Stack:`, err.stack);
+            });
             pendingManualBuyOrders.delete(orderId);
+            console.log(`✅ [DEBUG] Removed ${orderId} from pendingManualBuyOrders. Remaining: ${pendingManualBuyOrders.size}`);
           }
 
           // Log order updates for debugging (only for active orders)
           if (isActiveOrderStatus(order.Status)) {
-            const symbol = order.Legs && order.Legs.length > 0 ? order.Legs[0].Symbol : 'UNKNOWN';
             console.log(`📋 Order cache updated: ${orderId} (${symbol}, Status: ${order.Status})`);
           }
 
           // Remove order from cache if it's cancelled or filled (status indicates completion)
-          if (status === 'CAN' || status === 'FIL' || status === 'FLL' || status === 'EXP') {
+          // NOTE: For FLL/FIL orders, we keep it in cache briefly so handleManualBuyFilled can find existing StopLimits
+          // The order will be cleaned up on next status update or after a delay
+          if (status === 'CAN' || status === 'EXP') {
+            ordersCache.delete(orderId);
+            if (cachePersistenceService) {
+              cachePersistenceService.scheduleOrderSave(orderId);
+            }
+            console.log(`📋 Order removed from cache: ${orderId} (Status: ${order.Status})`);
+          } else if ((status === 'FIL' || status === 'FLL') && !(isFilled && isBuy && pending)) {
+            // Only remove filled orders from cache if they're not tracked manual buys
+            // Tracked manual buys are handled above and will be cleaned up later
             ordersCache.delete(orderId);
             if (cachePersistenceService) {
               cachePersistenceService.scheduleOrderSave(orderId);
@@ -3267,7 +3305,11 @@ app.post('/api/buys/test', async (req, res) => {
       if (orderIdFromApi != null && (notifyStatus.startsWith('200') || notifyStatus.startsWith('201'))) {
         const oid = String(orderIdFromApi);
         pendingManualBuyOrders.set(oid, { symbol, quantity, limitPrice: currentPrice });
-        console.log(`📌 Tracking manual buy order ${oid} for ${symbol} (qty ${quantity})`);
+        console.log(`📌 [DEBUG] Tracking manual buy order ${oid} for ${symbol} (qty ${quantity}, limitPrice ${currentPrice})`);
+        console.log(`📌 [DEBUG] Full response data:`, JSON.stringify(responseData, null, 2));
+        console.log(`📌 [DEBUG] Total tracked manual buys: ${pendingManualBuyOrders.size}`);
+      } else if (orderIdFromApi == null) {
+        console.warn(`⚠️ [DEBUG] Buy order sent for ${symbol} but no order_id in response. Response:`, JSON.stringify(responseData, null, 2));
       }
     }
 
@@ -3807,6 +3849,9 @@ const SECTIONS_BOT_ORDER_URL = 'https://sections-bot.inbitme.com/order';
 // Find existing active SELL StopLimit order for a symbol (from orders cache). Returns { orderId, quantity } or null.
 function findExistingStopLimitSellForSymbol(symbol) {
   const normalized = (symbol || '').toUpperCase();
+  console.log(`🔍 [DEBUG] Searching for existing StopLimit SELL for ${normalized}...`);
+  console.log(`🔍 [DEBUG] Orders cache size: ${ordersCache.size}`);
+  
   for (const [oid, order] of ordersCache.entries()) {
     if (!order?.Legs?.length || !isActiveOrderStatus(order.Status)) continue;
     const ot = (order.OrderType || '').toUpperCase();
@@ -3816,9 +3861,11 @@ function findExistingStopLimitSellForSymbol(symbol) {
     const side = (leg.BuyOrSell || '').toUpperCase();
     if (legSymbol === normalized && side === 'SELL') {
       const qty = parseInt(leg.QuantityRemaining || leg.QuantityOrdered || '0', 10) || 0;
+      console.log(`✅ [DEBUG] Found existing StopLimit SELL: ${oid} for ${normalized} (qty ${qty}, status ${order.Status})`);
       return { orderId: oid, quantity: qty };
     }
   }
+  console.log(`ℹ️ [DEBUG] No existing StopLimit SELL found for ${normalized}`);
   return null;
 }
 
@@ -3833,6 +3880,8 @@ async function createStopLimitSellOrder(symbol, quantity, stopPrice) {
     stop_price: Number(stopPrice),
     limit_price: limitPrice
   };
+  console.log(`📤 [DEBUG] Creating StopLimit SELL order:`, JSON.stringify(body, null, 2));
+  
   const resp = await fetch(SECTIONS_BOT_ORDER_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -3841,17 +3890,29 @@ async function createStopLimitSellOrder(symbol, quantity, stopPrice) {
   const text = await resp.text().catch(() => '');
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { }
+  
   if (!resp.ok) {
-    console.error(`❌ Create StopLimit SELL failed for ${symbol}:`, resp.status, data || text);
+    console.error(`❌ [DEBUG] Create StopLimit SELL failed for ${symbol}:`, {
+      status: resp.status,
+      statusText: resp.statusText,
+      response: data || text
+    });
     return { success: false, error: data?.message || data?.detail || String(resp.status) };
   }
-  console.log(`✅ StopLimit SELL created for ${symbol} qty=${body.quantity} stop=${body.stop_price} limit=${body.limit_price}`);
+  console.log(`✅ [DEBUG] StopLimit SELL created successfully for ${symbol}:`, {
+    qty: body.quantity,
+    stop_price: body.stop_price,
+    limit_price: body.limit_price,
+    response: data
+  });
   return { success: true, data };
 }
 
 // Modify order quantity via PUT /order (Sections Bot Modificar Orden).
 async function modifyOrderQuantity(orderId, newQuantity) {
   const body = { order_id: String(orderId), quantity: Math.floor(Number(newQuantity)) || 0 };
+  console.log(`📤 [DEBUG] Modifying order quantity:`, JSON.stringify(body, null, 2));
+  
   const resp = await fetch(SECTIONS_BOT_ORDER_URL, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -3860,30 +3921,65 @@ async function modifyOrderQuantity(orderId, newQuantity) {
   const text = await resp.text().catch(() => '');
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { }
+  
   if (!resp.ok) {
-    console.error(`❌ Modify order ${orderId} quantity failed:`, resp.status, data || text);
+    console.error(`❌ [DEBUG] Modify order ${orderId} quantity failed:`, {
+      status: resp.status,
+      statusText: resp.statusText,
+      response: data || text
+    });
     return { success: false, error: data?.message || data?.detail || String(resp.status) };
   }
-  console.log(`✅ Order ${orderId} quantity updated to ${body.quantity}`);
+  console.log(`✅ [DEBUG] Order ${orderId} quantity updated successfully:`, {
+    newQuantity: body.quantity,
+    response: data
+  });
   return { success: true, data };
 }
 
 // When a tracked manual BUY order reaches FLL/FIL: create new StopLimit SELL or add to existing.
 async function handleManualBuyFilled(orderId, order, pending) {
+  console.log(`🎯 [DEBUG] handleManualBuyFilled called for order ${orderId}`);
+  console.log(`🎯 [DEBUG] Order object:`, JSON.stringify({
+    OrderID: order.OrderID,
+    Status: order.Status,
+    OrderType: order.OrderType,
+    FilledPrice: order.FilledPrice,
+    LimitPrice: order.LimitPrice,
+    Legs: order.Legs
+  }, null, 2));
+  console.log(`🎯 [DEBUG] Pending data:`, JSON.stringify(pending, null, 2));
+  
   const symbol = (pending.symbol || (order.Legs?.[0]?.Symbol || '')).toString().toUpperCase();
   const leg = order.Legs && order.Legs[0] ? order.Legs[0] : null;
   const quantity = Math.floor(Number(pending.quantity || leg?.ExecQuantity || leg?.QuantityOrdered || 0)) || 0;
   const fillPrice = parseFloat(order.FilledPrice || order.LimitPrice || leg?.AveragePrice || pending.limitPrice || 0) || 0;
+  
+  console.log(`🎯 [DEBUG] Extracted values:`, {
+    symbol,
+    quantity,
+    fillPrice,
+    legExecQuantity: leg?.ExecQuantity,
+    legQuantityOrdered: leg?.QuantityOrdered,
+    orderFilledPrice: order.FilledPrice,
+    orderLimitPrice: order.LimitPrice
+  });
+  
   if (!symbol || quantity <= 0) {
-    console.warn(`⚠️ handleManualBuyFilled: skip ${orderId} symbol=${symbol} qty=${quantity}`);
+    console.warn(`⚠️ [DEBUG] handleManualBuyFilled: Invalid data - symbol=${symbol}, quantity=${quantity}`);
     return;
   }
+  
   const existing = findExistingStopLimitSellForSymbol(symbol);
   if (!existing) {
-    await createStopLimitSellOrder(symbol, quantity, fillPrice);
+    console.log(`📝 [DEBUG] No existing StopLimit found. Creating new StopLimit SELL for ${symbol}...`);
+    const result = await createStopLimitSellOrder(symbol, quantity, fillPrice);
+    console.log(`📝 [DEBUG] Create StopLimit result:`, JSON.stringify(result, null, 2));
   } else {
+    console.log(`📝 [DEBUG] Existing StopLimit found (${existing.orderId}, qty ${existing.quantity}). Adding ${quantity}...`);
     const newQty = existing.quantity + quantity;
-    await modifyOrderQuantity(existing.orderId, newQty);
+    const result = await modifyOrderQuantity(existing.orderId, newQty);
+    console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
   }
 }
 
@@ -4031,6 +4127,108 @@ async function deleteAllSellOrdersForSymbol(symbol) {
   }
 }
 
+// Get StopLimit status for all positions
+app.get('/api/stoplimit/positions', requireAuth, (req, res) => {
+  try {
+    const positionsWithStopLimit = [];
+    
+    // Iterate through all positions
+    for (const [symbol, position] of positionsCache.entries()) {
+      const normalizedSymbol = symbol.toUpperCase();
+      const quantity = parseFloat(position.Quantity || '0');
+      
+      if (quantity <= 0) continue; // Skip closed positions
+      
+      // Find StopLimit SELL order for this symbol (silent version - no debug logs)
+      let stopLimit = null;
+      for (const [oid, order] of ordersCache.entries()) {
+        if (!order?.Legs?.length || !isActiveOrderStatus(order.Status)) continue;
+        const ot = (order.OrderType || '').toUpperCase();
+        if (ot !== 'STOPLIMIT' && ot !== 'STOP_LIMIT') continue;
+        const leg = order.Legs[0];
+        const legSymbol = (leg.Symbol || '').toUpperCase();
+        const side = (leg.BuyOrSell || '').toUpperCase();
+        if (legSymbol === normalizedSymbol && side === 'SELL') {
+          const qty = parseInt(leg.QuantityRemaining || leg.QuantityOrdered || '0', 10) || 0;
+          stopLimit = { orderId: oid, quantity: qty, order: order };
+          break;
+        }
+      }
+      
+      positionsWithStopLimit.push({
+        symbol: normalizedSymbol,
+        positionId: position.PositionID || null,
+        quantity: quantity,
+        averagePrice: parseFloat(position.AveragePrice || '0') || 0,
+        lastPrice: parseFloat(position.Last || '0') || 0,
+        unrealizedPL: parseFloat(position.UnrealizedProfitLoss || '0') || 0,
+        hasStopLimit: !!stopLimit,
+        stopLimitOrderId: stopLimit?.orderId || null,
+        stopLimitQuantity: stopLimit?.quantity || 0,
+        stopLimitStatus: stopLimit?.order?.Status || null,
+        stopPrice: stopLimit?.order?.StopPrice || null,
+        limitPrice: stopLimit?.order?.LimitPrice || null
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: positionsWithStopLimit
+    });
+  } catch (e) {
+    console.error('Error getting StopLimit positions:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// Cancel/Remove StopLimit order for a symbol
+app.delete('/api/stoplimit/positions/:symbol', requireAuth, async (req, res) => {
+  try {
+    const symbol = (req.params.symbol || '').toString().trim().toUpperCase();
+    if (!symbol) {
+      return res.status(400).json({ success: false, error: 'Missing symbol' });
+    }
+    
+    console.log(`🗑️ Removing StopLimit for ${symbol}...`);
+    
+    // Find existing StopLimit order
+    const stopLimit = findExistingStopLimitSellForSymbol(symbol);
+    
+    if (!stopLimit) {
+      return res.json({
+        success: true,
+        message: `No active StopLimit found for ${symbol}`,
+        data: { symbol, cancelled: false }
+      });
+    }
+    
+    // Cancel the StopLimit order
+    const result = await deleteOrder(stopLimit.orderId);
+    
+    if (result.success) {
+      console.log(`✅ StopLimit order ${stopLimit.orderId} cancelled for ${symbol}`);
+      return res.json({
+        success: true,
+        message: `StopLimit order cancelled for ${symbol}`,
+        data: {
+          symbol,
+          orderId: stopLimit.orderId,
+          cancelled: true
+        }
+      });
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: result.error || `Failed to cancel StopLimit order for ${symbol}`,
+        data: { symbol, orderId: stopLimit.orderId, cancelled: false }
+      });
+    }
+  } catch (e) {
+    console.error(`Error removing StopLimit for ${req.params.symbol}:`, e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // Get order status by order_id (for manual buy tracking: ACK, DON, FLL, REJ)
 app.get('/api/orders/:orderId/status', requireAuth, (req, res) => {
   try {
@@ -4054,6 +4252,77 @@ app.get('/api/orders/:orderId/status', requireAuth, (req, res) => {
     return res.status(404).json({ success: false, error: 'Order not found', data: { orderId } });
   } catch (e) {
     console.error('Error getting order status:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// Debug endpoint: View pending manual buy orders and recent order activity
+app.get('/api/debug/manual-buys', requireAuth, (req, res) => {
+  try {
+    const pending = Array.from(pendingManualBuyOrders.entries()).map(([orderId, data]) => ({
+      orderId,
+      symbol: data.symbol,
+      quantity: data.quantity,
+      limitPrice: data.limitPrice
+    }));
+
+    // Get recent orders from cache that might be related to manual buys
+    const recentOrders = Array.from(ordersCache.entries())
+      .filter(([oid, order]) => {
+        const symbol = order.Legs?.[0]?.Symbol;
+        return symbol && (pendingManualBuyOrders.has(oid) || 
+               pending.some(p => p.symbol === symbol && order.Legs?.[0]?.BuyOrSell?.toUpperCase() === 'BUY'));
+      })
+      .slice(0, 50)
+      .map(([orderId, order]) => {
+        const leg = order.Legs?.[0];
+        return {
+          orderId,
+          symbol: leg?.Symbol || 'UNKNOWN',
+          side: leg?.BuyOrSell || 'UNKNOWN',
+          status: order.Status || 'UNKNOWN',
+          orderType: order.OrderType || 'UNKNOWN',
+          quantity: leg?.QuantityOrdered || leg?.QuantityRemaining || 0,
+          filledPrice: order.FilledPrice || null,
+          limitPrice: order.LimitPrice || null,
+          isTracked: pendingManualBuyOrders.has(orderId),
+          lastUpdated: order.lastUpdated || null
+        };
+      });
+
+    // Get StopLimit SELL orders
+    const stopLimitSells = Array.from(ordersCache.entries())
+      .filter(([oid, order]) => {
+        const ot = (order.OrderType || '').toUpperCase();
+        return (ot === 'STOPLIMIT' || ot === 'STOP_LIMIT') && 
+               order.Legs?.[0]?.BuyOrSell?.toUpperCase() === 'SELL' &&
+               isActiveOrderStatus(order.Status);
+      })
+      .map(([orderId, order]) => {
+        const leg = order.Legs?.[0];
+        return {
+          orderId,
+          symbol: leg?.Symbol || 'UNKNOWN',
+          status: order.Status,
+          quantity: parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0,
+          stopPrice: order.StopPrice || null,
+          limitPrice: order.LimitPrice || null
+        };
+      });
+
+    res.json({
+      success: true,
+      data: {
+        pendingManualBuys: pending,
+        pendingCount: pending.length,
+        recentOrders: recentOrders,
+        stopLimitSells: stopLimitSells,
+        ordersCacheSize: ordersCache.size,
+        lastOrderUpdateTime: lastOrderUpdateTime ? new Date(lastOrderUpdateTime).toISOString() : null
+      }
+    });
+  } catch (e) {
+    console.error('Error in debug endpoint:', e);
     res.status(500).json({ success: false, error: e.message });
   }
 });
