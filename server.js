@@ -153,6 +153,10 @@ const pendingManualBuyOrders = new Map();
 // StopLimit order tracking: track symbol → stopLimitOrderId for manual sell cancellation
 const stopLimitOrderIdsBySymbol = new Map(); // Map<symbol, orderId>
 
+// Track which buy orders have already triggered StopLimit creation (prevent duplicates)
+const stopLimitCreationInProgress = new Set(); // Set<orderId>
+const stopLimitCreationBySymbol = new Set(); // Set<symbol> - track symbols with StopLimit creation in progress
+
 // Cache persistence service (initialized after DB connection)
 let cachePersistenceService = null;
 
@@ -3087,10 +3091,15 @@ function connectOrdersWebSocket() {
             console.log(`🚀 [DEBUG] Triggering StopLimit creation/modification for filled manual buy ${orderId} (${symbol})`);
             // Don't remove from cache yet - let handleManualBuyFilled complete first
             // The order will be removed from cache after this block if status is terminal
-            handleManualBuyFilled(orderId, order, pending).catch(err => {
-              console.error(`❌ [DEBUG] Error in handleManualBuyFilled for ${orderId}:`, err);
-              console.error(`❌ [DEBUG] Stack:`, err.stack);
-            });
+            // Only call if not already in progress (prevent duplicate calls)
+            if (!stopLimitCreationInProgress.has(orderId)) {
+              handleManualBuyFilled(orderId, order, pending).catch(err => {
+                console.error(`❌ [DEBUG] Error in handleManualBuyFilled for ${orderId}:`, err);
+                console.error(`❌ [DEBUG] Stack:`, err.stack);
+              });
+            } else {
+              console.log(`⏸️ [DEBUG] StopLimit creation already in progress for ${orderId}, skipping WebSocket trigger`);
+            }
             pendingManualBuyOrders.delete(orderId);
             console.log(`✅ [DEBUG] Removed ${orderId} from pendingManualBuyOrders. Remaining: ${pendingManualBuyOrders.size}`);
           }
@@ -3352,10 +3361,14 @@ app.post('/api/buys/test', async (req, res) => {
               AveragePrice: responseData.filled_price || responseData.FilledPrice || currentPrice
             }]
           };
-          // Handle instant fill immediately
-          handleManualBuyFilled(oid, instantOrder, { symbol, quantity, limitPrice: currentPrice }).catch(err => {
-            console.error(`❌ [DEBUG] Error handling instant fill for ${oid}:`, err);
-          });
+          // Handle instant fill immediately - but mark as in progress to prevent duplicate
+          if (!stopLimitCreationInProgress.has(oid)) {
+            handleManualBuyFilled(oid, instantOrder, { symbol, quantity, limitPrice: currentPrice }).catch(err => {
+              console.error(`❌ [DEBUG] Error handling instant fill for ${oid}:`, err);
+            });
+          } else {
+            console.log(`⏸️ [DEBUG] StopLimit creation already in progress for instant fill ${oid}, skipping`);
+          }
         }
       } else if (orderIdFromApi == null) {
         console.warn(`⚠️ [DEBUG] Buy order sent for ${symbol} but no order_id in response. Response:`, JSON.stringify(responseData, null, 2));
@@ -3920,16 +3933,30 @@ function findExistingStopLimitSellForSymbol(symbol) {
 
 // Create a SELL StopLimit order. limit_price = stop_price - 0.05 per Sections Bot /ordenes.
 async function createStopLimitSellOrder(symbol, quantity, stopPrice) {
-  const limitPrice = Math.max(0, Number(stopPrice) - 0.05);
+  // Validate inputs
+  const normalizedSymbol = (symbol || '').toUpperCase();
+  const qty = Math.floor(Number(quantity)) || 0;
+  const stop = Number(stopPrice) || 0;
+  
+  if (!normalizedSymbol || qty <= 0 || stop <= 0) {
+    console.error(`❌ [DEBUG] Invalid parameters for StopLimit: symbol=${normalizedSymbol}, quantity=${qty}, stopPrice=${stop}`);
+    return { success: false, error: 'Invalid parameters' };
+  }
+  
+  const limitPrice = Math.max(0, stop - 0.05);
   const body = {
-    symbol: (symbol || '').toUpperCase(),
+    symbol: normalizedSymbol,
     side: 'SELL',
     order_type: 'StopLimit',
-    quantity: Math.floor(Number(quantity)) || 0,
-    stop_price: Number(stopPrice),
+    quantity: qty,
+    stop_price: stop,
     limit_price: limitPrice
   };
-  console.log(`📤 [DEBUG] Creating StopLimit SELL order:`, JSON.stringify(body, null, 2));
+  console.log(`📤 [DEBUG] Creating StopLimit SELL order for ${normalizedSymbol}:`, JSON.stringify({
+    ...body,
+    stop_price: `$${stop.toFixed(2)}`,
+    limit_price: `$${limitPrice.toFixed(2)}`
+  }, null, 2));
   
   const resp = await fetch(SECTIONS_BOT_ORDER_URL, {
     method: 'POST',
@@ -3941,10 +3968,11 @@ async function createStopLimitSellOrder(symbol, quantity, stopPrice) {
   try { data = text ? JSON.parse(text) : null; } catch { }
   
   if (!resp.ok) {
-    console.error(`❌ [DEBUG] Create StopLimit SELL failed for ${symbol}:`, {
+    console.error(`❌ [DEBUG] Create StopLimit SELL failed for ${normalizedSymbol}:`, {
       status: resp.status,
       statusText: resp.statusText,
-      response: data || text
+      response: data || text,
+      requestBody: body
     });
     return { success: false, error: data?.message || data?.detail || String(resp.status) };
   }
@@ -3952,17 +3980,16 @@ async function createStopLimitSellOrder(symbol, quantity, stopPrice) {
   // Extract order ID from response
   const orderId = data?.order_id ?? data?.OrderID ?? data?.orderId ?? null;
   if (orderId) {
-    const normalizedSymbol = (symbol || '').toUpperCase();
     stopLimitOrderIdsBySymbol.set(normalizedSymbol, String(orderId));
-    console.log(`💾 [DEBUG] Saved StopLimit order ID ${orderId} for ${normalizedSymbol}`);
+    console.log(`💾 [DEBUG] Saved StopLimit order ID ${orderId} for ${normalizedSymbol} (stop: $${stop.toFixed(2)}, limit: $${limitPrice.toFixed(2)})`);
   } else {
-    console.warn(`⚠️ [DEBUG] StopLimit order created for ${symbol} but no order_id in response:`, JSON.stringify(data, null, 2));
+    console.warn(`⚠️ [DEBUG] StopLimit order created for ${normalizedSymbol} but no order_id in response:`, JSON.stringify(data, null, 2));
   }
   
-  console.log(`✅ [DEBUG] StopLimit SELL created successfully for ${symbol}:`, {
+  console.log(`✅ [DEBUG] StopLimit SELL created successfully for ${normalizedSymbol}:`, {
     qty: body.quantity,
-    stop_price: body.stop_price,
-    limit_price: body.limit_price,
+    stop_price: `$${body.stop_price.toFixed(2)}`,
+    limit_price: `$${body.limit_price.toFixed(2)}`,
     orderId: orderId,
     response: data
   });
@@ -4000,6 +4027,12 @@ async function modifyOrderQuantity(orderId, newQuantity) {
 
 // When a tracked manual BUY order reaches FLL/FIL: create new StopLimit SELL or add to existing.
 async function handleManualBuyFilled(orderId, order, pending) {
+  // Prevent duplicate calls for the same order
+  if (stopLimitCreationInProgress.has(orderId)) {
+    console.log(`⏸️ [DEBUG] StopLimit creation already in progress for order ${orderId}, skipping duplicate call`);
+    return;
+  }
+  
   console.log(`🎯 [DEBUG] handleManualBuyFilled called for order ${orderId}`);
   console.log(`🎯 [DEBUG] Order object:`, JSON.stringify({
     OrderID: order.OrderID,
@@ -4014,16 +4047,20 @@ async function handleManualBuyFilled(orderId, order, pending) {
   const symbol = (pending.symbol || (order.Legs?.[0]?.Symbol || '')).toString().toUpperCase();
   const leg = order.Legs && order.Legs[0] ? order.Legs[0] : null;
   const quantity = Math.floor(Number(pending.quantity || leg?.ExecQuantity || leg?.QuantityOrdered || 0)) || 0;
-  const fillPrice = parseFloat(order.FilledPrice || order.LimitPrice || leg?.AveragePrice || pending.limitPrice || 0) || 0;
+  
+  // Use FilledPrice if available, otherwise use LimitPrice from buy order (most consistent)
+  // Don't use leg?.AveragePrice as it might be stale or different
+  const fillPrice = parseFloat(order.FilledPrice || pending.limitPrice || order.LimitPrice || 0) || 0;
   
   console.log(`🎯 [DEBUG] Extracted values:`, {
     symbol,
     quantity,
     fillPrice,
+    filledPrice: order.FilledPrice,
+    limitPrice: order.LimitPrice,
+    pendingLimitPrice: pending.limitPrice,
     legExecQuantity: leg?.ExecQuantity,
-    legQuantityOrdered: leg?.QuantityOrdered,
-    orderFilledPrice: order.FilledPrice,
-    orderLimitPrice: order.LimitPrice
+    legQuantityOrdered: leg?.QuantityOrdered
   });
   
   if (!symbol || quantity <= 0) {
@@ -4031,25 +4068,83 @@ async function handleManualBuyFilled(orderId, order, pending) {
     return;
   }
   
-  const existing = findExistingStopLimitSellForSymbol(symbol);
-  if (!existing) {
-    console.log(`📝 [DEBUG] No existing StopLimit found. Creating new StopLimit SELL for ${symbol}...`);
-    const result = await createStopLimitSellOrder(symbol, quantity, fillPrice);
-    console.log(`📝 [DEBUG] Create StopLimit result:`, JSON.stringify(result, null, 2));
-    // Order ID is saved in createStopLimitSellOrder, but also save it here if not already saved
-    if (result.success && result.orderId) {
-      const normalizedSymbol = symbol.toUpperCase();
-      stopLimitOrderIdsBySymbol.set(normalizedSymbol, result.orderId);
-      console.log(`💾 [DEBUG] Saved StopLimit order ID ${result.orderId} for ${normalizedSymbol} (from createStopLimitSellOrder result)`);
+  // Mark this order as in progress
+  stopLimitCreationInProgress.add(orderId);
+  
+  try {
+    // Check if StopLimit already exists in tracking map (even if not ACK'd yet)
+    const existingOrderId = stopLimitOrderIdsBySymbol.get(symbol);
+    if (existingOrderId) {
+      // Check if the order still exists in cache and is active
+      const existingOrder = ordersCache.get(existingOrderId);
+      if (existingOrder && isActiveOrderStatus(existingOrder.Status)) {
+        console.log(`📝 [DEBUG] Existing StopLimit found in tracking map (${existingOrderId}, status ${existingOrder.Status}). Adding ${quantity}...`);
+        const leg = existingOrder.Legs?.[0];
+        const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
+        const newQty = existingQty + quantity;
+        const result = await modifyOrderQuantity(existingOrderId, newQty);
+        console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
+        return;
+      } else {
+        // Order was cancelled/filled, remove from tracking and create new one
+        console.log(`🗑️ [DEBUG] Existing StopLimit ${existingOrderId} is no longer active, removing from tracking and creating new one`);
+        stopLimitOrderIdsBySymbol.delete(symbol);
+      }
     }
-  } else {
-    console.log(`📝 [DEBUG] Existing StopLimit found (${existing.orderId}, qty ${existing.quantity}). Adding ${quantity}...`);
-    const newQty = existing.quantity + quantity;
-    const result = await modifyOrderQuantity(existing.orderId, newQty);
-    console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
-    // Ensure the order ID is saved in our tracking map
-    const normalizedSymbol = symbol.toUpperCase();
-    stopLimitOrderIdsBySymbol.set(normalizedSymbol, existing.orderId);
+    
+    // Check if StopLimit creation is already in progress for this symbol
+    if (stopLimitCreationBySymbol.has(symbol)) {
+      console.log(`⏸️ [DEBUG] StopLimit creation already in progress for ${symbol}, waiting...`);
+      // Wait a bit and check again
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const existingOrderId = stopLimitOrderIdsBySymbol.get(symbol);
+      if (existingOrderId) {
+        const existingOrder = ordersCache.get(existingOrderId);
+        if (existingOrder && isActiveOrderStatus(existingOrder.Status)) {
+          console.log(`✅ [DEBUG] StopLimit was created while waiting, modifying existing order`);
+          const leg = existingOrder.Legs?.[0];
+          const existingQty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
+          const newQty = existingQty + quantity;
+          await modifyOrderQuantity(existingOrderId, newQty);
+          return;
+        }
+      }
+    }
+    
+    // Mark symbol as in progress
+    stopLimitCreationBySymbol.add(symbol);
+    
+    try {
+      // Double-check one more time before creating
+      const existing = findExistingStopLimitSellForSymbol(symbol);
+      if (!existing) {
+        console.log(`📝 [DEBUG] No existing StopLimit found. Creating new StopLimit SELL for ${symbol}...`);
+        const result = await createStopLimitSellOrder(symbol, quantity, fillPrice);
+        console.log(`📝 [DEBUG] Create StopLimit result:`, JSON.stringify(result, null, 2));
+        // Order ID is saved in createStopLimitSellOrder, but also save it here if not already saved
+        if (result.success && result.orderId) {
+          const normalizedSymbol = symbol.toUpperCase();
+          stopLimitOrderIdsBySymbol.set(normalizedSymbol, result.orderId);
+          console.log(`💾 [DEBUG] Saved StopLimit order ID ${result.orderId} for ${normalizedSymbol} (from createStopLimitSellOrder result)`);
+        }
+      } else {
+        console.log(`📝 [DEBUG] Existing StopLimit found (${existing.orderId}, qty ${existing.quantity}). Adding ${quantity}...`);
+        const newQty = existing.quantity + quantity;
+        const result = await modifyOrderQuantity(existing.orderId, newQty);
+        console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
+        // Ensure the order ID is saved in our tracking map
+        const normalizedSymbol = symbol.toUpperCase();
+        stopLimitOrderIdsBySymbol.set(normalizedSymbol, existing.orderId);
+      }
+    } finally {
+      // Remove from in-progress set after a delay to allow ACK to come through
+      setTimeout(() => {
+        stopLimitCreationBySymbol.delete(symbol);
+      }, 2000);
+    }
+  } finally {
+    // Remove from in-progress set
+    stopLimitCreationInProgress.delete(orderId);
   }
 }
 
