@@ -3038,6 +3038,21 @@ function connectPositionsWebSocket() {
             }
           }
           
+          // CRITICAL: Clean up any stale pendingManualBuyOrders for this symbol
+          // This prevents old buy orders from triggering StopLimit creation after position is sold
+          let cleanedBuyOrders = 0;
+          for (const [buyOrderId, buyData] of pendingManualBuyOrders.entries()) {
+            if (buyData && buyData.symbol && buyData.symbol.toUpperCase() === normalizedSymbol) {
+              console.log(`🧹 [DEBUG] Position closed for ${normalizedSymbol} - cleaning up stale pending buy order ${buyOrderId}`);
+              pendingManualBuyOrders.delete(buyOrderId);
+              stopLimitCreationInProgress.delete(buyOrderId);
+              cleanedBuyOrders++;
+            }
+          }
+          if (cleanedBuyOrders > 0) {
+            console.log(`✅ [DEBUG] Cleaned up ${cleanedBuyOrders} stale pending buy order(s) for ${normalizedSymbol}`);
+          }
+          
           console.log(`📊 Position removed from cache: ${symbol}`);
         }
         
@@ -3228,6 +3243,24 @@ function connectOrdersWebSocket() {
 
           // When a tracked manual BUY reaches FLL/FIL: create or modify StopLimit SELL
           if (isFilled && isBuy && pending) {
+            // CRITICAL: Check if position still exists before processing
+            // If position was sold, don't create StopLimit
+            const normalizedSymbol = (symbol || '').toUpperCase();
+            const position = positionsCache.get(normalizedSymbol);
+            const hasPosition = position && parseFloat(position.Quantity || '0') > 0;
+            
+            if (!hasPosition) {
+              console.warn(`⚠️ [DEBUG] Order ${orderId} (${symbol}) filled but position no longer exists - may have been manually sold. Cleaning up and aborting StopLimit creation.`);
+              // Clean up stale order
+              pendingManualBuyOrders.delete(orderId);
+              stopLimitCreationInProgress.delete(orderId);
+              stopLimitCreationBySymbol.delete(normalizedSymbol);
+              // Also clean up any StopLimit tracking for this symbol
+              stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
+              pendingStopLimitOrderIds.delete(normalizedSymbol);
+              return;
+            }
+            
             console.log(`🚀 [DEBUG] Triggering StopLimit creation/modification for filled manual buy ${orderId} (${symbol})`);
             // CRITICAL: Remove from pendingManualBuyOrders FIRST to prevent duplicate processing
             // This ensures that even if WebSocket sends multiple FLL updates, we only process once
@@ -3487,7 +3520,13 @@ app.post('/api/buys/test', async (req, res) => {
       orderIdFromApi = responseData.order_id ?? responseData.OrderID ?? responseData.orderId ?? null;
       if (orderIdFromApi != null && (notifyStatus.startsWith('200') || notifyStatus.startsWith('201'))) {
         const oid = String(orderIdFromApi);
-        pendingManualBuyOrders.set(oid, { symbol, quantity, limitPrice: currentPrice });
+        // CRITICAL: Include timestamp to detect stale orders
+        pendingManualBuyOrders.set(oid, { 
+          symbol, 
+          quantity, 
+          limitPrice: currentPrice,
+          timestamp: Date.now() // Track when order was placed
+        });
         console.log(`📌 [DEBUG] Tracking manual buy order ${oid} for ${symbol} (qty ${quantity}, limitPrice ${currentPrice})`);
         console.log(`📌 [DEBUG] Full response data:`, JSON.stringify(responseData, null, 2));
         console.log(`📌 [DEBUG] Total tracked manual buys: ${pendingManualBuyOrders.size}`);
@@ -4250,6 +4289,39 @@ async function handleManualBuyFilled(orderId, order, pending) {
   }
   
   console.log(`🎯 [DEBUG] handleManualBuyFilled called for order ${orderId}`);
+  
+  // CRITICAL: Verify this order is still in pendingManualBuyOrders
+  // If not, it means it was already processed or the position was sold
+  // This prevents stale buy orders from triggering StopLimit creation after manual sell
+  const pendingBuyData = pendingManualBuyOrders.get(orderId);
+  if (!pendingBuyData) {
+    console.warn(`⚠️ [DEBUG] Order ${orderId} not found in pendingManualBuyOrders - may have been cleaned up after manual sell. Aborting StopLimit creation.`);
+    // Clean up any stale tracking for this order
+    stopLimitCreationInProgress.delete(orderId);
+    const symbol = (pending?.symbol || order.Legs?.[0]?.Symbol || '').toString().toUpperCase();
+    if (symbol) {
+      stopLimitCreationBySymbol.delete(symbol);
+    }
+    return;
+  }
+  
+  // CRITICAL: Check if this is a stale order (older than 5 minutes)
+  // Stale orders might be from before a manual sell and shouldn't trigger StopLimit creation
+  if (pendingBuyData.timestamp) {
+    const orderAge = Date.now() - pendingBuyData.timestamp;
+    const MAX_ORDER_AGE = 5 * 60 * 1000; // 5 minutes
+    if (orderAge > MAX_ORDER_AGE) {
+      console.warn(`⚠️ [DEBUG] Order ${orderId} is stale (${Math.round(orderAge / 1000)}s old) - may be from before manual sell. Aborting StopLimit creation.`);
+      // Clean up stale order
+      pendingManualBuyOrders.delete(orderId);
+      stopLimitCreationInProgress.delete(orderId);
+      const symbol = (pending?.symbol || order.Legs?.[0]?.Symbol || '').toString().toUpperCase();
+      if (symbol) {
+        stopLimitCreationBySymbol.delete(symbol);
+      }
+      return;
+    }
+  }
   console.log(`🎯 [DEBUG] Order object:`, JSON.stringify({
     OrderID: order.OrderID,
     Status: order.Status,
@@ -6160,6 +6232,21 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
         stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
         pendingStopLimitOrderIds.delete(normalizedSymbol);
         stopLimitCreationBySymbol.delete(normalizedSymbol);
+      }
+      
+      // CRITICAL: Clean up any stale pendingManualBuyOrders for this symbol
+      // This prevents old buy orders from triggering StopLimit creation after manual sell
+      let cleanedBuyOrders = 0;
+      for (const [buyOrderId, buyData] of pendingManualBuyOrders.entries()) {
+        if (buyData && buyData.symbol && buyData.symbol.toUpperCase() === normalizedSymbol) {
+          console.log(`🧹 [DEBUG] Manual sell for ${normalizedSymbol} - cleaning up stale pending buy order ${buyOrderId}`);
+          pendingManualBuyOrders.delete(buyOrderId);
+          stopLimitCreationInProgress.delete(buyOrderId);
+          cleanedBuyOrders++;
+        }
+      }
+      if (cleanedBuyOrders > 0) {
+        console.log(`✅ [DEBUG] Cleaned up ${cleanedBuyOrders} stale pending buy order(s) for ${normalizedSymbol} after manual sell`);
       }
     }
     
