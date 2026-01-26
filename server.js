@@ -3936,30 +3936,36 @@ function findExistingStopLimitSellForSymbol(symbol) {
   return null;
 }
 
-// Create a SELL StopLimit order. limit_price = stop_price - 0.15 per user requirements.
-async function createStopLimitSellOrder(symbol, quantity, stopPrice) {
+// Create a SELL StopLimit order. 
+// stop_price = buy_price - 0.15, limit_price = stop_price - 0.05 per user requirements.
+async function createStopLimitSellOrder(symbol, quantity, buyPrice) {
   // Validate inputs
   const normalizedSymbol = (symbol || '').toUpperCase();
   const qty = Math.floor(Number(quantity)) || 0;
-  const stop = Number(stopPrice) || 0;
+  const buy = Number(buyPrice) || 0;
   
-  if (!normalizedSymbol || qty <= 0 || stop <= 0) {
-    console.error(`❌ [DEBUG] Invalid parameters for StopLimit: symbol=${normalizedSymbol}, quantity=${qty}, stopPrice=${stop}`);
+  if (!normalizedSymbol || qty <= 0 || buy <= 0) {
+    console.error(`❌ [DEBUG] Invalid parameters for StopLimit: symbol=${normalizedSymbol}, quantity=${qty}, buyPrice=${buy}`);
     return { success: false, error: 'Invalid parameters' };
   }
   
-  const limitPrice = Math.max(0, stop - 0.15);
+  // stop_price = buy_price - 0.15
+  const stopPrice = Math.max(0, buy - 0.15);
+  // limit_price = stop_price - 0.05
+  const limitPrice = Math.max(0, stopPrice - 0.05);
+  
   const body = {
     symbol: normalizedSymbol,
     side: 'SELL',
     order_type: 'StopLimit',
     quantity: qty,
-    stop_price: stop,
+    stop_price: stopPrice,
     limit_price: limitPrice
   };
   console.log(`📤 [DEBUG] Creating StopLimit SELL order for ${normalizedSymbol}:`, JSON.stringify({
     ...body,
-    stop_price: `$${stop.toFixed(2)}`,
+    buy_price: `$${buy.toFixed(2)}`,
+    stop_price: `$${stopPrice.toFixed(2)}`,
     limit_price: `$${limitPrice.toFixed(2)}`
   }, null, 2));
   
@@ -4003,6 +4009,7 @@ async function createStopLimitSellOrder(symbol, quantity, stopPrice) {
   
   console.log(`✅ [DEBUG] StopLimit SELL created successfully for ${normalizedSymbol}:`, {
     qty: body.quantity,
+    buy_price: `$${buy.toFixed(2)}`,
     stop_price: `$${body.stop_price.toFixed(2)}`,
     limit_price: `$${body.limit_price.toFixed(2)}`,
     orderId: orderId,
@@ -4064,10 +4071,10 @@ async function handleManualBuyFilled(orderId, order, pending) {
   const leg = order.Legs && order.Legs[0] ? order.Legs[0] : null;
   const quantity = Math.floor(Number(pending.quantity || leg?.ExecQuantity || leg?.QuantityOrdered || 0)) || 0;
   
-  // CRITICAL: Always use pending.limitPrice (the buy order's limit price) as the stop price
-  // This is the price at which we bought, so we want to set stop at this price
+  // CRITICAL: Always use pending.limitPrice (the buy order's limit price) as the buy price
+  // This is the price at which we bought
   // DO NOT use order.FilledPrice or order.LimitPrice as they might be different or stale
-  // StopLimit stop_price = buy limit price, limit_price = stop_price - 0.15
+  // StopLimit: stop_price = buy_price - 0.15, limit_price = stop_price - 0.05
   const fillPrice = parseFloat(pending.limitPrice || 0) || 0;
   
   // Validate fillPrice - must be positive and match the buy order price
@@ -4183,6 +4190,91 @@ async function handleManualBuyFilled(orderId, order, pending) {
     stopLimitCreationBySymbol.add(normalizedSymbol);
     
     try {
+      // CRITICAL: Before creating a new StopLimit, check for and cancel ANY active sell orders
+      // Stocks can only have one active sell order per symbol (broker restriction)
+      // This includes Limit, Market, and StopLimit orders
+      const findActiveSellOrdersInCache = (symbol) => {
+        const normalized = symbol.toUpperCase();
+        const activeOrders = [];
+        const activeStatuses = new Set(['ACK', 'DON', 'REC', 'QUE', 'QUEUED', 'OPEN', 'NEW', 'PENDING', 'PARTIALLY_FILLED', 'PND']);
+        const terminalStatuses = new Set(['FIL', 'FLL', 'CAN', 'EXP', 'REJ', 'OUT', 'CANCELLED', 'FILLED', 'REJECTED', 'EXPIRED']);
+        
+        for (const [orderId, order] of ordersCache.entries()) {
+          if (!order || !order.Legs) continue;
+          const status = (order.Status || '').toUpperCase();
+          if (terminalStatuses.has(status)) continue;
+          const isActive = activeStatuses.has(status) || !status || status === '';
+          if (!isActive) continue;
+          
+          for (const leg of order.Legs) {
+            const legSymbol = (leg.Symbol || '').toUpperCase();
+            const legSide = (leg.BuyOrSell || '').toUpperCase();
+            if (legSymbol === normalized && legSide === 'SELL') {
+              activeOrders.push({ orderId, status, order });
+              break;
+            }
+          }
+        }
+        return activeOrders;
+      };
+      
+      // Check for any active sell orders (not just StopLimit)
+      const activeSellOrders = findActiveSellOrdersInCache(normalizedSymbol);
+      if (activeSellOrders.length > 0) {
+        console.log(`⚠️ [DEBUG] Found ${activeSellOrders.length} active sell order(s) for ${normalizedSymbol} before creating StopLimit. Cancelling them...`);
+        for (const sellOrder of activeSellOrders) {
+          console.log(`   - Order ${sellOrder.orderId} (Type: ${sellOrder.order.OrderType}, Status: ${sellOrder.status})`);
+        }
+        
+        // Cancel all active sell orders
+        const cancelOrderDirectly = async (orderId) => {
+          try {
+            const resp = await fetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(orderId)}`, {
+              method: 'DELETE',
+              headers: { 'Accept': '*/*' }
+            });
+            const isSuccess = resp.ok || resp.status === 200 || resp.status === 204 || resp.status === 404;
+            if (isSuccess) {
+              console.log(`✅ Cancelled order ${orderId}`);
+              ordersCache.delete(orderId);
+              return true;
+            }
+            return false;
+          } catch (err) {
+            console.error(`❌ Error cancelling order ${orderId}:`, err.message);
+            return false;
+          }
+        };
+        
+        const cancelResults = await Promise.allSettled(
+          activeSellOrders.map(order => cancelOrderDirectly(order.orderId))
+        );
+        const successCount = cancelResults.filter(r => r.status === 'fulfilled' && r.value === true).length;
+        console.log(`✅ Cancelled ${successCount}/${activeSellOrders.length} active sell order(s) for ${normalizedSymbol}`);
+        
+        // Wait for cancellation to propagate
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        // Remove from tracking maps if they were StopLimit orders
+        for (const sellOrder of activeSellOrders) {
+          const orderType = (sellOrder.order.OrderType || '').toUpperCase();
+          if (orderType === 'STOPLIMIT' || orderType === 'STOP_LIMIT') {
+            if (stopLimitOrderIdsBySymbol.get(normalizedSymbol) === sellOrder.orderId) {
+              stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
+            }
+            if (pendingStopLimitOrderIds.get(normalizedSymbol) === sellOrder.orderId) {
+              pendingStopLimitOrderIds.delete(normalizedSymbol);
+            }
+          }
+        }
+        
+        // Final check - verify no active orders remain
+        const finalCheck = findActiveSellOrdersInCache(normalizedSymbol);
+        if (finalCheck.length > 0) {
+          console.warn(`⚠️ [DEBUG] ${finalCheck.length} active sell order(s) still exist for ${normalizedSymbol} after cancellation. Will proceed anyway.`);
+        }
+      }
+      
       // Final check before creating - ALWAYS search cache one more time to catch any existing orders
       // This handles cases where the order exists but wasn't in tracking map
       const existing = findExistingStopLimitSellForSymbol(normalizedSymbol);
@@ -4197,9 +4289,23 @@ async function handleManualBuyFilled(orderId, order, pending) {
       }
       
       // No existing StopLimit found - create new one
-      console.log(`📝 [DEBUG] No existing StopLimit found. Creating new StopLimit SELL for ${normalizedSymbol} (stop: $${fillPrice.toFixed(2)}, limit: $${(fillPrice - 0.15).toFixed(2)})...`);
+      // stop_price = buy_price - 0.15, limit_price = stop_price - 0.05
+      const calculatedStopPrice = Math.max(0, fillPrice - 0.15);
+      const calculatedLimitPrice = Math.max(0, calculatedStopPrice - 0.05);
+      console.log(`📝 [DEBUG] No existing StopLimit found. Creating new StopLimit SELL for ${normalizedSymbol} (buy: $${fillPrice.toFixed(2)}, stop: $${calculatedStopPrice.toFixed(2)}, limit: $${calculatedLimitPrice.toFixed(2)})...`);
       const result = await createStopLimitSellOrder(normalizedSymbol, quantity, fillPrice);
       console.log(`📝 [DEBUG] Create StopLimit result:`, JSON.stringify(result, null, 2));
+      
+      // Check if order was rejected and log details
+      if (!result.success) {
+        console.error(`❌ [DEBUG] StopLimit creation failed for ${normalizedSymbol}:`, result.error);
+        // If rejected, check if there are still active orders
+        const postCheck = findActiveSellOrdersInCache(normalizedSymbol);
+        if (postCheck.length > 0) {
+          console.error(`❌ [DEBUG] StopLimit was rejected. ${postCheck.length} active sell order(s) still exist:`, postCheck.map(o => `${o.orderId} (${o.status})`).join(', '));
+        }
+      }
+      
       // NOTE: Order ID will be saved to tracking map when WebSocket confirms ACK status
       // Don't save it here to prevent loops if order gets rejected
     } finally {
