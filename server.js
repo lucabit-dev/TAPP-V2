@@ -3436,7 +3436,13 @@ function connectOrdersWebSocket() {
           const orderType = (order.OrderType || '').toUpperCase();
           const legSide = (order.Legs?.[0]?.BuyOrSell || '').toUpperCase();
           if ((orderType === 'STOPLIMIT' || orderType === 'STOP_LIMIT') && legSide === 'SELL') {
-            registerStopLimitOrder(order);
+            // CRITICAL: StopLimit logic is DISABLED - log but don't register
+            if (!STOPLIMIT_ENABLED) {
+              console.log(`⏸️ [STOPLIMIT] StopLimit order ${orderId} received via WebSocket but logic is DISABLED - ignoring registration for ${symbol}`);
+              // Still process the order normally (it exists), just don't register in repository
+            } else {
+              registerStopLimitOrder(order);
+            }
             
             // CRITICAL: Guard removal is now handled in registerStopLimitOrder with delay
             // This prevents race conditions where handleManualBuyFilled is still running
@@ -4575,6 +4581,12 @@ async function createStopLimitSellOrder(symbol, quantity, buyPrice) {
   // Round to 2 decimal places (like sections-buy-bot-main)
   limitPrice = Math.round(limitPrice * 100) / 100;
   stopPrice = Math.round(stopPrice * 100) / 100;
+  
+  // CRITICAL: Double-check flag before making API call (defense in depth)
+  if (!STOPLIMIT_ENABLED) {
+    console.log(`⏸️ [STOPLIMIT] StopLimit creation is DISABLED - aborting API call for ${normalizedSymbol}`);
+    return { success: false, error: 'StopLimit creation is disabled' };
+  }
   
   const body = {
     symbol: normalizedSymbol,
@@ -6899,6 +6911,14 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
     } else if (normalizedInput === 'market') {
       orderType = 'Market';
     } else if (normalizedInput === 'stoplimit' || normalizedInput === 'stop_limit' || normalizedInput === 'stop-limit') {
+      // CRITICAL: StopLimit logic is DISABLED - reject stop-limit orders
+      if (!STOPLIMIT_ENABLED) {
+        console.log(`⏸️ [STOPLIMIT] StopLimit creation is DISABLED - rejecting stop-limit order request for ${symbol}`);
+        return res.status(400).json({ 
+          success: false, 
+          error: 'StopLimit order creation is currently disabled' 
+        });
+      }
       orderType = 'StopLimit';
     }
     const longShort = (req.body?.long_short || req.body?.longShort || '').toString().trim();
@@ -7305,6 +7325,15 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
           }
         }
       }
+    }
+    
+    // CRITICAL: Block StopLimit orders if disabled
+    if (orderType === 'StopLimit' && !STOPLIMIT_ENABLED) {
+      console.log(`⏸️ [STOPLIMIT] StopLimit creation is DISABLED - rejecting stop-limit order request for ${symbol}`);
+      return res.status(400).json({ 
+        success: false, 
+        error: 'StopLimit order creation is currently disabled' 
+      });
     }
     
     // Build request body according to Sections Bot API documentation
