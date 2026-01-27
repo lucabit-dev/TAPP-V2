@@ -235,6 +235,14 @@ function registerStopLimitOrder(msg) {
     const existing = stopLimitOrderRepository.get(symbol);
     if (existing && existing.orderId === orderId) {
       stopLimitOrderRepository.delete(symbol);
+      
+      // CRITICAL: If StopLimit was FILLED (not just cancelled), mark symbol to prevent creating new StopLimit
+      // This prevents loops when StopLimit is filled but position still exists
+      if (isStopLimitFilled(msg)) {
+        stopLimitFilledSymbols.set(symbol, { orderId, timestamp: Date.now() });
+        console.log(`🏷️ [STOPLIMIT_REPO] Marked ${symbol} as having filled StopLimit (order ${orderId}) - will prevent new creation`);
+      }
+      
       console.log(`🗑️ [STOPLIMIT_REPO] Removed StopLimit order for ${symbol}: ${orderId} (status: ${status})`);
     }
   }
@@ -289,6 +297,10 @@ function getActiveStopLimitOrder(symbol) {
 
 // Track recently sold symbols to prevent StopLimit creation loops after manual sell
 const recentlySoldSymbols = new Map(); // Map<symbol, timestamp> - prevents creating StopLimit for recently sold stocks
+
+// Track symbols that had StopLimit orders filled (FLL) - prevents creating new StopLimit for same position
+// This prevents loops when StopLimit is filled but position still exists
+const stopLimitFilledSymbols = new Map(); // Map<symbol, { orderId, timestamp }>
 
 // StopLimit Tracker Configuration
 // Structure: Map<groupId, { minPrice, maxPrice, initialStopPrice, steps: [{ pnl, stop }], enabled }>
@@ -754,8 +766,20 @@ setInterval(() => {
       }
     }
     
-    if (cleanedRepository > 0 || cleanedRecentlySold > 0) {
-      console.log(`🧹 [STOPLIMIT_REPO] Cleaned ${cleanedRepository} repository entries and ${cleanedRecentlySold} recently sold entries`);
+    // Clean up filled StopLimit symbols - remove entries older than 5 minutes
+    let cleanedFilledStopLimits = 0;
+    const FILLED_STOPLIMIT_MAX_AGE = 300000; // 5 minutes
+    for (const [symbol, data] of stopLimitFilledSymbols.entries()) {
+      const age = now - data.timestamp;
+      if (age > FILLED_STOPLIMIT_MAX_AGE) {
+        stopLimitFilledSymbols.delete(symbol);
+        cleanedFilledStopLimits++;
+        console.log(`🧹 [CLEANUP] Removed old filled StopLimit entry for ${symbol} (age: ${age}ms)`);
+      }
+    }
+    
+    if (cleanedRepository > 0 || cleanedRecentlySold > 0 || cleanedFilledStopLimits > 0) {
+      console.log(`🧹 [STOPLIMIT_REPO] Cleaned ${cleanedRepository} repository entries, ${cleanedRecentlySold} recently sold entries, and ${cleanedFilledStopLimits} filled StopLimit entries`);
     }
   } catch (err) {
     console.error(`❌ [STOPLIMIT_REPO] Error in StopLimit cleanup:`, err);
@@ -3165,6 +3189,9 @@ function connectPositionsWebSocket() {
           // Clean up StopLimit tracker progress
           stopLimitTrackerProgress.delete(normalizedSymbol);
           
+          // Clean up filled StopLimit tracking (position closed, can create new StopLimit if rebought)
+          stopLimitFilledSymbols.delete(normalizedSymbol);
+          
           console.log(`📊 Position removed from cache: ${symbol}`);
         }
         
@@ -3304,6 +3331,23 @@ function connectOrdersWebSocket() {
           // When a tracked manual BUY reaches FLL/FIL: create or modify StopLimit SELL
           if (isFilled && isBuy && pending) {
             const normalizedSymbol = (symbol || '').toUpperCase();
+            
+            // CRITICAL: Check if StopLimit was already filled for this symbol - prevent creating new one
+            const filledStopLimit = stopLimitFilledSymbols.get(normalizedSymbol);
+            if (filledStopLimit) {
+              console.warn(`⚠️ [DEBUG] Symbol ${normalizedSymbol} had StopLimit filled previously (order ${filledStopLimit.orderId}). Skipping StopLimit creation to prevent loops.`);
+              // Remove from pending to prevent duplicate processing
+              pendingManualBuyOrders.delete(orderId);
+              
+              // Check if position still exists - if not, remove from filled tracking
+              const position = positionsCache.get(normalizedSymbol);
+              if (!position || parseFloat(position.Quantity || '0') <= 0) {
+                stopLimitFilledSymbols.delete(normalizedSymbol);
+                console.log(`🧹 [DEBUG] Position closed for ${normalizedSymbol} - removed from filled StopLimit tracking`);
+              }
+              
+              return; // Don't call handleManualBuyFilled if StopLimit was already filled
+            }
             
             // CRITICAL: Check repository FIRST before processing to prevent duplicate creation
             // If a StopLimit already exists in repository, just update quantity instead of creating new one
@@ -4151,8 +4195,19 @@ function findExistingStopLimitSellForSymbol(symbol) {
   return null;
 }
 
-// Create a SELL StopLimit order. 
-// stop_price = buy_price - 0.15, limit_price = stop_price - 0.05 per user requirements.
+// Price Adjustment Table (from sections-buy-bot-main)
+function getPriceAdjustment(price) {
+  if (price < 5) {
+    return 0.15;
+  } else if (price < 10) {
+    return 0.20;
+  } else {
+    return 0.25;
+  }
+}
+
+// Create a SELL StopLimit order using sections-buy-bot-main logic
+// Logic: limit_price = current_price - adjustment, stop_price = limit_price * 1.002
 async function createStopLimitSellOrder(symbol, quantity, buyPrice) {
   // Validate inputs
   const normalizedSymbol = (symbol || '').toUpperCase();
@@ -4164,22 +4219,49 @@ async function createStopLimitSellOrder(symbol, quantity, buyPrice) {
     return { success: false, error: 'Invalid parameters' };
   }
   
-  // Check if there's a StopLimit tracker config that should override the default stop_price
-  let stopPrice = Math.max(0, buy - 0.15); // Default: buy_price - 0.15
+  // CRITICAL: Get current bid price from position (like sections-buy-bot-main)
+  // sections-buy-bot-main uses position.bid, not buy price
+  const position = positionsCache.get(normalizedSymbol);
+  const currentPrice = position ? parseFloat(position.Bid || position.Last || position.AveragePrice || '0') : buy;
   
-  // Find matching group by buy price
+  // Use buy price as fallback if position not found
+  const price = currentPrice > 0 ? currentPrice : buy;
+  
+  // Calculate limit_price using price adjustment table (sections-buy-bot-main logic)
+  const adjustment = getPriceAdjustment(price);
+  let limitPrice = Math.max(0, price - adjustment);
+  
+  // Check if there's a StopLimit tracker config that should override the initial stop_price
+  // If tracker config has initialStopPrice, use it to calculate limit_price
+  let useTrackerInitialStop = false;
+  let trackerInitialStopPrice = 0;
+  
   for (const [groupId, group] of stopLimitTrackerConfig.entries()) {
     if (!group.enabled) continue;
     if (buy >= group.minPrice && buy <= group.maxPrice && group.initialStopPrice > 0) {
       // Use the group's initial stop_price
-      stopPrice = group.initialStopPrice;
-      console.log(`📊 [STOPLIMIT_TRACKER] Using initial stop_price ${stopPrice} from group ${groupId} for ${normalizedSymbol} (buy price: ${buy})`);
+      trackerInitialStopPrice = group.initialStopPrice;
+      useTrackerInitialStop = true;
+      console.log(`📊 [STOPLIMIT_TRACKER] Using initial stop_price ${trackerInitialStopPrice} from group ${groupId} for ${normalizedSymbol} (buy price: ${buy})`);
       break;
     }
   }
   
-  // limit_price = stop_price - 0.05
-  const limitPrice = Math.max(0, stopPrice - 0.05);
+  // Calculate stop_price (sections-buy-bot-main: stop_price = limit_price * 1.002)
+  let stopPrice;
+  if (useTrackerInitialStop) {
+    // If tracker config specifies initial stop_price, use it
+    stopPrice = trackerInitialStopPrice;
+    // Recalculate limit_price from stop_price (limit_price = stop_price / 1.002)
+    limitPrice = Math.max(0, stopPrice / 1.002);
+  } else {
+    // Default sections-buy-bot-main logic: stop_price = limit_price * 1.002
+    stopPrice = Math.max(0, limitPrice * 1.002);
+  }
+  
+  // Round to 2 decimal places (like sections-buy-bot-main)
+  limitPrice = Math.round(limitPrice * 100) / 100;
+  stopPrice = Math.round(stopPrice * 100) / 100;
   
   const body = {
     symbol: normalizedSymbol,
@@ -4192,8 +4274,11 @@ async function createStopLimitSellOrder(symbol, quantity, buyPrice) {
   console.log(`📤 [DEBUG] Creating StopLimit SELL order for ${normalizedSymbol}:`, JSON.stringify({
     ...body,
     buy_price: `$${buy.toFixed(2)}`,
+    current_price: `$${price.toFixed(2)}`,
+    price_adjustment: adjustment,
     stop_price: `$${stopPrice.toFixed(2)}`,
-    limit_price: `$${limitPrice.toFixed(2)}`
+    limit_price: `$${limitPrice.toFixed(2)}`,
+    calculation_method: useTrackerInitialStop ? 'tracker_initial_stop' : 'sections_buy_bot_main'
   }, null, 2));
   
   const resp = await fetch(SECTIONS_BOT_ORDER_URL, {
@@ -4298,7 +4383,9 @@ async function modifyStopLimitPrice(orderId, stopPrice, limitPrice) {
   return { success: true, data };
 }
 
-// Check StopLimit tracker and update orders based on P&L
+// Check StopLimit tracker and update orders based on P&L (sections-buy-bot-main pattern)
+// CRITICAL: This function ONLY updates existing StopLimit orders, NEVER creates new ones
+// StopLimit orders are created by handleManualBuyFilled when buy orders fill
 async function checkStopLimitTracker(symbol, position) {
   try {
     const normalizedSymbol = (symbol || '').toUpperCase();
@@ -4306,6 +4393,17 @@ async function checkStopLimitTracker(symbol, position) {
     const currentPnl = parseFloat(position.UnrealizedProfitLoss || '0');
     
     if (avgPrice <= 0 || !normalizedSymbol) return;
+    
+    // CRITICAL: Check repository FIRST (sections-buy-bot-main pattern: ensure_has_cancel_order)
+    // If no StopLimit exists in repository, don't do anything - it will be created by handleManualBuyFilled
+    const existingStopLimit = getActiveStopLimitOrder(normalizedSymbol);
+    if (!existingStopLimit) {
+      // No active StopLimit in repository - this is normal if:
+      // 1. Buy order just filled and StopLimit hasn't been created yet
+      // 2. StopLimit was filled/cancelled
+      // Don't create here - let handleManualBuyFilled handle creation
+      return;
+    }
     
     // Find matching group by price range
     let matchingGroup = null;
@@ -4346,31 +4444,29 @@ async function checkStopLimitTracker(symbol, position) {
       const newStopPrice = parseFloat(newStep.stop || '0');
       
       if (newStopPrice > 0) {
-        // Find the StopLimit order for this symbol
-        const stopLimitOrder = findExistingStopLimitSellForSymbol(normalizedSymbol);
+        // Use existing StopLimit from repository (already checked above)
+        const stopLimitOrderId = existingStopLimit.orderId;
         
-        if (stopLimitOrder && stopLimitOrder.orderId) {
-          // Calculate limit_price (stop_price - 0.05 as per existing logic)
-          const newLimitPrice = Math.max(0, newStopPrice - 0.05);
-          
-          console.log(`📈 [STOPLIMIT_TRACKER] ${normalizedSymbol} reached step ${newStepIndex + 1} (P&L: $${currentPnl.toFixed(2)}). Updating StopLimit to stop_price: $${newStopPrice.toFixed(2)}`);
-          
-          const result = await modifyStopLimitPrice(stopLimitOrder.orderId, newStopPrice, newLimitPrice);
-          
-          if (result.success) {
-            // Update progress
-            stopLimitTrackerProgress.set(normalizedSymbol, {
-              groupId: matchingGroupId,
-              currentStepIndex: newStepIndex,
-              lastPnl: currentPnl,
-              lastUpdate: Date.now()
-            });
-            console.log(`✅ [STOPLIMIT_TRACKER] Successfully updated StopLimit for ${normalizedSymbol} to step ${newStepIndex + 1}`);
-          } else {
-            console.error(`❌ [STOPLIMIT_TRACKER] Failed to update StopLimit for ${normalizedSymbol}:`, result.error);
-          }
+        // Calculate limit_price using sections-buy-bot-main logic: limit_price = stop_price / 1.002
+        const newLimitPrice = Math.max(0, newStopPrice / 1.002);
+        // Round to 2 decimal places
+        const roundedLimitPrice = Math.round(newLimitPrice * 100) / 100;
+        
+        console.log(`📈 [STOPLIMIT_TRACKER] ${normalizedSymbol} reached step ${newStepIndex + 1} (P&L: $${currentPnl.toFixed(2)}). Updating StopLimit ${stopLimitOrderId} to stop_price: $${newStopPrice.toFixed(2)}, limit_price: $${roundedLimitPrice.toFixed(2)}`);
+        
+        const result = await modifyStopLimitPrice(stopLimitOrderId, newStopPrice, roundedLimitPrice);
+        
+        if (result.success) {
+          // Update progress
+          stopLimitTrackerProgress.set(normalizedSymbol, {
+            groupId: matchingGroupId,
+            currentStepIndex: newStepIndex,
+            lastPnl: currentPnl,
+            lastUpdate: Date.now()
+          });
+          console.log(`✅ [STOPLIMIT_TRACKER] Successfully updated StopLimit for ${normalizedSymbol} to step ${newStepIndex + 1}`);
         } else {
-          console.warn(`⚠️ [STOPLIMIT_TRACKER] No StopLimit order found for ${normalizedSymbol}`);
+          console.error(`❌ [STOPLIMIT_TRACKER] Failed to update StopLimit for ${normalizedSymbol}:`, result.error);
         }
       }
     }
@@ -4379,8 +4475,8 @@ async function checkStopLimitTracker(symbol, position) {
     if (progress) {
       progress.lastPnl = currentPnl;
       progress.lastUpdate = Date.now();
-    } else if (matchingGroup) {
-      // Initialize progress if not exists
+    } else if (matchingGroup && existingStopLimit) {
+      // Initialize progress if not exists (only if StopLimit exists)
       stopLimitTrackerProgress.set(normalizedSymbol, {
         groupId: matchingGroupId,
         currentStepIndex: -1,
@@ -4420,7 +4516,7 @@ async function handleManualBuyFilled(orderId, order, pending) {
   // CRITICAL: Always use pending.limitPrice (the buy order's limit price) as the buy price
   // This is the price at which we bought
   // DO NOT use order.FilledPrice or order.LimitPrice as they might be different or stale
-  // StopLimit: stop_price = buy_price - 0.15, limit_price = stop_price - 0.05
+  // Note: createStopLimitSellOrder will use sections-buy-bot-main logic with current bid price
   const fillPrice = parseFloat(pending.limitPrice || 0) || 0;
   
   // Validate fillPrice - must be positive and match the buy order price
@@ -4437,6 +4533,34 @@ async function handleManualBuyFilled(orderId, order, pending) {
   }
   if (orderLimitPrice > 0 && Math.abs(orderLimitPrice - fillPrice) > 0.01) {
     console.warn(`⚠️ [DEBUG] Price mismatch: pending.limitPrice=${fillPrice}, order.LimitPrice=${orderLimitPrice} for ${normalizedSymbol}`);
+  }
+  
+  // CRITICAL: Check if StopLimit was already filled for this symbol - prevent creating new StopLimit
+  // This prevents loops when StopLimit is FLL but position still exists
+  const filledStopLimit = stopLimitFilledSymbols.get(normalizedSymbol);
+  if (filledStopLimit) {
+    const timeSinceFilled = Date.now() - filledStopLimit.timestamp;
+    const FILLED_STOPLIMIT_THRESHOLD = 60000; // 60 seconds - if StopLimit was filled recently, don't create new one
+    
+    if (timeSinceFilled < FILLED_STOPLIMIT_THRESHOLD) {
+      console.warn(`⚠️ [DEBUG] Symbol ${normalizedSymbol} had StopLimit filled ${timeSinceFilled}ms ago (order ${filledStopLimit.orderId}). Skipping StopLimit creation to prevent loops.`);
+      // Clean up any stale tracking (repository pattern)
+      stopLimitOrderRepository.delete(normalizedSymbol);
+      stopLimitCreationBySymbol.delete(normalizedSymbol);
+      
+      // Check if position still exists - if not, remove from filled tracking
+      const position = positionsCache.get(normalizedSymbol);
+      if (!position || parseFloat(position.Quantity || '0') <= 0) {
+        stopLimitFilledSymbols.delete(normalizedSymbol);
+        console.log(`🧹 [DEBUG] Position closed for ${normalizedSymbol} - removed from filled StopLimit tracking`);
+      }
+      
+      return;
+    } else {
+      // Enough time has passed, remove from filled tracking (can create new StopLimit if needed)
+      console.log(`✅ [DEBUG] StopLimit was filled ${timeSinceFilled}ms ago (>${FILLED_STOPLIMIT_THRESHOLD}ms) for ${normalizedSymbol}. Removing from filled tracking.`);
+      stopLimitFilledSymbols.delete(normalizedSymbol);
+    }
   }
   
   // CRITICAL: Check if symbol was recently sold - prevent StopLimit creation loops
@@ -4529,8 +4653,8 @@ async function handleManualBuyFilled(orderId, order, pending) {
     pendingLimitPrice: pending.limitPrice,
     legExecQuantity: leg?.ExecQuantity,
     legQuantityOrdered: leg?.QuantityOrdered,
-    calculatedStopPrice: fillPrice,
-    calculatedLimitPrice: Math.max(0, fillPrice - 0.15),
+    buyPrice: fillPrice,
+    note: 'StopLimit prices calculated using sections-buy-bot-main logic with current bid price',
     hasExistingPosition: hasExistingPosition,
     existingPositionQuantity: hasExistingPosition ? parseFloat(existingPosition.Quantity || '0') : 0
   });
@@ -4714,6 +4838,22 @@ async function handleManualBuyFilled(orderId, order, pending) {
     // CRITICAL: Wait a moment for repository to update if order was just created/ACK'd
     // This prevents race conditions where we check before repository is updated
     await new Promise(resolve => setTimeout(resolve, 300));
+    
+    // CRITICAL: Check repository FIRST (most authoritative source) before unified search
+    const repoCheckBeforeUnified = getActiveStopLimitOrder(normalizedSymbol);
+    if (repoCheckBeforeUnified) {
+      console.log(`🛑 [DEBUG] Repository has active StopLimit ${repoCheckBeforeUnified.orderId} for ${normalizedSymbol} - aborting creation to prevent duplicate!`);
+      // Update quantity if needed
+      const position = positionsCache.get(normalizedSymbol);
+      const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+      if (positionQty > 0) {
+        const result = await modifyOrderQuantity(repoCheckBeforeUnified.orderId, positionQty);
+        if (result.success) {
+          console.log(`✅ [DEBUG] Updated existing StopLimit quantity to ${positionQty}`);
+        }
+      }
+      return; // CRITICAL: Exit early if order exists in repository
+    }
     
     const existingStopLimit = findExistingStopLimitSellForSymbol(normalizedSymbol);
     
@@ -4957,14 +5097,14 @@ async function handleManualBuyFilled(orderId, order, pending) {
     
     // CRITICAL: Check repository one more time before marking as in progress
     // This is the absolute last check to prevent duplicate creation
-    const repoCheck = getActiveStopLimitOrder(normalizedSymbol);
-    if (repoCheck) {
-      console.log(`🛑 [DEBUG] CRITICAL: Repository check found active StopLimit ${repoCheck.orderId} for ${normalizedSymbol} - aborting creation to prevent duplicate!`);
+    const repoCheckBeforeProgress = getActiveStopLimitOrder(normalizedSymbol);
+    if (repoCheckBeforeProgress) {
+      console.log(`🛑 [DEBUG] CRITICAL: Repository check found active StopLimit ${repoCheckBeforeProgress.orderId} for ${normalizedSymbol} - aborting creation to prevent duplicate!`);
       // Update quantity if needed
       const position = positionsCache.get(normalizedSymbol);
       const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
       if (positionQty > 0) {
-        const result = await modifyOrderQuantity(repoCheck.orderId, positionQty);
+        const result = await modifyOrderQuantity(repoCheckBeforeProgress.orderId, positionQty);
         if (result.success) {
           console.log(`✅ [DEBUG] Updated existing StopLimit quantity to ${positionQty}`);
         }
@@ -6369,8 +6509,8 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
               });
               if (cancelResp.ok || cancelResp.status === 200 || cancelResp.status === 204 || cancelResp.status === 404) {
                 console.log(`✅ Additional StopLimit order ${stopLimitId} cancelled successfully`);
-                stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
-                pendingStopLimitOrderIds.delete(normalizedSymbol);
+                // Remove from repository (single source of truth)
+                stopLimitOrderRepository.delete(normalizedSymbol);
                 stopLimitCreationBySymbol.delete(normalizedSymbol);
                 ordersCache.delete(stopLimitId);
                 if (cachePersistenceService) {
@@ -6489,8 +6629,8 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
       
       // CRITICAL: One final check right before placing the order to catch any orders that were re-added
       // This is especially important for ACK orders that might be re-added via WebSocket
-      // Also specifically check for StopLimit orders one more time
-      const finalStopLimitCheck = findExistingStopLimitSellForSymbol(normalizedSymbol);
+      // Also specifically check for StopLimit orders one more time using repository
+      const finalStopLimitCheck = getActiveStopLimitOrder(normalizedSymbol) || findExistingStopLimitSellForSymbol(normalizedSymbol);
       if (finalStopLimitCheck && finalStopLimitCheck.orderId) {
         const finalStopLimitId = finalStopLimitCheck.orderId;
         const finalStopLimitStatus = (finalStopLimitCheck.order?.Status || '').toUpperCase();
@@ -6506,8 +6646,8 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
             });
             if (cancelResp.ok || cancelResp.status === 200 || cancelResp.status === 204 || cancelResp.status === 404) {
               console.log(`✅ Final StopLimit order ${finalStopLimitId} cancelled successfully`);
-              stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
-              pendingStopLimitOrderIds.delete(normalizedSymbol);
+              // Remove from repository (single source of truth)
+              stopLimitOrderRepository.delete(normalizedSymbol);
               stopLimitCreationBySymbol.delete(normalizedSymbol);
               ordersCache.delete(finalStopLimitId);
               if (cachePersistenceService) {
@@ -6549,14 +6689,12 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
         await new Promise(resolve => setTimeout(resolve, 500));
       }
       
-      // FINAL CLEANUP: Ensure StopLimit tracking is completely removed after manual sell
+      // FINAL CLEANUP: Ensure StopLimit repository is completely cleared after manual sell
       // This prevents loops when rebuying the same stock
-      const finalStopLimitCleanup = stopLimitOrderIdsBySymbol.get(normalizedSymbol) || 
-                                     pendingStopLimitOrderIds.get(normalizedSymbol);
-      if (finalStopLimitCleanup) {
-        console.log(`🧹 [DEBUG] Final cleanup: Removing any remaining StopLimit tracking for ${normalizedSymbol} after manual sell`);
-        stopLimitOrderIdsBySymbol.delete(normalizedSymbol);
-        pendingStopLimitOrderIds.delete(normalizedSymbol);
+      const finalRepoCheck = stopLimitOrderRepository.get(normalizedSymbol);
+      if (finalRepoCheck) {
+        console.log(`🧹 [STOPLIMIT_REPO] Final cleanup: Removing StopLimit from repository for ${normalizedSymbol} after manual sell (order ${finalRepoCheck.orderId})`);
+        stopLimitOrderRepository.delete(normalizedSymbol);
         stopLimitCreationBySymbol.delete(normalizedSymbol);
         
         // CRITICAL: Mark symbol as recently sold to prevent StopLimit creation loops
@@ -6566,6 +6704,8 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
         // Even if no StopLimit was found, mark as recently sold to be safe
         recentlySoldSymbols.set(normalizedSymbol, Date.now());
         console.log(`🏷️ [DEBUG] Marked ${normalizedSymbol} as recently sold (no StopLimit found)`);
+        // Also clean up in-progress flag
+        stopLimitCreationBySymbol.delete(normalizedSymbol);
       }
       
       // CRITICAL: Clean up any cancelled/filled StopLimit orders in cache for this symbol
