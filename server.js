@@ -3331,6 +3331,10 @@ app.post('/api/buys/test', async (req, res) => {
     
     console.log(`✅ Manual buy logged for ${symbol} - Added to buy list`);
     
+    const orderIdFromApi = (responseData && typeof responseData === 'object')
+      ? (responseData.order_id ?? responseData.OrderID ?? responseData.orderId ?? null)
+      : null;
+    
     return res.status(200).json({
       success: isSuccess,
       error: !isSuccess ? (errorMessage || `Failed to buy ${symbol}`) : undefined,
