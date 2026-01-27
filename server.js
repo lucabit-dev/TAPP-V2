@@ -3303,6 +3303,27 @@ function connectOrdersWebSocket() {
 
           // When a tracked manual BUY reaches FLL/FIL: create or modify StopLimit SELL
           if (isFilled && isBuy && pending) {
+            const normalizedSymbol = (symbol || '').toUpperCase();
+            
+            // CRITICAL: Check repository FIRST before processing to prevent duplicate creation
+            // If a StopLimit already exists in repository, just update quantity instead of creating new one
+            const existingRepoOrder = getActiveStopLimitOrder(normalizedSymbol);
+            if (existingRepoOrder) {
+              console.log(`✅ [DEBUG] StopLimit already exists in repository for ${normalizedSymbol} (${existingRepoOrder.orderId}). Updating quantity instead of creating new one.`);
+              // Remove from pending to prevent duplicate processing
+              pendingManualBuyOrders.delete(orderId);
+              
+              // Update quantity to match position
+              const position = positionsCache.get(normalizedSymbol);
+              const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+              if (positionQty > 0) {
+                modifyOrderQuantity(existingRepoOrder.orderId, positionQty).catch(err => {
+                  console.error(`❌ [DEBUG] Error updating StopLimit quantity for ${normalizedSymbol}:`, err);
+                });
+              }
+              return; // Don't call handleManualBuyFilled if order already exists
+            }
+            
             console.log(`🚀 [DEBUG] Triggering StopLimit creation/modification for filled manual buy ${orderId} (${symbol})`);
             // CRITICAL: Remove from pendingManualBuyOrders FIRST to prevent duplicate processing
             // This ensures that even if WebSocket sends multiple FLL updates, we only process once
@@ -4686,9 +4707,14 @@ async function handleManualBuyFilled(orderId, order, pending) {
     }
     
     // CRITICAL: Unified check for existing StopLimit order
-    // Use the improved findExistingStopLimitSellForSymbol which checks maps AND cache
+    // Use the improved findExistingStopLimitSellForSymbol which checks repository (single source of truth)
     // This ensures we catch orders regardless of where they are in the system
     console.log(`🔍 [DEBUG] Starting unified check for existing StopLimit for ${normalizedSymbol}...`);
+    
+    // CRITICAL: Wait a moment for repository to update if order was just created/ACK'd
+    // This prevents race conditions where we check before repository is updated
+    await new Promise(resolve => setTimeout(resolve, 300));
+    
     const existingStopLimit = findExistingStopLimitSellForSymbol(normalizedSymbol);
     
     if (existingStopLimit) {
@@ -4902,6 +4928,9 @@ async function handleManualBuyFilled(orderId, order, pending) {
     
     // CRITICAL: One final check before marking as in progress
     // This catches any orders that might have been created between our checks and now
+    // Wait a bit more to ensure repository is fully updated
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
     const absoluteFinalCheck = findExistingStopLimitSellForSymbol(normalizedSymbol);
     if (absoluteFinalCheck) {
       const { orderId: finalOrderId, order: finalOrder } = absoluteFinalCheck;
@@ -4924,6 +4953,23 @@ async function handleManualBuyFilled(orderId, order, pending) {
           console.warn(`⚠️ [DEBUG] Position quantity is 0 or not found for ${normalizedSymbol}, cannot update StopLimit`);
         }
       }
+    }
+    
+    // CRITICAL: Check repository one more time before marking as in progress
+    // This is the absolute last check to prevent duplicate creation
+    const repoCheck = getActiveStopLimitOrder(normalizedSymbol);
+    if (repoCheck) {
+      console.log(`🛑 [DEBUG] CRITICAL: Repository check found active StopLimit ${repoCheck.orderId} for ${normalizedSymbol} - aborting creation to prevent duplicate!`);
+      // Update quantity if needed
+      const position = positionsCache.get(normalizedSymbol);
+      const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+      if (positionQty > 0) {
+        const result = await modifyOrderQuantity(repoCheck.orderId, positionQty);
+        if (result.success) {
+          console.log(`✅ [DEBUG] Updated existing StopLimit quantity to ${positionQty}`);
+        }
+      }
+      return;
     }
     
     // Mark symbol as in progress - CRITICAL: Do this AFTER all checks to prevent race conditions
@@ -4960,9 +5006,26 @@ async function handleManualBuyFilled(orderId, order, pending) {
         return activeOrders;
       };
       
-      // CRITICAL: Final check before creating - use unified search one more time
+      // CRITICAL: Final check before creating - use repository (single source of truth)
       // This catches any orders that might have been created/ACK'd between our earlier check and now
       console.log(`🔍 [DEBUG] Final check before creating StopLimit for ${normalizedSymbol}...`);
+      
+      // Wait a moment for repository to update if order was just ACK'd
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      // Check repository directly (most authoritative)
+      const repoFinalCheck = getActiveStopLimitOrder(normalizedSymbol);
+      if (repoFinalCheck) {
+        console.log(`🛑 [DEBUG] Repository final check found active StopLimit ${repoFinalCheck.orderId} - aborting creation!`);
+        const position = positionsCache.get(normalizedSymbol);
+        const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+        if (positionQty > 0) {
+          await modifyOrderQuantity(repoFinalCheck.orderId, positionQty);
+        }
+        return;
+      }
+      
+      // Also check via unified search as backup
       const finalCheck = findExistingStopLimitSellForSymbol(normalizedSymbol);
       if (finalCheck) {
         const { orderId: finalOrderId, order: finalOrder } = finalCheck;
@@ -5140,10 +5203,21 @@ async function handleManualBuyFilled(orderId, order, pending) {
       }
       
       // No existing StopLimit found - create new one
-      // stop_price = buy_price - 0.15, limit_price = stop_price - 0.05
-      const calculatedStopPrice = Math.max(0, fillPrice - 0.15);
-      const calculatedLimitPrice = Math.max(0, calculatedStopPrice - 0.05);
-      console.log(`📝 [DEBUG] No existing StopLimit found. Creating new StopLimit SELL for ${normalizedSymbol} (buy: $${fillPrice.toFixed(2)}, stop: $${calculatedStopPrice.toFixed(2)}, limit: $${calculatedLimitPrice.toFixed(2)})...`);
+      // NOTE: createStopLimitSellOrder will use tracker config if available, otherwise defaults to buy_price - 0.15
+      console.log(`📝 [DEBUG] No existing StopLimit found. Creating new StopLimit SELL for ${normalizedSymbol} (buy: $${fillPrice.toFixed(2)})...`);
+      
+      // CRITICAL: One more repository check right before creation (last chance to prevent duplicate)
+      const lastRepoCheck = getActiveStopLimitOrder(normalizedSymbol);
+      if (lastRepoCheck) {
+        console.log(`🛑 [DEBUG] LAST CHECK: Repository has active StopLimit ${lastRepoCheck.orderId} - aborting creation!`);
+        const position = positionsCache.get(normalizedSymbol);
+        const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+        if (positionQty > 0) {
+          await modifyOrderQuantity(lastRepoCheck.orderId, positionQty);
+        }
+        return;
+      }
+      
       const result = await createStopLimitSellOrder(normalizedSymbol, quantity, fillPrice);
       console.log(`📝 [DEBUG] Create StopLimit result:`, JSON.stringify(result, null, 2));
       
