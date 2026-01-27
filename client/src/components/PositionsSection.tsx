@@ -4,6 +4,7 @@ import { useAuth } from '../auth/AuthContext';
 import NotificationContainer from './NotificationContainer';
 import ConfirmationModal from './ConfirmationModal';
 import ProgressModal from './ProgressModal';
+import StopLimitTrackerModal from './StopLimitTrackerModal';
 import type { NotificationProps } from './Notification';
 
 interface Position {
@@ -65,6 +66,7 @@ const PositionsWithStopLimitSection: React.FC = () => {
     message?: string;
     type?: 'danger' | 'warning' | 'info' | 'success';
   } | null>(null);
+  const [stopLimitTrackerModalOpen, setStopLimitTrackerModalOpen] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -544,6 +546,11 @@ const PositionsWithStopLimitSection: React.FC = () => {
         />
       )}
       
+      <StopLimitTrackerModal
+        isOpen={stopLimitTrackerModalOpen}
+        onClose={() => setStopLimitTrackerModalOpen(false)}
+      />
+      
       {/* Header */}
       <div className="p-5 border-b border-[#2a2820]/60 bg-gradient-to-r from-[#14130e] to-[#0f0e0a]">
         <div className="flex justify-between items-center mb-3">
@@ -570,6 +577,13 @@ const PositionsWithStopLimitSection: React.FC = () => {
                 {isConnected ? 'Connected' : 'Disconnected'}
               </span>
             </div>
+            <button
+              onClick={() => setStopLimitTrackerModalOpen(true)}
+              className="ml-3 px-3 py-1.5 rounded-sm text-xs font-bold transition-all bg-[#007acc] hover:bg-[#005a9e] text-white shadow-[0_0_8px_rgba(0,122,204,0.3)]"
+              title="Configure StopLimit Tracker"
+            >
+              StopLimit Tracker
+            </button>
             {mergedPositions.length > 0 && (
               <button
                 onClick={handleSellAll}

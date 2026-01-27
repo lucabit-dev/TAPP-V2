@@ -159,6 +159,12 @@ const pendingStopLimitOrderIds = new Map(); // Map<symbol, orderId> - temporary 
 // Track recently sold symbols to prevent StopLimit creation loops after manual sell
 const recentlySoldSymbols = new Map(); // Map<symbol, timestamp> - prevents creating StopLimit for recently sold stocks
 
+// StopLimit Tracker Configuration
+// Structure: Map<groupId, { minPrice, maxPrice, initialStopPrice, steps: [{ pnl, stop }], enabled }>
+const stopLimitTrackerConfig = new Map();
+// Track which step each position has reached: Map<symbol, { groupId, currentStepIndex, lastPnl }>
+const stopLimitTrackerProgress = new Map();
+
 // Track which buy orders have already triggered StopLimit creation (prevent duplicates)
 const stopLimitCreationInProgress = new Set(); // Set<orderId>
 const stopLimitCreationBySymbol = new Set(); // Set<symbol> - track symbols with StopLimit creation in progress
@@ -3025,6 +3031,9 @@ function connectPositionsWebSocket() {
               console.log(`✅ [DEBUG] Position exists for ${normalizedSymbol} - removing from recently sold tracking (rebuy detected)`);
               recentlySoldSymbols.delete(normalizedSymbol);
             }
+            
+            // Check StopLimit tracker for P&L-based updates
+            checkStopLimitTracker(normalizedSymbol, dataObj);
           }
         } else {
           // Position closed or quantity is 0, remove from cache
@@ -4240,8 +4249,20 @@ async function createStopLimitSellOrder(symbol, quantity, buyPrice) {
     return { success: false, error: 'Invalid parameters' };
   }
   
-  // stop_price = buy_price - 0.15
-  const stopPrice = Math.max(0, buy - 0.15);
+  // Check if there's a StopLimit tracker config that should override the default stop_price
+  let stopPrice = Math.max(0, buy - 0.15); // Default: buy_price - 0.15
+  
+  // Find matching group by buy price
+  for (const [groupId, group] of stopLimitTrackerConfig.entries()) {
+    if (!group.enabled) continue;
+    if (buy >= group.minPrice && buy <= group.maxPrice && group.initialStopPrice > 0) {
+      // Use the group's initial stop_price
+      stopPrice = group.initialStopPrice;
+      console.log(`📊 [STOPLIMIT_TRACKER] Using initial stop_price ${stopPrice} from group ${groupId} for ${normalizedSymbol} (buy price: ${buy})`);
+      break;
+    }
+  }
+  
   // limit_price = stop_price - 0.05
   const limitPrice = Math.max(0, stopPrice - 0.05);
   
@@ -4358,6 +4379,135 @@ async function modifyOrderQuantity(orderId, newQuantity) {
     response: data
   });
   return { success: true, data };
+}
+
+// Modify StopLimit order stop_price and limit_price
+async function modifyStopLimitPrice(orderId, stopPrice, limitPrice) {
+  const body = { 
+    order_id: String(orderId), 
+    stop_price: parseFloat(stopPrice) || 0,
+    limit_price: parseFloat(limitPrice) || 0
+  };
+  console.log(`📤 [DEBUG] Modifying StopLimit order prices:`, JSON.stringify(body, null, 2));
+  
+  const resp = await fetch(SECTIONS_BOT_ORDER_URL, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  const text = await resp.text().catch(() => '');
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { }
+  
+  if (!resp.ok) {
+    console.error(`❌ [DEBUG] Modify StopLimit order ${orderId} prices failed:`, {
+      status: resp.status,
+      statusText: resp.statusText,
+      response: data || text
+    });
+    return { success: false, error: data?.message || data?.detail || String(resp.status) };
+  }
+  console.log(`✅ [DEBUG] StopLimit order ${orderId} prices updated successfully:`, {
+    stopPrice: body.stop_price,
+    limitPrice: body.limit_price,
+    response: data
+  });
+  return { success: true, data };
+}
+
+// Check StopLimit tracker and update orders based on P&L
+async function checkStopLimitTracker(symbol, position) {
+  try {
+    const normalizedSymbol = (symbol || '').toUpperCase();
+    const avgPrice = parseFloat(position.AveragePrice || '0');
+    const currentPnl = parseFloat(position.UnrealizedProfitLoss || '0');
+    
+    if (avgPrice <= 0 || !normalizedSymbol) return;
+    
+    // Find matching group by price range
+    let matchingGroup = null;
+    let matchingGroupId = null;
+    
+    for (const [groupId, group] of stopLimitTrackerConfig.entries()) {
+      if (!group.enabled) continue;
+      if (avgPrice >= group.minPrice && avgPrice <= group.maxPrice) {
+        matchingGroup = group;
+        matchingGroupId = groupId;
+        break;
+      }
+    }
+    
+    if (!matchingGroup || !matchingGroup.steps || matchingGroup.steps.length === 0) {
+      return; // No matching group or no steps configured
+    }
+    
+    // Get current progress for this symbol
+    const progress = stopLimitTrackerProgress.get(normalizedSymbol);
+    const currentStepIndex = progress ? progress.currentStepIndex : -1;
+    
+    // Find the highest step that the P&L has reached
+    let newStepIndex = -1;
+    for (let i = 0; i < matchingGroup.steps.length; i++) {
+      const step = matchingGroup.steps[i];
+      const stepPnl = parseFloat(step.pnl || '0');
+      if (currentPnl >= stepPnl) {
+        newStepIndex = i;
+      } else {
+        break;
+      }
+    }
+    
+    // If we've reached a new step, update the StopLimit order
+    if (newStepIndex > currentStepIndex && newStepIndex >= 0) {
+      const newStep = matchingGroup.steps[newStepIndex];
+      const newStopPrice = parseFloat(newStep.stop || '0');
+      
+      if (newStopPrice > 0) {
+        // Find the StopLimit order for this symbol
+        const stopLimitOrder = findExistingStopLimitSellForSymbol(normalizedSymbol);
+        
+        if (stopLimitOrder && stopLimitOrder.orderId) {
+          // Calculate limit_price (stop_price - 0.05 as per existing logic)
+          const newLimitPrice = Math.max(0, newStopPrice - 0.05);
+          
+          console.log(`📈 [STOPLIMIT_TRACKER] ${normalizedSymbol} reached step ${newStepIndex + 1} (P&L: $${currentPnl.toFixed(2)}). Updating StopLimit to stop_price: $${newStopPrice.toFixed(2)}`);
+          
+          const result = await modifyStopLimitPrice(stopLimitOrder.orderId, newStopPrice, newLimitPrice);
+          
+          if (result.success) {
+            // Update progress
+            stopLimitTrackerProgress.set(normalizedSymbol, {
+              groupId: matchingGroupId,
+              currentStepIndex: newStepIndex,
+              lastPnl: currentPnl,
+              lastUpdate: Date.now()
+            });
+            console.log(`✅ [STOPLIMIT_TRACKER] Successfully updated StopLimit for ${normalizedSymbol} to step ${newStepIndex + 1}`);
+          } else {
+            console.error(`❌ [STOPLIMIT_TRACKER] Failed to update StopLimit for ${normalizedSymbol}:`, result.error);
+          }
+        } else {
+          console.warn(`⚠️ [STOPLIMIT_TRACKER] No StopLimit order found for ${normalizedSymbol}`);
+        }
+      }
+    }
+    
+    // Update progress even if no step change (to track current P&L)
+    if (progress) {
+      progress.lastPnl = currentPnl;
+      progress.lastUpdate = Date.now();
+    } else if (matchingGroup) {
+      // Initialize progress if not exists
+      stopLimitTrackerProgress.set(normalizedSymbol, {
+        groupId: matchingGroupId,
+        currentStepIndex: -1,
+        lastPnl: currentPnl,
+        lastUpdate: Date.now()
+      });
+    }
+  } catch (err) {
+    console.error(`❌ [STOPLIMIT_TRACKER] Error checking tracker for ${symbol}:`, err);
+  }
 }
 
 // When a tracked manual BUY order reaches FLL/FIL: create new StopLimit SELL or add to existing.
@@ -5626,6 +5776,73 @@ app.post('/api/debug/stoplimit/test-sell-buy', requireAuth, async (req, res) => 
     });
   } catch (e) {
     console.error('Error in sell-buy test:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// StopLimit Tracker Configuration API
+app.get('/api/stoplimit-tracker/config', requireAuth, (req, res) => {
+  try {
+    const config = Array.from(stopLimitTrackerConfig.entries()).map(([groupId, group]) => ({
+      groupId,
+      ...group
+    }));
+    res.json({ success: true, data: config });
+  } catch (e) {
+    console.error('Error getting StopLimit tracker config:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/stoplimit-tracker/config', requireAuth, (req, res) => {
+  try {
+    const { groups } = req.body;
+    
+    if (!Array.isArray(groups)) {
+      return res.status(400).json({ success: false, error: 'Groups must be an array' });
+    }
+    
+    // Clear existing config
+    stopLimitTrackerConfig.clear();
+    
+    // Add new groups
+    groups.forEach((group, index) => {
+      const groupId = group.groupId || `group_${Date.now()}_${index}`;
+      const minPrice = parseFloat(group.minPrice || '0');
+      const maxPrice = parseFloat(group.maxPrice || '999999');
+      const initialStopPrice = parseFloat(group.initialStopPrice || '0');
+      const enabled = group.enabled !== false;
+      const steps = Array.isArray(group.steps) ? group.steps.map(step => ({
+        pnl: parseFloat(step.pnl || '0'),
+        stop: parseFloat(step.stop || '0')
+      })) : [];
+      
+      stopLimitTrackerConfig.set(groupId, {
+        minPrice,
+        maxPrice,
+        initialStopPrice,
+        steps,
+        enabled
+      });
+    });
+    
+    console.log(`✅ StopLimit tracker config updated: ${groups.length} group(s)`);
+    res.json({ success: true, data: { groups: groups.length } });
+  } catch (e) {
+    console.error('Error saving StopLimit tracker config:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.get('/api/stoplimit-tracker/progress', requireAuth, (req, res) => {
+  try {
+    const progress = Array.from(stopLimitTrackerProgress.entries()).map(([symbol, data]) => ({
+      symbol,
+      ...data
+    }));
+    res.json({ success: true, data: progress });
+  } catch (e) {
+    console.error('Error getting StopLimit tracker progress:', e);
     res.status(500).json({ success: false, error: e.message });
   }
 });
