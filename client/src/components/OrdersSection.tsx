@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useCallback } from 'react';
 import { Virtuoso } from 'react-virtuoso';
 import { useAuth } from '../auth/AuthContext';
 
@@ -326,11 +326,21 @@ const OrdersSection: React.FC = () => {
     return result || canCancelPermissive;
   };
 
-  // Cancel order handler
-  const handleCancelOrder = async (orderId: string) => {
+  // Cancel order handler - optimized for immediate UI feedback
+  const handleCancelOrder = useCallback(async (orderId: string) => {
+    // Early return check BEFORE setting state
     if (cancelingOrders.has(orderId)) return; // Already canceling
     
-    setCancelingOrders(prev => new Set(prev).add(orderId));
+    // CRITICAL: Set loading state IMMEDIATELY and synchronously
+    setCancelingOrders(prev => {
+      if (prev.has(orderId)) return prev; // Already processing
+      const newSet = new Set(prev);
+      newSet.add(orderId);
+      return newSet;
+    });
+    
+    // Use setTimeout(0) to ensure state update is flushed before async work
+    await new Promise(resolve => setTimeout(resolve, 0));
     
     try {
       const response = await fetchWithAuth(`${API_BASE_URL}/orders/${encodeURIComponent(orderId)}`, {
@@ -349,13 +359,14 @@ const OrdersSection: React.FC = () => {
       console.error(`❌ Error cancelling order ${orderId}:`, err);
       alert(`Error cancelling order: ${err.message || 'Unknown error'}`);
     } finally {
+      // Always clean up loading state
       setCancelingOrders(prev => {
         const newSet = new Set(prev);
         newSet.delete(orderId);
         return newSet;
       });
     }
-  };
+  }, [cancelingOrders, fetchWithAuth]);
 
   return (
     <div className="h-full flex flex-col bg-[#14130e]">
@@ -495,12 +506,23 @@ const OrdersSection: React.FC = () => {
                         <div className="col-span-1 text-center">
                           {canCancel ? (
                             <button
-                              onClick={() => handleCancelOrder(order.OrderID)}
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                handleCancelOrder(order.OrderID);
+                              }}
                               disabled={isCanceling}
-                              className="px-2 py-1 text-xs font-semibold rounded transition-colors bg-[#f87171] hover:bg-[#ef4444] text-[#14130e] disabled:bg-[#2a2820] disabled:text-[#eae9e9] disabled:opacity-50 disabled:cursor-not-allowed"
+                              className="px-2 py-1 text-xs font-semibold rounded transition-all duration-75 bg-[#f87171] hover:bg-[#ef4444] active:scale-95 text-[#14130e] disabled:bg-[#2a2820] disabled:text-[#eae9e9] disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none"
                               title={isCanceling ? 'Cancelling...' : 'Cancel order'}
                             >
-                              {isCanceling ? '...' : 'Cancel'}
+                              {isCanceling ? (
+                                <svg className="animate-spin h-3 w-3 mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg>
+                              ) : (
+                                'Cancel'
+                              )}
                             </button>
                           ) : (
                             <span className="text-xs text-[#808080] opacity-50">—</span>

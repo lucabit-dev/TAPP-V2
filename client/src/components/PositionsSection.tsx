@@ -4,6 +4,7 @@ import { useAuth } from '../auth/AuthContext';
 import NotificationContainer from './NotificationContainer';
 import ConfirmationModal from './ConfirmationModal';
 import ProgressModal from './ProgressModal';
+import StopLimitTrackerModal from './StopLimitTrackerModal';
 import type { NotificationProps } from './Notification';
 
 interface Position {
@@ -65,6 +66,7 @@ const PositionsWithStopLimitSection: React.FC = () => {
     message?: string;
     type?: 'danger' | 'warning' | 'info' | 'success';
   } | null>(null);
+  const [stopLimitTrackerModalOpen, setStopLimitTrackerModalOpen] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -268,10 +270,10 @@ const PositionsWithStopLimitSection: React.FC = () => {
     };
   }, [connectWebSocket, disconnectWebSocket]);
 
-  const addNotification = (message: string, type: 'success' | 'error' | 'warning' | 'info' = 'info', duration?: number) => {
+  const addNotification = useCallback((message: string, type: 'success' | 'error' | 'warning' | 'info' = 'info', duration?: number) => {
     const id = Date.now().toString() + Math.random().toString(36).substr(2, 9);
     setNotifications(prev => [...prev, { id, message, type, duration, onClose: () => {} }]);
-  };
+  }, []);
 
   const removeNotification = (id: string) => {
     setNotifications(prev => prev.filter(n => n.id !== id));
@@ -319,11 +321,12 @@ const PositionsWithStopLimitSection: React.FC = () => {
     return sum + (isNaN(pl) ? 0 : pl);
   }, 0), [mergedPositions]);
 
-  const handleSell = async (position: Position) => {
+  const handleSell = useCallback(async (position: Position) => {
     const positionId = position.PositionID;
     const symbol = position.Symbol?.trim().toUpperCase();
     const quantity = parseInt(position.Quantity || '0', 10);
     
+    // Early return checks BEFORE setting state
     if (!symbol || sellingPositions.has(positionId)) return;
     
     if (!quantity || quantity <= 0) {
@@ -332,7 +335,18 @@ const PositionsWithStopLimitSection: React.FC = () => {
     }
     
     const action = position.LongShort === 'Long' ? 'sell' : 'close';
-    setSellingPositions(prev => new Set(prev).add(positionId));
+    
+    // CRITICAL: Set loading state IMMEDIATELY and synchronously
+    // Use functional update to ensure we're working with latest state
+    setSellingPositions(prev => {
+      if (prev.has(positionId)) return prev; // Already processing
+      const newSet = new Set(prev);
+      newSet.add(positionId);
+      return newSet;
+    });
+    
+    // Use setTimeout(0) to ensure state update is flushed before async work
+    await new Promise(resolve => setTimeout(resolve, 0));
     
     try {
       const response = await fetchWithAuth(`${API_BASE_URL}/sell`, {
@@ -363,13 +377,14 @@ const PositionsWithStopLimitSection: React.FC = () => {
     } catch (err: any) {
       addNotification(`Error ${action === 'sell' ? 'selling' : 'closing'} ${symbol}: ${err.message || 'Unknown error'}`, 'error');
     } finally {
+      // Always clean up loading state
       setSellingPositions(prev => {
         const newSet = new Set(prev);
         newSet.delete(positionId);
         return newSet;
       });
     }
-  };
+  }, [sellingPositions, fetchWithAuth, addNotification]);
 
   const handleSellAll = async () => {
     if (mergedPositions.length === 0 || sellingAll) return;
@@ -544,6 +559,11 @@ const PositionsWithStopLimitSection: React.FC = () => {
         />
       )}
       
+      <StopLimitTrackerModal
+        isOpen={stopLimitTrackerModalOpen}
+        onClose={() => setStopLimitTrackerModalOpen(false)}
+      />
+      
       {/* Header */}
       <div className="p-5 border-b border-[#2a2820]/60 bg-gradient-to-r from-[#14130e] to-[#0f0e0a]">
         <div className="flex justify-between items-center mb-3">
@@ -570,6 +590,13 @@ const PositionsWithStopLimitSection: React.FC = () => {
                 {isConnected ? 'Connected' : 'Disconnected'}
               </span>
             </div>
+            <button
+              onClick={() => setStopLimitTrackerModalOpen(true)}
+              className="ml-3 px-3 py-1.5 rounded-sm text-xs font-bold transition-all bg-[#007acc] hover:bg-[#005a9e] text-white shadow-[0_0_8px_rgba(0,122,204,0.3)]"
+              title="Configure StopLimit Tracker"
+            >
+              StopLimit Tracker
+            </button>
             {mergedPositions.length > 0 && (
               <button
                 onClick={handleSellAll}
@@ -750,12 +777,16 @@ const PositionsWithStopLimitSection: React.FC = () => {
                         {/* Sell Button */}
                         <div className="text-center">
                           <button
-                            onClick={() => handleSell(position)}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              handleSell(position);
+                            }}
                             disabled={sellingPositions.has(position.PositionID)}
-                            className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
+                            className={`px-2 py-1 rounded text-xs font-medium transition-all duration-75 ${
                               sellingPositions.has(position.PositionID)
-                                ? 'bg-[#2a2820] text-[#eae9e9] opacity-50 cursor-not-allowed'
-                                : 'bg-[#f87171] hover:bg-[#ef4444] text-[#14130e]'
+                                ? 'bg-[#2a2820] text-[#eae9e9] opacity-50 cursor-not-allowed pointer-events-none'
+                                : 'bg-[#f87171] hover:bg-[#ef4444] active:scale-95 text-[#14130e]'
                             }`}
                           >
                             {sellingPositions.has(position.PositionID) ? (

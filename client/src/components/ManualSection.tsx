@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import NotificationContainer from './NotificationContainer';
 import type { NotificationProps } from './Notification';
@@ -208,14 +208,25 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
     }
   };
 
-  const handleBuyClick = async (symbol: string | null | undefined) => {
+  const handleBuyClick = useCallback(async (symbol: string | null | undefined) => {
     if (!symbol) return;
     
     const cleanSymbol = String(symbol).trim().toUpperCase();
+    
+    // Early return check BEFORE setting state
     if (buyingSymbols.has(cleanSymbol)) return; // Prevent duplicate clicks
     
-    setBuyingSymbols(prev => new Set(prev).add(cleanSymbol));
+    // CRITICAL: Set loading state IMMEDIATELY and synchronously
+    setBuyingSymbols(prev => {
+      if (prev.has(cleanSymbol)) return prev; // Already processing
+      const newSet = new Set(prev);
+      newSet.add(cleanSymbol);
+      return newSet;
+    });
     setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: null }));
+    
+    // Use setTimeout(0) to ensure state update is flushed before async work
+    await new Promise(resolve => setTimeout(resolve, 0));
     
     try {
       const resp = await fetchWithAuth(`${API_BASE_URL}/buys/test`, {
@@ -286,13 +297,14 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
         });
       }, 3000);
     } finally {
+      // Always clean up loading state
       setBuyingSymbols(prev => {
         const next = new Set(prev);
         next.delete(cleanSymbol);
         return next;
       });
     }
-  };
+  }, [buyingSymbols, fetchWithAuth]);
 
   // Helper function to get price group from price
   const getPriceGroup = (price: number): string | null => {
@@ -511,13 +523,14 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                             return (
                               <button
                                 onClick={(e) => {
+                                  e.preventDefault();
                                   e.stopPropagation();
                                   if (!isDisabled) {
                                     handleBuyClick(symbolVal);
                                   }
                                 }}
                                 disabled={isDisabled}
-                                className={buttonClass}
+                                className={`${buttonClass} transition-all duration-75 ${!isDisabled ? 'active:scale-95' : 'pointer-events-none'}`}
                                 title={buttonTitle}
                               >
                                 {buttonText}
