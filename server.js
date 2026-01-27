@@ -3386,6 +3386,55 @@ function connectOrdersWebSocket() {
               stopLimitCreationBySymbol.delete(stopLimitSymbol);
               console.log(`🔓 [DEBUG] Removed ${stopLimitSymbol} from stopLimitCreationBySymbol guard (StopLimit ACK'd)`);
             }
+            
+            // CRITICAL: If StopLimit was REJECTED with "remaining on sell orders" message,
+            // it means there's already an active stop-loss order. Find and register it.
+            if (status === 'REJ' || status === 'REJECTED') {
+              const rejectReason = (order.RejectReason || '').toLowerCase();
+              if (rejectReason.includes('remaining on sell orders') || rejectReason.includes('remaining on sell')) {
+                console.log(`⚠️ [DEBUG] StopLimit ${orderId} rejected for ${stopLimitSymbol} - searching for existing active stop-loss order...`);
+                
+                // Search for existing active stop-loss orders in cache
+                const existingStopLimit = findExistingStopLimitSellForSymbol(stopLimitSymbol);
+                if (existingStopLimit) {
+                  console.log(`✅ [DEBUG] Found existing active StopLimit ${existingStopLimit.orderId} for ${stopLimitSymbol} - already registered`);
+                  // Remove from creation guard since we found the existing order
+                  if (stopLimitCreationBySymbol.has(stopLimitSymbol)) {
+                    stopLimitCreationBySymbol.delete(stopLimitSymbol);
+                    console.log(`🔓 [DEBUG] Removed ${stopLimitSymbol} from stopLimitCreationBySymbol guard (found existing order)`);
+                  }
+                } else {
+                  // Search cache directly for any active stop-loss orders
+                  let foundActiveOrder = null;
+                  for (const [cachedOrderId, cachedOrder] of ordersCache.entries()) {
+                    const cachedLeg = cachedOrder.Legs?.[0];
+                    const cachedSymbol = (cachedLeg?.Symbol || '').toUpperCase();
+                    const cachedSide = (cachedLeg?.BuyOrSell || '').toUpperCase();
+                    const cachedType = (cachedOrder.OrderType || '').toUpperCase();
+                    const cachedStatus = (cachedOrder.Status || '').toUpperCase();
+                    
+                    if (cachedSymbol === stopLimitSymbol && 
+                        cachedSide === 'SELL' && 
+                        (cachedType === 'STOPLIMIT' || cachedType === 'STOP_LIMIT') &&
+                        (cachedStatus === 'ACK' || cachedStatus === 'DON' || cachedStatus === 'REC')) {
+                      foundActiveOrder = cachedOrder;
+                      console.log(`✅ [DEBUG] Found active StopLimit ${cachedOrderId} in cache for ${stopLimitSymbol} - registering in repository`);
+                      registerStopLimitOrder(cachedOrder);
+                      // Remove from creation guard
+                      if (stopLimitCreationBySymbol.has(stopLimitSymbol)) {
+                        stopLimitCreationBySymbol.delete(stopLimitSymbol);
+                        console.log(`🔓 [DEBUG] Removed ${stopLimitSymbol} from stopLimitCreationBySymbol guard (registered existing order)`);
+                      }
+                      break;
+                    }
+                  }
+                  
+                  if (!foundActiveOrder) {
+                    console.warn(`⚠️ [DEBUG] Could not find existing active StopLimit for ${stopLimitSymbol} despite rejection message`);
+                  }
+                }
+              }
+            }
           }
 
           // When a tracked manual BUY reaches FLL/FIL: create or modify StopLimit SELL
@@ -4275,6 +4324,31 @@ function findExistingStopLimitSellForSymbol(symbol) {
     const qty = parseInt(leg?.QuantityRemaining || leg?.QuantityOrdered || '0', 10) || 0;
     console.log(`✅ [STOPLIMIT_REPO] Found active StopLimit order for ${normalized}: ${repoEntry.orderId} (qty ${qty}, status ${repoEntry.status})`);
     return { orderId: repoEntry.orderId, quantity: qty, order: repoEntry.order };
+  }
+  
+  // CRITICAL: Fallback to cache search if repository doesn't have the order
+  // This handles cases where order was ACK'd but not yet registered in repository
+  // or repository was cleared but order still exists in cache
+  for (const [cachedOrderId, cachedOrder] of ordersCache.entries()) {
+    const cachedLeg = cachedOrder.Legs?.[0];
+    const cachedSymbol = (cachedLeg?.Symbol || '').toUpperCase();
+    const cachedSide = (cachedLeg?.BuyOrSell || '').toUpperCase();
+    const cachedType = (cachedOrder.OrderType || '').toUpperCase();
+    const cachedStatus = (cachedOrder.Status || '').toUpperCase();
+    
+    if (cachedSymbol === normalized && 
+        cachedSide === 'SELL' && 
+        (cachedType === 'STOPLIMIT' || cachedType === 'STOP_LIMIT')) {
+      // Check if order is active (not terminal)
+      const terminalStatuses = new Set(['CAN', 'FIL', 'FLL', 'EXP', 'REJ', 'OUT']);
+      if (!terminalStatuses.has(cachedStatus)) {
+        const qty = parseInt(cachedLeg?.QuantityRemaining || cachedLeg?.QuantityOrdered || '0', 10) || 0;
+        console.log(`✅ [STOPLIMIT_CACHE] Found active StopLimit order in cache for ${normalized}: ${cachedOrderId} (qty ${qty}, status ${cachedStatus})`);
+        // Register in repository for future lookups
+        registerStopLimitOrder(cachedOrder);
+        return { orderId: cachedOrderId, quantity: qty, order: cachedOrder };
+      }
+    }
   }
   
   console.log(`ℹ️ [STOPLIMIT_REPO] No active StopLimit order found for ${normalized}`);

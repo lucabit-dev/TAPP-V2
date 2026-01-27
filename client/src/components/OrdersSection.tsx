@@ -217,7 +217,6 @@ const OrdersSection: React.FC = () => {
   const canCancelOrder = (order: Order): boolean => {
     const leg = order.Legs && order.Legs.length > 0 ? order.Legs[0] : undefined;
     if (!leg) {
-      console.log('❌ Order has no leg:', order.OrderID);
       return false;
     }
     
@@ -228,7 +227,6 @@ const OrdersSection: React.FC = () => {
     
     // If order is fully filled, it can't be cancelled
     if (qtyRemaining <= 0) {
-      console.log('❌ Order fully filled:', order.OrderID, 'qtyRemaining:', qtyRemaining);
       return false;
     }
     
@@ -247,26 +245,15 @@ const OrdersSection: React.FC = () => {
     
     // If order is in a terminal state, it can't be cancelled
     if (isTerminal) {
-      console.log('❌ Order in terminal state:', order.OrderID, 'status:', status, 'desc:', statusDesc);
       return false;
     }
     
     // Explicitly allow cancellation for DON and ACK statuses (check first, highest priority)
     // These are active orders that can be cancelled
-    // Check both exact match and case variations to be thorough
-    const isDON = statusUpper === 'DON' || status === 'DON' || status === 'don' || status === 'Don';
-    const isACK = statusUpper === 'ACK' || status === 'ACK' || status === 'ack' || status === 'Ack';
+    const isDON = statusUpper === 'DON';
+    const isACK = statusUpper === 'ACK';
     
     if (isDON || isACK) {
-      console.log('✅ DON/ACK order can be cancelled:', {
-        OrderID: order.OrderID,
-        Status: status,
-        StatusUpper: statusUpper,
-        StatusDescription: statusDesc,
-        QuantityRemaining: qtyRemaining,
-        isDON,
-        isACK
-      });
       return true; // DON and ACK orders can always be cancelled if they have remaining quantity
     }
     
@@ -277,7 +264,6 @@ const OrdersSection: React.FC = () => {
       statusDescUpper.includes('QUEUED');
     
     if (isQueued) {
-      console.log('✅ Queued order can be cancelled:', order.OrderID, 'status:', status, 'desc:', statusDesc, 'qtyRemaining:', qtyRemaining);
       return true;
     }
     
@@ -300,28 +286,6 @@ const OrdersSection: React.FC = () => {
     // Additional check: if order has remaining quantity and is not explicitly terminal, allow cancellation
     // This ensures we don't miss any cancellable orders
     const canCancelPermissive = qtyRemaining > 0 && !isTerminal;
-    
-    if (result || canCancelPermissive) {
-      console.log('✅ Order can be cancelled:', {
-        OrderID: order.OrderID,
-        Status: status,
-        StatusDescription: statusDesc,
-        QuantityRemaining: qtyRemaining,
-        isTerminal,
-        result,
-        canCancelPermissive
-      });
-    } else {
-      console.log('❌ Order cannot be cancelled:', {
-        OrderID: order.OrderID,
-        Status: status,
-        StatusDescription: statusDesc,
-        QuantityRemaining: qtyRemaining,
-        isTerminal,
-        isQueued,
-        isActiveStatus
-      });
-    }
     
     return result || canCancelPermissive;
   };
@@ -455,19 +419,6 @@ const OrdersSection: React.FC = () => {
                   const isBuy = leg?.BuyOrSell === 'Buy';
                   const canCancel = canCancelOrder(order);
                   const isCanceling = cancelingOrders.has(order.OrderID);
-                  
-                  // Debug logging for orders with DON, ACK, or Queued status
-                  if (order.Status === 'DON' || order.Status === 'ACK' || 
-                      order.StatusDescription?.toUpperCase().includes('QUEUED')) {
-                    console.log('🔍 Order cancel check:', {
-                      OrderID: order.OrderID,
-                      Status: order.Status,
-                      StatusDescription: order.StatusDescription,
-                      QuantityRemaining: leg?.QuantityRemaining,
-                      canCancel,
-                      hasLeg: !!leg
-                    });
-                  }
                   
                   return (
                     <div
