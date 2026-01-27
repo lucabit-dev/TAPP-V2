@@ -424,7 +424,8 @@ const OrdersSection: React.FC = () => {
             {/* Header */}
             <div className="bg-[#14130e] border-b border-[#2a2820] px-4 py-2 sticky top-0 z-10">
               <div className="grid grid-cols-12 gap-2 text-xs font-medium opacity-60 uppercase tracking-wide">
-                <div className="col-span-2">Symbol</div>
+                <div className="col-span-1 text-right">Order ID</div>
+                <div className="col-span-1">Symbol</div>
                 <div className="col-span-1 text-center">Side</div>
                 <div className="col-span-1 text-right">Qty</div>
                 <div className="col-span-1 text-right">Remain</div>
@@ -470,7 +471,10 @@ const OrdersSection: React.FC = () => {
                       }`}
                     >
                       <div className="grid grid-cols-12 gap-2 items-center text-sm">
-                        <div className="col-span-2">
+                        <div className="col-span-1 text-right">
+                          <div className="text-[#eae9e9] font-mono text-xs">{order.OrderID}</div>
+                        </div>
+                        <div className="col-span-1">
                           <div className="font-semibold text-[#eae9e9]">{leg?.Symbol || '—'}</div>
                           <div className="text-xs opacity-60">{leg?.AssetType || '—'}</div>
                         </div>

@@ -302,6 +302,10 @@ const recentlySoldSymbols = new Map(); // Map<symbol, timestamp> - prevents crea
 // This prevents loops when StopLimit is filled but position still exists
 const stopLimitFilledSymbols = new Map(); // Map<symbol, { orderId, timestamp }>
 
+// Track processed FLL orders to prevent duplicate processing (sections-buy-bot-main pattern)
+// Prevents processing the same order multiple times when WebSocket sends duplicate FLL messages
+const processedFllOrders = new Set(); // Set<orderId> - tracks which orders have been processed for FLL
+
 // StopLimit Tracker Configuration
 // Structure: Map<groupId, { minPrice, maxPrice, initialStopPrice, steps: [{ pnl, stop }], enabled }>
 const stopLimitTrackerConfig = new Map();
@@ -778,8 +782,26 @@ setInterval(() => {
       }
     }
     
-    if (cleanedRepository > 0 || cleanedRecentlySold > 0 || cleanedFilledStopLimits > 0) {
-      console.log(`🧹 [STOPLIMIT_REPO] Cleaned ${cleanedRepository} repository entries, ${cleanedRecentlySold} recently sold entries, and ${cleanedFilledStopLimits} filled StopLimit entries`);
+    // Clean up processed FLL orders - remove entries older than 1 hour
+    // This prevents the set from growing indefinitely while keeping recent entries
+    let cleanedProcessedFll = 0;
+    const PROCESSED_FLL_MAX_AGE = 3600000; // 1 hour
+    // Note: Set doesn't have timestamps, so we'll clean based on size
+    // If set gets too large (> 1000 entries), clear old entries
+    if (processedFllOrders.size > 1000) {
+      const oldSize = processedFllOrders.size;
+      // Clear half of the entries (simple cleanup strategy)
+      const entriesToKeep = Math.floor(oldSize / 2);
+      const entriesArray = Array.from(processedFllOrders);
+      processedFllOrders.clear();
+      // Keep the most recent half (assuming newer orders have higher IDs)
+      entriesArray.slice(-entriesToKeep).forEach(id => processedFllOrders.add(id));
+      cleanedProcessedFll = oldSize - processedFllOrders.size;
+      console.log(`🧹 [CLEANUP] Cleaned ${cleanedProcessedFll} old processed FLL order entries (kept ${processedFllOrders.size})`);
+    }
+    
+    if (cleanedRepository > 0 || cleanedRecentlySold > 0 || cleanedFilledStopLimits > 0 || cleanedProcessedFll > 0) {
+      console.log(`🧹 [STOPLIMIT_REPO] Cleaned ${cleanedRepository} repository entries, ${cleanedRecentlySold} recently sold entries, ${cleanedFilledStopLimits} filled StopLimit entries, and ${cleanedProcessedFll} processed FLL entries`);
     }
   } catch (err) {
     console.error(`❌ [STOPLIMIT_REPO] Error in StopLimit cleanup:`, err);
@@ -3329,15 +3351,45 @@ function connectOrdersWebSocket() {
 
 
           // When a tracked manual BUY reaches FLL/FIL: create or modify StopLimit SELL
+          // CRITICAL: Only process if it's a BUY order AND it's in pendingManualBuyOrders
+          // This ensures we only process orders we're tracking, not random FLL messages
           if (isFilled && isBuy && pending) {
+            // CRITICAL: Validate this is actually a tracked buy order
+            // Check that pending data matches the order
+            const pendingSymbol = (pending.symbol || '').toString().toUpperCase();
+            const orderSymbol = (symbol || '').toUpperCase();
+            
+            if (pendingSymbol !== orderSymbol) {
+              console.warn(`⚠️ [DEBUG] Symbol mismatch: pending=${pendingSymbol}, order=${orderSymbol} for order ${orderId}. Skipping.`);
+              pendingManualBuyOrders.delete(orderId);
+              return;
+            }
+            
+            // CRITICAL: Check if this order was already processed (prevent duplicate processing)
+            // This handles cases where WebSocket sends multiple FLL messages for the same order
+            if (processedFllOrders.has(orderId)) {
+              console.log(`⏭️ [DEBUG] Order ${orderId} (${symbol}) already processed for FLL - skipping duplicate WebSocket message`);
+              // Still remove from pending to clean up
+              pendingManualBuyOrders.delete(orderId);
+              return; // Don't process again
+            }
+            
             const normalizedSymbol = (symbol || '').toUpperCase();
+            
+            // CRITICAL: Mark as processed IMMEDIATELY to prevent duplicate processing
+            // Do this BEFORE any async operations
+            processedFllOrders.add(orderId);
+            console.log(`✅ [DEBUG] Marked order ${orderId} (${symbol}) as processed for FLL`);
+            
+            // CRITICAL: Remove from pendingManualBuyOrders FIRST to prevent duplicate processing
+            // This ensures that even if WebSocket sends multiple FLL updates, we only process once
+            pendingManualBuyOrders.delete(orderId);
+            console.log(`✅ [DEBUG] Removed ${orderId} from pendingManualBuyOrders. Remaining: ${pendingManualBuyOrders.size}`);
             
             // CRITICAL: Check if StopLimit was already filled for this symbol - prevent creating new one
             const filledStopLimit = stopLimitFilledSymbols.get(normalizedSymbol);
             if (filledStopLimit) {
               console.warn(`⚠️ [DEBUG] Symbol ${normalizedSymbol} had StopLimit filled previously (order ${filledStopLimit.orderId}). Skipping StopLimit creation to prevent loops.`);
-              // Remove from pending to prevent duplicate processing
-              pendingManualBuyOrders.delete(orderId);
               
               // Check if position still exists - if not, remove from filled tracking
               const position = positionsCache.get(normalizedSymbol);
@@ -3354,8 +3406,6 @@ function connectOrdersWebSocket() {
             const existingRepoOrder = getActiveStopLimitOrder(normalizedSymbol);
             if (existingRepoOrder) {
               console.log(`✅ [DEBUG] StopLimit already exists in repository for ${normalizedSymbol} (${existingRepoOrder.orderId}). Updating quantity instead of creating new one.`);
-              // Remove from pending to prevent duplicate processing
-              pendingManualBuyOrders.delete(orderId);
               
               // Update quantity to match position
               const position = positionsCache.get(normalizedSymbol);
@@ -3369,10 +3419,6 @@ function connectOrdersWebSocket() {
             }
             
             console.log(`🚀 [DEBUG] Triggering StopLimit creation/modification for filled manual buy ${orderId} (${symbol})`);
-            // CRITICAL: Remove from pendingManualBuyOrders FIRST to prevent duplicate processing
-            // This ensures that even if WebSocket sends multiple FLL updates, we only process once
-            pendingManualBuyOrders.delete(orderId);
-            console.log(`✅ [DEBUG] Removed ${orderId} from pendingManualBuyOrders. Remaining: ${pendingManualBuyOrders.size}`);
             
             // Don't remove from cache yet - let handleManualBuyFilled complete first
             // The order will be removed from cache after this block if status is terminal
@@ -3381,6 +3427,8 @@ function connectOrdersWebSocket() {
               handleManualBuyFilled(orderId, order, pending).catch(err => {
                 console.error(`❌ [DEBUG] Error in handleManualBuyFilled for ${orderId}:`, err);
                 console.error(`❌ [DEBUG] Stack:`, err.stack);
+                // On error, remove from processed set so it can be retried if needed
+                processedFllOrders.delete(orderId);
               });
             } else {
               console.log(`⏸️ [DEBUG] StopLimit creation already in progress for ${orderId}, skipping WebSocket trigger`);
