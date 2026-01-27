@@ -155,7 +155,7 @@ let cachePersistenceService = null;
 async function initializeCachePersistence() {
   try {
     const CachePersistenceService = require('./services/cachePersistenceService');
-    cachePersistenceService = new CachePersistenceService(ordersCache, positionsCache, null);
+    cachePersistenceService = new CachePersistenceService(ordersCache, positionsCache);
     
     // Load cache from database on startup
     const loaded = await cachePersistenceService.loadFromDatabase();
@@ -3126,7 +3126,6 @@ function checkPositionExists(symbol) {
   return false;
 }
 
-// Stop-loss orders are now handled automatically by StopLimitService when positions are detected
 
 // Test external buy webhook endpoint (no buy list mutation)
 app.post('/api/buys/test', async (req, res) => {
@@ -3291,7 +3290,6 @@ app.post('/api/buys/test', async (req, res) => {
     
     const isBuySuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
     
-    // Stop-loss orders are now handled automatically by StopLimitService when positions are detected
     let stopLossResult = null;
     
     // Create buy entry and add to buy list
@@ -3977,9 +3975,8 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
   try {
     const symbol = (req.body?.symbol || '').toString().trim().toUpperCase();
     const quantity = parseInt(req.body?.quantity || '0', 10);
-    // Validate and normalize order_type: permitted values are Limit, Market, StopLimit
+    // Validate and normalize order_type: permitted values are Limit, Market (StopLimit not supported)
     const rawOrderType = (req.body?.order_type || 'Limit').toString().trim();
-    // Normalize common variations to valid values
     const normalizedInput = rawOrderType.toLowerCase();
     let orderType = 'Limit'; // default
     if (normalizedInput === 'limit') {
@@ -3987,7 +3984,7 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
     } else if (normalizedInput === 'market') {
       orderType = 'Market';
     } else if (normalizedInput === 'stoplimit' || normalizedInput === 'stop_limit' || normalizedInput === 'stop-limit') {
-      orderType = 'StopLimit';
+      return res.status(400).json({ success: false, error: 'StopLimit orders are not supported. Use Limit or Market.' });
     }
     const longShort = (req.body?.long_short || req.body?.longShort || '').toString().trim();
     
