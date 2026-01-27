@@ -345,13 +345,36 @@ function getActiveStopLimitOrder(symbol) {
   
   if (!repoEntry) return null;
   
+  // CRITICAL: If status is PENDING, it means we just created the order and are waiting for ACK
+  // Treat it as active to prevent duplicate creation
+  if (repoEntry.status === 'PENDING') {
+    return {
+      orderId: repoEntry.orderId,
+      order: repoEntry.order || null,
+      openedDateTime: repoEntry.openedDateTime,
+      status: 'PENDING'
+    };
+  }
+  
   // Verify order is still active in cache
   const cachedOrder = ordersCache.get(repoEntry.orderId);
   if (!cachedOrder) {
-    // Order not in cache - remove from repository
-    stopLimitOrderRepository.delete(normalized);
-    console.log(`🧹 [STOPLIMIT_REPO] Removed stale entry for ${normalized} (order ${repoEntry.orderId} not in cache)`);
-    return null;
+    // Order not in cache - if it's been more than 10 seconds since creation, remove it
+    // (might be a failed creation that never got ACK'd)
+    const openedTime = new Date(repoEntry.openedDateTime).getTime();
+    const age = Date.now() - openedTime;
+    if (age > 10000) {
+      stopLimitOrderRepository.delete(normalized);
+      console.log(`🧹 [STOPLIMIT_REPO] Removed stale entry for ${normalized} (order ${repoEntry.orderId} not in cache, age: ${age}ms)`);
+      return null;
+    }
+    // Still pending - return it
+    return {
+      orderId: repoEntry.orderId,
+      order: repoEntry.order || null,
+      openedDateTime: repoEntry.openedDateTime,
+      status: repoEntry.status
+    };
   }
   
   const cachedStatus = (cachedOrder.Status || '').toUpperCase();
@@ -5041,38 +5064,38 @@ async function handleAutoStopLimitBuyFilled(orderId, order, buyOrderData) {
       return;
     }
     
-    // CRITICAL: Check database FIRST (authoritative source of truth)
-    // This catches orders that exist in DB even if repository/cache is empty
+    // CRITICAL: Check in order: Cache (most up-to-date) → Repository → Database
+    // Cache is checked first because WebSocket updates arrive there immediately
     let existingStopLimitOrderId = null;
-    if (cachePersistenceService) {
-      const dbCheck = await cachePersistenceService.checkDatabaseForActiveStopLimit(normalizedSymbol);
-      if (dbCheck) {
-        existingStopLimitOrderId = dbCheck.orderId;
-        console.log(`✅ [AUTO_STOPLIMIT] Database check found active stop-limit order ${dbCheck.orderId} for ${normalizedSymbol} (status: ${dbCheck.status})`);
-        
-        // Register in repository if not already there
-        if (!stopLimitOrderRepository.has(normalizedSymbol)) {
-          stopLimitOrderRepository.set(normalizedSymbol, {
-            orderId: dbCheck.orderId,
-            order: dbCheck.order,
-            openedDateTime: dbCheck.openedDateTime,
-            status: dbCheck.status
-          });
-          console.log(`✅ [AUTO_STOPLIMIT] Registered stop-limit order ${dbCheck.orderId} from database for ${normalizedSymbol}`);
+    let existingStopLimitOrder = null;
+    let existingStopLimitStatus = null;
+    
+    // STEP 1: Check repository FIRST for PENDING orders (orders we just created)
+    // This prevents race conditions where we create an order but haven't received ACK yet
+    const repoCheck = stopLimitOrderRepository.get(normalizedSymbol);
+    if (repoCheck) {
+      if (repoCheck.status === 'PENDING') {
+        // Order was just created, waiting for ACK - treat as existing
+        existingStopLimitOrderId = repoCheck.orderId;
+        existingStopLimitStatus = 'PENDING';
+        console.log(`✅ [AUTO_STOPLIMIT] Found PENDING stop-limit order ${repoCheck.orderId} in repository for ${normalizedSymbol} (just created, waiting for ACK)`);
+      } else {
+        // Check if order is still active in cache
+        const cachedOrder = ordersCache.get(repoCheck.orderId);
+        if (cachedOrder) {
+          const cachedStatus = (cachedOrder.Status || '').toUpperCase();
+          const terminalStatuses = new Set(['CAN', 'FIL', 'FLL', 'EXP', 'REJ', 'OUT']);
+          if (!terminalStatuses.has(cachedStatus)) {
+            existingStopLimitOrderId = repoCheck.orderId;
+            existingStopLimitOrder = cachedOrder;
+            existingStopLimitStatus = cachedStatus;
+            console.log(`✅ [AUTO_STOPLIMIT] Found existing stop-limit order ${repoCheck.orderId} in repository for ${normalizedSymbol} (status: ${cachedStatus})`);
+          }
         }
       }
     }
     
-    // Check repository if database check didn't find anything
-    if (!existingStopLimitOrderId) {
-      const existingStopLimit = getActiveStopLimitOrder(normalizedSymbol);
-      if (existingStopLimit) {
-        existingStopLimitOrderId = existingStopLimit.orderId;
-        console.log(`✅ [AUTO_STOPLIMIT] Found existing stop-limit order ${existingStopLimitOrderId} in repository for ${normalizedSymbol}`);
-      }
-    }
-    
-    // Also check cache for existing stop-limit orders
+    // STEP 2: Check cache (most up-to-date, includes orders just ACK'd)
     if (!existingStopLimitOrderId) {
       for (const [cachedOrderId, cachedOrder] of ordersCache.entries()) {
         const cachedLeg = cachedOrder.Legs?.[0];
@@ -5086,8 +5109,56 @@ async function handleAutoStopLimitBuyFilled(orderId, order, buyOrderData) {
             (cachedType === 'STOPLIMIT' || cachedType === 'STOP_LIMIT') &&
             (cachedStatus === 'ACK' || cachedStatus === 'DON' || cachedStatus === 'REC')) {
           existingStopLimitOrderId = cachedOrderId;
-          console.log(`✅ [AUTO_STOPLIMIT] Found existing stop-limit order ${cachedOrderId} in cache for ${normalizedSymbol}`);
+          existingStopLimitOrder = cachedOrder;
+          existingStopLimitStatus = cachedStatus;
+          console.log(`✅ [AUTO_STOPLIMIT] Found existing stop-limit order ${cachedOrderId} in cache for ${normalizedSymbol} (status: ${cachedStatus})`);
+          
+          // CRITICAL: Register in repository immediately if not already there
+          // This ensures subsequent checks will find it
+          if (!stopLimitOrderRepository.has(normalizedSymbol)) {
+            stopLimitOrderRepository.set(normalizedSymbol, {
+              orderId: cachedOrderId,
+              order: cachedOrder,
+              openedDateTime: cachedOrder.OpenedDateTime,
+              status: cachedStatus
+            });
+            console.log(`✅ [AUTO_STOPLIMIT] Registered stop-limit order ${cachedOrderId} from cache to repository for ${normalizedSymbol}`);
+            
+            // Save to database immediately
+            if (cachePersistenceService) {
+              cachePersistenceService.saveStopLimitRepositoryEntryImmediately(normalizedSymbol, {
+                orderId: cachedOrderId,
+                order: cachedOrder,
+                openedDateTime: cachedOrder.OpenedDateTime,
+                status: cachedStatus
+              }).catch(err => {
+                console.error(`❌ [AUTO_STOPLIMIT] Error saving ${normalizedSymbol} to database:`, err);
+              });
+            }
+          }
           break;
+        }
+      }
+    }
+    
+    // STEP 3: Check database if cache and repository didn't find anything
+    if (!existingStopLimitOrderId && cachePersistenceService) {
+      const dbCheck = await cachePersistenceService.checkDatabaseForActiveStopLimit(normalizedSymbol);
+      if (dbCheck) {
+        existingStopLimitOrderId = dbCheck.orderId;
+        existingStopLimitOrder = dbCheck.order;
+        existingStopLimitStatus = dbCheck.status;
+        console.log(`✅ [AUTO_STOPLIMIT] Database check found active stop-limit order ${dbCheck.orderId} for ${normalizedSymbol} (status: ${dbCheck.status})`);
+        
+        // Register in repository if not already there
+        if (!stopLimitOrderRepository.has(normalizedSymbol)) {
+          stopLimitOrderRepository.set(normalizedSymbol, {
+            orderId: dbCheck.orderId,
+            order: dbCheck.order,
+            openedDateTime: dbCheck.openedDateTime,
+            status: dbCheck.status
+          });
+          console.log(`✅ [AUTO_STOPLIMIT] Registered stop-limit order ${dbCheck.orderId} from database to repository for ${normalizedSymbol}`);
         }
       }
     }
@@ -5108,6 +5179,19 @@ async function handleAutoStopLimitBuyFilled(orderId, order, buyOrderData) {
     // No existing stop-limit order found - create a new one
     // Use effectivePositionQty (actual position after this fill); we already waited until position >= filledQuantity
     console.log(`🚀 [AUTO_STOPLIMIT] Creating new stop-limit order for fulfilled buy order ${orderId} (${normalizedSymbol}): qty=${effectivePositionQty}, filledQty=${filledQuantity})`);
+    
+    // CRITICAL: Double-check one more time before creating (race condition protection)
+    // Another handler might have created the order while we were waiting
+    const finalCheck = getActiveStopLimitOrder(normalizedSymbol);
+    if (finalCheck) {
+      console.log(`✅ [AUTO_STOPLIMIT] Found existing stop-limit order ${finalCheck.orderId} on final check - updating quantity instead of creating`);
+      const updateResult = await modifyOrderQuantity(finalCheck.orderId, effectivePositionQty);
+      if (updateResult.success) {
+        console.log(`✅ [AUTO_STOPLIMIT] Successfully updated stop-limit order ${finalCheck.orderId} quantity to ${effectivePositionQty}`);
+      }
+      return;
+    }
+    
     const result = await createAutoStopLimitOrder(normalizedSymbol, effectivePositionQty, buyPrice);
     
     if (result.success && result.orderId) {
@@ -5115,6 +5199,16 @@ async function handleAutoStopLimitBuyFilled(orderId, order, buyOrderData) {
       // Even before WebSocket ACK arrives, we know this order was created
       const createdOrderId = String(result.orderId);
       console.log(`📌 [AUTO_STOPLIMIT] Tracking created stop-limit order ${createdOrderId} for ${normalizedSymbol} (waiting for WebSocket ACK)`);
+      
+      // CRITICAL: Add to repository immediately with PENDING status
+      // This prevents duplicate creation attempts while waiting for ACK
+      stopLimitOrderRepository.set(normalizedSymbol, {
+        orderId: createdOrderId,
+        order: null, // Will be updated when ACK arrives
+        openedDateTime: new Date().toISOString(),
+        status: 'PENDING' // Temporary status until ACK
+      });
+      console.log(`📌 [AUTO_STOPLIMIT] Pre-registered stop-limit order ${createdOrderId} in repository (PENDING) for ${normalizedSymbol}`);
       
       // Wait for WebSocket to deliver ACK and register the order
       // Check periodically if order has been ACK'd and registered
@@ -5127,18 +5221,70 @@ async function handleAutoStopLimitBuyFilled(orderId, order, buyOrderData) {
         const cacheCheck = ordersCache.get(createdOrderId);
         const cacheStatus = cacheCheck ? (cacheCheck.Status || '').toUpperCase() : '';
         
-        if (repoCheck || (cacheCheck && (cacheStatus === 'ACK' || cacheStatus === 'DON' || cacheStatus === 'REC'))) {
+        if (repoCheck && repoCheck.status !== 'PENDING') {
+          // Repository has been updated with real status
           ackReceived = true;
-          console.log(`✅ [AUTO_STOPLIMIT] Stop-limit order ${createdOrderId} ACK'd and registered for ${normalizedSymbol}`);
+          console.log(`✅ [AUTO_STOPLIMIT] Stop-limit order ${createdOrderId} ACK'd and registered for ${normalizedSymbol} (status: ${repoCheck.status})`);
           break;
+        } else if (cacheCheck && (cacheStatus === 'ACK' || cacheStatus === 'DON' || cacheStatus === 'REC')) {
+          // Order is ACK'd in cache but repository might not be updated yet
+          // Update repository now
+          stopLimitOrderRepository.set(normalizedSymbol, {
+            orderId: createdOrderId,
+            order: cacheCheck,
+            openedDateTime: cacheCheck.OpenedDateTime || new Date().toISOString(),
+            status: cacheStatus
+          });
+          ackReceived = true;
+          console.log(`✅ [AUTO_STOPLIMIT] Stop-limit order ${createdOrderId} ACK'd in cache and registered in repository for ${normalizedSymbol}`);
+          break;
+        } else if (cacheCheck && (cacheStatus === 'REJ' || cacheStatus === 'REJECTED')) {
+          // Order was rejected - check if there's an existing order
+          const rejectReason = (cacheCheck.RejectReason || '').toLowerCase();
+          if (rejectReason.includes('remaining on sell orders') || rejectReason.includes('remaining on sell')) {
+            console.log(`⚠️ [AUTO_STOPLIMIT] Stop-limit order ${createdOrderId} rejected - searching for existing order...`);
+            // Search cache for existing ACK'd order
+            for (const [otherOrderId, otherOrder] of ordersCache.entries()) {
+              const otherLeg = otherOrder.Legs?.[0];
+              const otherSymbol = (otherLeg?.Symbol || '').toUpperCase();
+              const otherSide = (otherLeg?.BuyOrSell || '').toUpperCase();
+              const otherType = (otherOrder.OrderType || '').toUpperCase();
+              const otherStatus = (otherOrder.Status || '').toUpperCase();
+              
+              if (otherSymbol === normalizedSymbol && 
+                  otherSide === 'SELL' && 
+                  (otherType === 'STOPLIMIT' || otherType === 'STOP_LIMIT') &&
+                  (otherStatus === 'ACK' || otherStatus === 'DON' || otherStatus === 'REC') &&
+                  otherOrderId !== createdOrderId) {
+                // Found existing order - register it
+                stopLimitOrderRepository.set(normalizedSymbol, {
+                  orderId: otherOrderId,
+                  order: otherOrder,
+                  openedDateTime: otherOrder.OpenedDateTime || new Date().toISOString(),
+                  status: otherStatus
+                });
+                console.log(`✅ [AUTO_STOPLIMIT] Found and registered existing stop-limit order ${otherOrderId} for ${normalizedSymbol}`);
+                ackReceived = true;
+                break;
+              }
+            }
+            if (ackReceived) break;
+          }
         }
       }
       
       if (!ackReceived) {
         console.warn(`⚠️ [AUTO_STOPLIMIT] Stop-limit order ${createdOrderId} created but ACK not received within 5 seconds for ${normalizedSymbol}`);
+        // Keep PENDING status in repository - it will be updated when ACK arrives
       }
     } else {
       console.error(`❌ [AUTO_STOPLIMIT] Failed to create stop-limit order for ${normalizedSymbol}:`, result.error);
+      // Remove PENDING entry if creation failed
+      const pendingEntry = stopLimitOrderRepository.get(normalizedSymbol);
+      if (pendingEntry && pendingEntry.status === 'PENDING' && pendingEntry.orderId === String(result.orderId || '')) {
+        stopLimitOrderRepository.delete(normalizedSymbol);
+        console.log(`🧹 [AUTO_STOPLIMIT] Removed PENDING entry for ${normalizedSymbol} (creation failed)`);
+      }
     }
   } catch (err) {
     console.error(`❌ [AUTO_STOPLIMIT] Error handling fulfilled buy order ${orderId}:`, err);
