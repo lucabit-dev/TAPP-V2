@@ -4983,34 +4983,59 @@ async function handleAutoStopLimitBuyFilled(orderId, order, buyOrderData) {
       return;
     }
     
-    // Check if stop-limit order already exists for this symbol
-    // Check both repository and cache
-    const existingStopLimit = getActiveStopLimitOrder(normalizedSymbol);
-    if (existingStopLimit) {
-      console.log(`✅ [AUTO_STOPLIMIT] Stop-limit order already exists for ${normalizedSymbol} (${existingStopLimit.orderId}), skipping creation`);
+    // Get current position quantity (includes the new buy)
+    const positionQty = parseFloat(existingPosition.Quantity || '0') || 0;
+    
+    if (positionQty <= 0) {
+      console.warn(`⚠️ [AUTO_STOPLIMIT] Position quantity is 0 or invalid for ${normalizedSymbol}, cannot create/update stop-limit`);
       return;
     }
     
-    // Check cache for existing stop-limit orders
-    for (const [cachedOrderId, cachedOrder] of ordersCache.entries()) {
-      const cachedLeg = cachedOrder.Legs?.[0];
-      const cachedSymbol = (cachedLeg?.Symbol || '').toUpperCase();
-      const cachedSide = (cachedLeg?.BuyOrSell || '').toUpperCase();
-      const cachedType = (cachedOrder.OrderType || '').toUpperCase();
-      const cachedStatus = (cachedOrder.Status || '').toUpperCase();
-      
-      if (cachedSymbol === normalizedSymbol && 
-          cachedSide === 'SELL' && 
-          (cachedType === 'STOPLIMIT' || cachedType === 'STOP_LIMIT') &&
-          (cachedStatus === 'ACK' || cachedStatus === 'DON' || cachedStatus === 'REC')) {
-        console.log(`✅ [AUTO_STOPLIMIT] Found existing stop-limit order ${cachedOrderId} in cache for ${normalizedSymbol}, skipping creation`);
-        return;
+    // Check if stop-limit order already exists for this symbol
+    // Check repository first
+    const existingStopLimit = getActiveStopLimitOrder(normalizedSymbol);
+    let existingStopLimitOrderId = null;
+    
+    // Also check cache for existing stop-limit orders
+    if (!existingStopLimit) {
+      for (const [cachedOrderId, cachedOrder] of ordersCache.entries()) {
+        const cachedLeg = cachedOrder.Legs?.[0];
+        const cachedSymbol = (cachedLeg?.Symbol || '').toUpperCase();
+        const cachedSide = (cachedLeg?.BuyOrSell || '').toUpperCase();
+        const cachedType = (cachedOrder.OrderType || '').toUpperCase();
+        const cachedStatus = (cachedOrder.Status || '').toUpperCase();
+        
+        if (cachedSymbol === normalizedSymbol && 
+            cachedSide === 'SELL' && 
+            (cachedType === 'STOPLIMIT' || cachedType === 'STOP_LIMIT') &&
+            (cachedStatus === 'ACK' || cachedStatus === 'DON' || cachedStatus === 'REC')) {
+          existingStopLimitOrderId = cachedOrderId;
+          console.log(`✅ [AUTO_STOPLIMIT] Found existing stop-limit order ${cachedOrderId} in cache for ${normalizedSymbol}`);
+          break;
+        }
       }
+    } else {
+      existingStopLimitOrderId = existingStopLimit.orderId;
+      console.log(`✅ [AUTO_STOPLIMIT] Found existing stop-limit order ${existingStopLimitOrderId} in repository for ${normalizedSymbol}`);
     }
     
-    // Create the stop-limit order
-    console.log(`🚀 [AUTO_STOPLIMIT] Creating stop-limit order for fulfilled buy order ${orderId} (${normalizedSymbol})`);
-    const result = await createAutoStopLimitOrder(normalizedSymbol, quantity, buyPrice);
+    // If stop-limit order exists, update its quantity to match current position
+    if (existingStopLimitOrderId) {
+      console.log(`🔄 [AUTO_STOPLIMIT] Updating existing stop-limit order ${existingStopLimitOrderId} quantity to ${positionQty} for ${normalizedSymbol} (re-buy detected)`);
+      const updateResult = await modifyOrderQuantity(existingStopLimitOrderId, positionQty);
+      
+      if (updateResult.success) {
+        console.log(`✅ [AUTO_STOPLIMIT] Successfully updated stop-limit order ${existingStopLimitOrderId} quantity to ${positionQty} for ${normalizedSymbol}`);
+      } else {
+        console.error(`❌ [AUTO_STOPLIMIT] Failed to update stop-limit order ${existingStopLimitOrderId} quantity:`, updateResult.error);
+      }
+      return;
+    }
+    
+    // No existing stop-limit order found - create a new one
+    // Use position quantity (which includes the new buy) instead of just the buy order quantity
+    console.log(`🚀 [AUTO_STOPLIMIT] Creating new stop-limit order for fulfilled buy order ${orderId} (${normalizedSymbol})`);
+    const result = await createAutoStopLimitOrder(normalizedSymbol, positionQty, buyPrice);
     
     if (!result.success) {
       console.error(`❌ [AUTO_STOPLIMIT] Failed to create stop-limit order for ${normalizedSymbol}:`, result.error);
