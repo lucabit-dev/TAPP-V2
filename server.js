@@ -4864,7 +4864,7 @@ async function modifyStopLimitPrice(orderId, stopPrice, limitPrice) {
 // This is separate from createStopLimitSellOrder and always uses tracker config
 async function createAutoStopLimitOrder(symbol, quantity, buyPrice) {
   const normalizedSymbol = (symbol || '').toUpperCase();
-  const qty = Math.floor(Number(quantity)) || 0;
+  let qty = Math.floor(Number(quantity)) || 0;
   const buy = Number(buyPrice) || 0;
   
   if (!normalizedSymbol || qty <= 0 || buy <= 0) {
@@ -4872,8 +4872,15 @@ async function createAutoStopLimitOrder(symbol, quantity, buyPrice) {
     return { success: false, error: 'Invalid parameters' };
   }
   
-  // Get current bid price from position (like sections-buy-bot-main)
+  // Get current bid price and position quantity (like sections-buy-bot-main)
   const position = positionsCache.get(normalizedSymbol);
+  const positionQuantity = position ? Math.floor(parseFloat(position.Quantity || '0') || 0) : 0;
+  
+  // CRITICAL: Never send more than we hold - cap at actual position to avoid rejections
+  if (positionQuantity > 0 && qty > positionQuantity) {
+    console.warn(`⚠️ [AUTO_STOPLIMIT] Capping quantity at position: requested ${qty}, position ${positionQuantity} for ${normalizedSymbol}`);
+    qty = positionQuantity;
+  }
   const currentPrice = position ? parseFloat(position.Bid || position.Last || position.AveragePrice || '0') : buy;
   const price = currentPrice > 0 ? currentPrice : buy;
   
@@ -4992,41 +4999,45 @@ async function handleAutoStopLimitBuyFilled(orderId, order, buyOrderData) {
   autoStopLimitCreationInProgress.add(normalizedSymbol);
   
   try {
-    const quantity = Math.floor(Number(buyOrderData.quantity || order.Legs?.[0]?.ExecQuantity || order.Legs?.[0]?.QuantityOrdered || 0)) || 0;
+    // CRITICAL: Use actual FILLED quantity from the order (ExecQuantity), not order request quantity
+    // This avoids mismatches on partial fills (e.g. ordered 1005, filled 1003 → use 1003)
+    const leg = order.Legs?.[0];
+    const filledQuantity = Math.floor(Number(leg?.ExecQuantity ?? leg?.QuantityOrdered ?? buyOrderData.quantity ?? 0)) || 0;
     const buyPrice = parseFloat(buyOrderData.buyPrice || buyOrderData.limitPrice || order.FilledPrice || order.LimitPrice || 0) || 0;
     
-    if (quantity <= 0 || buyPrice <= 0) {
-      console.error(`❌ [AUTO_STOPLIMIT] Invalid order data for ${normalizedSymbol}: quantity=${quantity}, buyPrice=${buyPrice}`);
+    if (filledQuantity <= 0 || buyPrice <= 0) {
+      console.error(`❌ [AUTO_STOPLIMIT] Invalid order data for ${normalizedSymbol}: filledQuantity=${filledQuantity}, buyPrice=${buyPrice}`);
       return;
     }
     
-    // Wait a bit for position to appear in cache (race condition handling)
+    // Wait for position to appear and to reflect this fill (position >= filled quantity)
     let existingPosition = positionsCache.get(normalizedSymbol);
-    let hasPosition = existingPosition && parseFloat(existingPosition.Quantity || '0') > 0;
+    let positionQty = existingPosition ? parseFloat(existingPosition.Quantity || '0') || 0 : 0;
+    let hasPosition = positionQty > 0;
     
-    if (!hasPosition) {
-      console.log(`⏳ [AUTO_STOPLIMIT] Position not found immediately for ${normalizedSymbol}, waiting...`);
-      for (let i = 0; i < 3; i++) {
+    if (!hasPosition || positionQty < filledQuantity) {
+      console.log(`⏳ [AUTO_STOPLIMIT] Waiting for position to reflect fill: need >= ${filledQuantity}, have ${positionQty} for ${normalizedSymbol}`);
+      for (let i = 0; i < 6; i++) {
         await new Promise(resolve => setTimeout(resolve, 500));
         existingPosition = positionsCache.get(normalizedSymbol);
-        hasPosition = existingPosition && parseFloat(existingPosition.Quantity || '0') > 0;
-        if (hasPosition) {
-          console.log(`✅ [AUTO_STOPLIMIT] Position found after ${(i + 1) * 500}ms`);
+        positionQty = existingPosition ? parseFloat(existingPosition.Quantity || '0') || 0 : 0;
+        hasPosition = positionQty > 0;
+        if (hasPosition && positionQty >= filledQuantity) {
+          console.log(`✅ [AUTO_STOPLIMIT] Position updated after ${(i + 1) * 500}ms: ${positionQty} >= ${filledQuantity}`);
           break;
         }
       }
     }
     
-    if (!hasPosition) {
-      console.warn(`⚠️ [AUTO_STOPLIMIT] No position found for ${normalizedSymbol} after waiting - may have been sold immediately`);
+    if (!hasPosition || positionQty <= 0) {
+      console.warn(`⚠️ [AUTO_STOPLIMIT] No position or invalid quantity for ${normalizedSymbol} (positionQty=${positionQty}, filledQuantity=${filledQuantity})`);
       return;
     }
     
-    // Get current position quantity (includes the new buy)
-    const positionQty = parseFloat(existingPosition.Quantity || '0') || 0;
-    
-    if (positionQty <= 0) {
-      console.warn(`⚠️ [AUTO_STOPLIMIT] Position quantity is 0 or invalid for ${normalizedSymbol}, cannot create/update stop-limit`);
+    // Ensure we never exceed actual position
+    const effectivePositionQty = Math.floor(positionQty);
+    if (effectivePositionQty <= 0) {
+      console.warn(`⚠️ [AUTO_STOPLIMIT] Position quantity is 0 or invalid for ${normalizedSymbol}`);
       return;
     }
     
@@ -5083,11 +5094,11 @@ async function handleAutoStopLimitBuyFilled(orderId, order, buyOrderData) {
     
     // If stop-limit order exists, update its quantity to match current position
     if (existingStopLimitOrderId) {
-      console.log(`🔄 [AUTO_STOPLIMIT] Updating existing stop-limit order ${existingStopLimitOrderId} quantity to ${positionQty} for ${normalizedSymbol} (re-buy detected)`);
-      const updateResult = await modifyOrderQuantity(existingStopLimitOrderId, positionQty);
+      console.log(`🔄 [AUTO_STOPLIMIT] Updating existing stop-limit order ${existingStopLimitOrderId} quantity to ${effectivePositionQty} for ${normalizedSymbol} (re-buy detected)`);
+      const updateResult = await modifyOrderQuantity(existingStopLimitOrderId, effectivePositionQty);
       
       if (updateResult.success) {
-        console.log(`✅ [AUTO_STOPLIMIT] Successfully updated stop-limit order ${existingStopLimitOrderId} quantity to ${positionQty} for ${normalizedSymbol}`);
+        console.log(`✅ [AUTO_STOPLIMIT] Successfully updated stop-limit order ${existingStopLimitOrderId} quantity to ${effectivePositionQty} for ${normalizedSymbol}`);
       } else {
         console.error(`❌ [AUTO_STOPLIMIT] Failed to update stop-limit order ${existingStopLimitOrderId} quantity:`, updateResult.error);
       }
@@ -5095,9 +5106,9 @@ async function handleAutoStopLimitBuyFilled(orderId, order, buyOrderData) {
     }
     
     // No existing stop-limit order found - create a new one
-    // Use position quantity (which includes the new buy) instead of just the buy order quantity
-    console.log(`🚀 [AUTO_STOPLIMIT] Creating new stop-limit order for fulfilled buy order ${orderId} (${normalizedSymbol})`);
-    const result = await createAutoStopLimitOrder(normalizedSymbol, positionQty, buyPrice);
+    // Use effectivePositionQty (actual position after this fill); we already waited until position >= filledQuantity
+    console.log(`🚀 [AUTO_STOPLIMIT] Creating new stop-limit order for fulfilled buy order ${orderId} (${normalizedSymbol}): qty=${effectivePositionQty}, filledQty=${filledQuantity})`);
+    const result = await createAutoStopLimitOrder(normalizedSymbol, effectivePositionQty, buyPrice);
     
     if (result.success && result.orderId) {
       // CRITICAL: Track the created order ID immediately to prevent duplicates
