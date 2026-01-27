@@ -7338,13 +7338,76 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
     
     // Build request body according to Sections Bot API documentation
     // https://inbitme.gitbook.io/sections-bot/xKy06Pb8j01LsqEnmSik/rest-api/ordenes
-    // Only send symbol, side, order_type, and quantity - NO price parameter
     const orderBody = {
       symbol: symbol,
       side: side,
       order_type: orderType,
       quantity: quantity
     };
+    
+    // CRITICAL: For StopLimit orders, calculate stop_price and limit_price from database config
+    // Use the same logic as createStopLimitSellOrder() to ensure consistency
+    if (orderType === 'StopLimit' && side === 'SELL') {
+      // Get buy price from position (AveragePrice) or current price
+      const position = positionsCache.get(symbol.toUpperCase());
+      const buyPrice = position ? parseFloat(position.AveragePrice || position.Bid || position.Last || '0') : 0;
+      const currentPrice = position ? parseFloat(position.Bid || position.Last || position.AveragePrice || '0') : buyPrice;
+      const price = currentPrice > 0 ? currentPrice : buyPrice;
+      
+      if (buyPrice <= 0) {
+        console.error(`❌ [STOPLIMIT] Cannot create StopLimit order for ${symbol}: No buy price found in position`);
+        return res.status(400).json({ 
+          success: false, 
+          error: `Cannot create StopLimit order: No position found for ${symbol} or missing buy price` 
+        });
+      }
+      
+      // Check StopLimit tracker config from database FIRST (same logic as createStopLimitSellOrder)
+      let useTrackerInitialStop = false;
+      let trackerInitialStopPrice = 0;
+      let matchedGroupId = null;
+      
+      for (const [groupId, group] of stopLimitTrackerConfig.entries()) {
+        if (!group.enabled) continue;
+        
+        const buyPriceInRange = buyPrice >= group.minPrice && buyPrice <= group.maxPrice;
+        const hasInitialStopPrice = group.initialStopPrice != null && group.initialStopPrice !== 0;
+        
+        if (buyPriceInRange && hasInitialStopPrice) {
+          // initialStopPrice is an OFFSET from buy price
+          trackerInitialStopPrice = buyPrice + group.initialStopPrice;
+          useTrackerInitialStop = true;
+          matchedGroupId = groupId;
+          console.log(`✅ [STOPLIMIT] Using tracker config group ${groupId} for ${symbol}: stop_price offset ${group.initialStopPrice} (buy: $${buyPrice.toFixed(2)})`);
+          break;
+        }
+      }
+      
+      // Calculate stop_price and limit_price
+      let stopPrice, limitPrice;
+      
+      if (useTrackerInitialStop) {
+        // Use tracker config values
+        stopPrice = Math.max(0, trackerInitialStopPrice);
+        limitPrice = Math.max(0, stopPrice / 1.002);
+      } else {
+        // Use default sections-buy-bot-main logic
+        const adjustment = getPriceAdjustment(price);
+        limitPrice = Math.max(0, price - adjustment);
+        stopPrice = Math.max(0, limitPrice * 1.002);
+        console.log(`⚠️ [STOPLIMIT] No matching tracker config for ${symbol} (buy: $${buyPrice.toFixed(2)}). Using default logic.`);
+      }
+      
+      // Round to 2 decimal places
+      stopPrice = Math.round(stopPrice * 100) / 100;
+      limitPrice = Math.round(limitPrice * 100) / 100;
+      
+      // Add stop_price and limit_price to order body
+      orderBody.stop_price = stopPrice;
+      orderBody.limit_price = limitPrice;
+      
+      console.log(`📊 [STOPLIMIT] Calculated prices for ${symbol}: stop_price=$${stopPrice.toFixed(2)}, limit_price=$${limitPrice.toFixed(2)} (buy: $${buyPrice.toFixed(2)}, method: ${useTrackerInitialStop ? 'tracker_config' : 'default'})`);
+    }
     
     // Send sell order to external service using POST /order
     let notifyStatus = '';
