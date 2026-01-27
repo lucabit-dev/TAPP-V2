@@ -3349,6 +3349,14 @@ function connectOrdersWebSocket() {
             cachePersistenceService.scheduleOrderSave(orderId);
           }
 
+          // CRITICAL: Register StopLimit orders in repository when they arrive via WebSocket
+          // This ensures the repository is the single source of truth for active StopLimit orders
+          // This must happen BEFORE handleManualBuyFilled checks, so it can see existing orders
+          const orderType = (order.OrderType || '').toUpperCase();
+          const legSide = (order.Legs?.[0]?.BuyOrSell || '').toUpperCase();
+          if ((orderType === 'STOPLIMIT' || orderType === 'STOP_LIMIT') && legSide === 'SELL') {
+            registerStopLimitOrder(order);
+          }
 
           // When a tracked manual BUY reaches FLL/FIL: create or modify StopLimit SELL
           // CRITICAL: Only process if it's a BUY order AND it's in pendingManualBuyOrders
