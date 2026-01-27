@@ -4283,12 +4283,6 @@ async function handleAutoStopLimitBuyFilled(orderId, order, buyOrderData) {
 async function getActiveSellOrdersFromWebSocket(symbol) {
   const normalizedSymbol = symbol.toUpperCase();
   const activeSellOrders = [];
-
-// Helper function to get active SELL orders for a symbol from orders websocket
-// Analyzes the orders websocket stream to find active sell orders based on active statuses
-async function getActiveSellOrdersFromWebSocket(symbol) {
-  const normalizedSymbol = symbol.toUpperCase();
-  const activeSellOrders = [];
   
   // Check if orders websocket is connected
   const isWebSocketConnected = ordersWs && ordersWs.readyState === WebSocket.OPEN;
