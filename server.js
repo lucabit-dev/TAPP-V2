@@ -211,22 +211,38 @@ function registerStopLimitOrder(msg) {
     if (existing) {
       // Check if this order is newer than existing
       if (isNewerOrder(msg, existing)) {
-        stopLimitOrderRepository.set(symbol, {
-          orderId,
-          order: msg,
-          openedDateTime: msg.OpenedDateTime,
-          status
-        });
-        console.log(`🔄 [STOPLIMIT_REPO] Updated active StopLimit order for ${symbol}: ${orderId} (was: ${existing.orderId})`);
+      stopLimitOrderRepository.set(symbol, {
+        orderId,
+        order: msg,
+        openedDateTime: msg.OpenedDateTime,
+        status
+      });
+      console.log(`🔄 [STOPLIMIT_REPO] Updated active StopLimit order for ${symbol}: ${orderId} (was: ${existing.orderId})`);
+      
+      // Schedule save to database
+      if (cachePersistenceService) {
+        cachePersistenceService.scheduleStopLimitRepositorySave(symbol);
+      }
         
-        // CRITICAL: Remove symbol from creation guard when order is ACK'd (sections-buy-bot-main pattern)
-        // This allows the guard to be released so future updates can proceed
-        if (stopLimitCreationBySymbol.has(symbol)) {
-          stopLimitCreationBySymbol.delete(symbol);
-          console.log(`🔓 [STOPLIMIT_REPO] Removed ${symbol} from stopLimitCreationBySymbol guard (order ACK'd)`);
-        }
+        // CRITICAL: Delay guard removal to prevent race conditions
+        // Wait a bit to ensure handleManualBuyFilled has completed and no duplicate creation is in progress
+        setTimeout(() => {
+          // Double-check repository still has this order before clearing guard
+          const repoCheck = stopLimitOrderRepository.get(symbol);
+          if (repoCheck && repoCheck.orderId === orderId && stopLimitCreationBySymbol.has(symbol)) {
+            stopLimitCreationBySymbol.delete(symbol);
+            console.log(`🔓 [STOPLIMIT_REPO] Removed ${symbol} from stopLimitCreationBySymbol guard (order ACK'd, delayed check)`);
+          }
+        }, 2000); // 2 second delay to allow handleManualBuyFilled to complete
       } else {
         console.log(`⏭️ [STOPLIMIT_REPO] Ignoring older StopLimit order ${orderId} for ${symbol} (existing: ${existing.orderId})`);
+        // Still clear guard if it exists (older order shouldn't block)
+        if (stopLimitCreationBySymbol.has(symbol)) {
+          setTimeout(() => {
+            stopLimitCreationBySymbol.delete(symbol);
+            console.log(`🔓 [STOPLIMIT_REPO] Removed ${symbol} from stopLimitCreationBySymbol guard (older order ACK'd)`);
+          }, 1000);
+        }
       }
     } else {
       // New order - register it (sections-buy-bot-main pattern)
@@ -238,17 +254,32 @@ function registerStopLimitOrder(msg) {
       });
       console.log(`✅ [STOPLIMIT_REPO] Registered new active StopLimit order for ${symbol}: ${orderId}`);
       
-      // CRITICAL: Remove symbol from creation guard when order is ACK'd (sections-buy-bot-main pattern)
-      if (stopLimitCreationBySymbol.has(symbol)) {
-        stopLimitCreationBySymbol.delete(symbol);
-        console.log(`🔓 [STOPLIMIT_REPO] Removed ${symbol} from stopLimitCreationBySymbol guard (order ACK'd)`);
+      // Schedule save to database
+      if (cachePersistenceService) {
+        cachePersistenceService.scheduleStopLimitRepositorySave(symbol);
       }
+      
+      // CRITICAL: Delay guard removal to prevent race conditions
+      // Wait to ensure handleManualBuyFilled has completed and no duplicate creation is in progress
+      setTimeout(() => {
+        // Double-check repository still has this order before clearing guard
+        const repoCheck = stopLimitOrderRepository.get(symbol);
+        if (repoCheck && repoCheck.orderId === orderId && stopLimitCreationBySymbol.has(symbol)) {
+          stopLimitCreationBySymbol.delete(symbol);
+          console.log(`🔓 [STOPLIMIT_REPO] Removed ${symbol} from stopLimitCreationBySymbol guard (order ACK'd, delayed check)`);
+        }
+      }, 2000); // 2 second delay to allow handleManualBuyFilled to complete
     }
   } else if (isStopLimitFilled(msg) || isOrderDeleted(msg)) {
     // Order is filled or deleted - remove from repository (sections-buy-bot-main pattern)
     const existing = stopLimitOrderRepository.get(symbol);
     if (existing && existing.orderId === orderId) {
       stopLimitOrderRepository.delete(symbol);
+      
+      // Schedule save to database (delete)
+      if (cachePersistenceService) {
+        cachePersistenceService.scheduleStopLimitRepositorySave(symbol);
+      }
       
       // CRITICAL: Remove symbol from creation guard when order is filled/deleted
       if (stopLimitCreationBySymbol.has(symbol)) {
@@ -343,11 +374,11 @@ let cachePersistenceService = null;
 async function initializeCachePersistence() {
   try {
     const CachePersistenceService = require('./services/cachePersistenceService');
-    cachePersistenceService = new CachePersistenceService(ordersCache, positionsCache);
+    cachePersistenceService = new CachePersistenceService(ordersCache, positionsCache, stopLimitOrderRepository);
     
     // Load cache from database on startup
     const loaded = await cachePersistenceService.loadFromDatabase();
-    console.log(`✅ Cache persistence initialized: Loaded ${loaded.orders} orders and ${loaded.positions} positions from database`);
+    console.log(`✅ Cache persistence initialized: Loaded ${loaded.orders} orders, ${loaded.positions} positions, and ${loaded.stopLimitRepository || 0} StopLimit repository entries from database`);
     
     // Start periodic saves
     cachePersistenceService.startPeriodicSave();
@@ -3378,14 +3409,9 @@ function connectOrdersWebSocket() {
           if ((orderType === 'STOPLIMIT' || orderType === 'STOP_LIMIT') && legSide === 'SELL') {
             registerStopLimitOrder(order);
             
-            // CRITICAL: If StopLimit was just ACK'd and handleManualBuyFilled is in progress for this symbol,
-            // remove it from the guard to prevent duplicate creation
-            const stopLimitSymbol = (symbol || '').toUpperCase();
-            if (status === 'ACK' && stopLimitCreationBySymbol.has(stopLimitSymbol)) {
-              console.log(`🛑 [DEBUG] StopLimit ${orderId} ACK'd for ${stopLimitSymbol} - removing from creation guard to prevent duplicate!`);
-              stopLimitCreationBySymbol.delete(stopLimitSymbol);
-              console.log(`🔓 [DEBUG] Removed ${stopLimitSymbol} from stopLimitCreationBySymbol guard (StopLimit ACK'd)`);
-            }
+            // CRITICAL: Guard removal is now handled in registerStopLimitOrder with delay
+            // This prevents race conditions where handleManualBuyFilled is still running
+            // when the guard is cleared
             
             // CRITICAL: If StopLimit was REJECTED with "remaining on sell orders" message,
             // it means there's already an active stop-loss order. Find and register it.
@@ -3462,6 +3488,25 @@ function connectOrdersWebSocket() {
             }
             
             const normalizedSymbol = (symbol || '').toUpperCase();
+            
+            // CRITICAL: Check if StopLimit already exists BEFORE marking as processed
+            // This prevents creating duplicate StopLimit orders if multiple FLL messages arrive
+            const existingStopLimit = getActiveStopLimitOrder(normalizedSymbol);
+            if (existingStopLimit) {
+              console.log(`✅ [DEBUG] StopLimit already exists for ${normalizedSymbol} (${existingStopLimit.orderId}). Skipping creation.`);
+              // Mark as processed to prevent retry
+              processedFllOrders.add(orderId);
+              pendingManualBuyOrders.delete(orderId);
+              // Update quantity if needed
+              const position = positionsCache.get(normalizedSymbol);
+              const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+              if (positionQty > 0) {
+                modifyOrderQuantity(existingStopLimit.orderId, positionQty).catch(err => {
+                  console.error(`❌ [DEBUG] Error updating StopLimit quantity:`, err);
+                });
+              }
+              return; // Don't process - StopLimit already exists
+            }
             
             // CRITICAL: Mark as processed IMMEDIATELY to prevent duplicate processing
             // Do this BEFORE any async operations
@@ -5746,13 +5791,22 @@ async function handleManualBuyFilled(orderId, order, pending) {
       // NOTE: Order ID will be saved to tracking map when WebSocket confirms ACK status
       // Don't save it here to prevent loops if order gets rejected
     } finally {
-      // Remove from in-progress set after a longer delay to allow ACK to come through
-      // Increased to 5 seconds to prevent race conditions when multiple buys happen quickly
+      // CRITICAL: Don't remove guard here - let registerStopLimitOrder handle it when order is ACK'd
+      // This ensures the guard stays active until the order is actually registered in repository
+      // The guard will be removed by registerStopLimitOrder after a delay (2 seconds)
+      // Only remove if creation failed and no order was created
       setTimeout(() => {
-        stopLimitCreationBySymbol.delete(normalizedSymbol);
-        console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (after creation)`);
-        console.log(`🧹 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol (guard released)`);
-      }, 5000);
+        // Check if order was actually created and registered
+        const repoCheck = getActiveStopLimitOrder(normalizedSymbol);
+        if (!repoCheck && stopLimitCreationBySymbol.has(normalizedSymbol)) {
+          // Order was not registered - creation likely failed, safe to remove guard
+          stopLimitCreationBySymbol.delete(normalizedSymbol);
+          console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (creation failed, no order registered)`);
+        } else if (repoCheck) {
+          // Order exists - guard will be removed by registerStopLimitOrder when ACK'd
+          console.log(`⏳ [DEBUG] Guard for ${normalizedSymbol} will be removed when order ${repoCheck.orderId} is ACK'd`);
+        }
+      }, 3000); // Check after 3 seconds
     }
   } finally {
     // Remove from in-progress set

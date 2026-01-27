@@ -47,6 +47,43 @@ const PositionCacheSchema = new mongoose.Schema(
   }
 );
 
+// Schema for storing StopLimit order repository (single source of truth)
+const StopLimitRepositorySchema = new mongoose.Schema(
+  {
+    symbol: {
+      type: String,
+      required: true,
+      unique: true,
+      index: true,
+      uppercase: true
+    },
+    orderId: {
+      type: String,
+      required: true
+    },
+    order: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null
+    },
+    openedDateTime: {
+      type: String,
+      required: true
+    },
+    status: {
+      type: String,
+      required: true,
+      uppercase: true
+    },
+    lastUpdated: {
+      type: Number,
+      default: () => Date.now()
+    }
+  },
+  {
+    timestamps: true
+  }
+);
+
 // Schema for cache metadata (to track last sync, etc.)
 const CacheMetadataSchema = new mongoose.Schema(
   {
@@ -64,11 +101,19 @@ const CacheMetadataSchema = new mongoose.Schema(
       type: Number,
       default: 0
     },
+    lastStopLimitRepositorySync: {
+      type: Number,
+      default: 0
+    },
     ordersCount: {
       type: Number,
       default: 0
     },
     positionsCount: {
+      type: Number,
+      default: 0
+    },
+    stopLimitRepositoryCount: {
       type: Number,
       default: 0
     }
@@ -80,10 +125,12 @@ const CacheMetadataSchema = new mongoose.Schema(
 
 const OrderCache = mongoose.models.OrderCache || mongoose.model('OrderCache', OrderCacheSchema);
 const PositionCache = mongoose.models.PositionCache || mongoose.model('PositionCache', PositionCacheSchema);
+const StopLimitRepository = mongoose.models.StopLimitRepository || mongoose.model('StopLimitRepository', StopLimitRepositorySchema);
 const CacheMetadata = mongoose.models.CacheMetadata || mongoose.model('CacheMetadata', CacheMetadataSchema);
 
 module.exports = {
   OrderCache,
   PositionCache,
+  StopLimitRepository,
   CacheMetadata
 };

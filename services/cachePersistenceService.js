@@ -1,25 +1,29 @@
-const { OrderCache, PositionCache, CacheMetadata } = require('../models/cache.model');
+const { OrderCache, PositionCache, StopLimitRepository, CacheMetadata } = require('../models/cache.model');
 const mongoose = require('mongoose');
 
 class CachePersistenceService {
-  constructor(ordersCache, positionsCache) {
+  constructor(ordersCache, positionsCache, stopLimitOrderRepository = null) {
     this.ordersCache = ordersCache;
     this.positionsCache = positionsCache;
+    this.stopLimitOrderRepository = stopLimitOrderRepository;
     this.saveInterval = null;
     this.isSaving = false;
     this.pendingSaves = {
       orders: new Set(),
-      positions: new Set()
+      positions: new Set(),
+      stopLimitRepository: new Set()
     };
     this.saveDebounceMs = 2000; // Save to DB 2 seconds after last change
     this.saveIntervalMs = 30000; // Also save every 30 seconds as backup
     this.lastSaveTime = {
       orders: 0,
-      positions: 0
+      positions: 0,
+      stopLimitRepository: 0
     };
     this.saveTimeouts = {
       orders: null,
-      positions: null
+      positions: null,
+      stopLimitRepository: null
     };
   }
 
@@ -76,15 +80,34 @@ class CachePersistenceService {
         }
       }
 
-      console.log(`✅ CachePersistenceService: Loaded ${loadedOrders} orders and ${loadedPositions} positions from database`);
+      // Load StopLimit repository if available
+      let loadedStopLimitRepo = 0;
+      if (this.stopLimitOrderRepository) {
+        const stopLimitRepoFromDb = await StopLimitRepository.find({}).lean();
+        for (const doc of stopLimitRepoFromDb) {
+          try {
+            this.stopLimitOrderRepository.set(doc.symbol, {
+              orderId: doc.orderId,
+              order: doc.order || null,
+              openedDateTime: doc.openedDateTime,
+              status: doc.status
+            });
+            loadedStopLimitRepo++;
+          } catch (err) {
+            console.error(`⚠️ CachePersistenceService: Error loading StopLimit repository entry for ${doc.symbol}:`, err.message);
+          }
+        }
+      }
+
+      console.log(`✅ CachePersistenceService: Loaded ${loadedOrders} orders, ${loadedPositions} positions, and ${loadedStopLimitRepo} StopLimit repository entries from database`);
       
       // Update metadata
-      await this.updateMetadata(loadedOrders, loadedPositions);
+      await this.updateMetadata(loadedOrders, loadedPositions, loadedStopLimitRepo);
       
-      return { orders: loadedOrders, positions: loadedPositions };
+      return { orders: loadedOrders, positions: loadedPositions, stopLimitRepository: loadedStopLimitRepo };
     } catch (err) {
       console.error('❌ CachePersistenceService: Error loading from database:', err);
-      return { orders: 0, positions: 0 };
+      return { orders: 0, positions: 0, stopLimitRepository: 0 };
     }
   }
 
@@ -310,21 +333,97 @@ class CachePersistenceService {
         await PositionCache.bulkWrite(positionOperations, { ordered: false });
       }
 
-      // Update metadata
-      await this.updateMetadata(this.ordersCache.size, this.positionsCache.size);
+      // Save StopLimit repository
+      if (this.stopLimitOrderRepository) {
+        await this.saveStopLimitRepositoryToDatabase();
+      }
 
-      console.log(`✅ CachePersistenceService: Saved ${this.ordersCache.size} orders and ${this.positionsCache.size} positions to database`);
-      return { orders: this.ordersCache.size, positions: this.positionsCache.size };
+      // Update metadata
+      const stopLimitRepoCount = this.stopLimitOrderRepository ? this.stopLimitOrderRepository.size : 0;
+      await this.updateMetadata(this.ordersCache.size, this.positionsCache.size, stopLimitRepoCount);
+
+      console.log(`✅ CachePersistenceService: Saved ${this.ordersCache.size} orders, ${this.positionsCache.size} positions, and ${stopLimitRepoCount} StopLimit repository entries to database`);
+      return { orders: this.ordersCache.size, positions: this.positionsCache.size, stopLimitRepository: stopLimitRepoCount };
     } catch (err) {
       console.error('❌ CachePersistenceService: Error saving to database:', err);
-      return { orders: 0, positions: 0 };
+      return { orders: 0, positions: 0, stopLimitRepository: 0 };
     }
   }
 
   /**
-   * Update cache metadata
+   * Schedule StopLimit repository entry save (debounced)
    */
-  async updateMetadata(ordersCount, positionsCount) {
+  async scheduleStopLimitRepositorySave(symbol) {
+    if (!this.isDbAvailable() || !this.stopLimitOrderRepository) {
+      return;
+    }
+
+    this.pendingSaves.stopLimitRepository.add(symbol);
+
+    // Clear existing timeout
+    if (this.saveTimeouts.stopLimitRepository) {
+      clearTimeout(this.saveTimeouts.stopLimitRepository);
+    }
+
+    // Set new timeout
+    this.saveTimeouts.stopLimitRepository = setTimeout(async () => {
+      await this.saveStopLimitRepositoryToDatabase();
+    }, this.saveDebounceMs);
+  }
+
+  /**
+   * Save StopLimit repository entries to database
+   */
+  async saveStopLimitRepositoryToDatabase() {
+    if (!this.isDbAvailable() || !this.stopLimitOrderRepository) {
+      return;
+    }
+
+    const symbolsToSave = Array.from(this.pendingSaves.stopLimitRepository);
+    if (symbolsToSave.length === 0) {
+      return;
+    }
+
+    try {
+      const operations = [];
+      for (const symbol of symbolsToSave) {
+        const repoEntry = this.stopLimitOrderRepository.get(symbol);
+        if (repoEntry) {
+          operations.push({
+            updateOne: {
+              filter: { symbol },
+              update: {
+                $set: {
+                  orderId: repoEntry.orderId,
+                  order: repoEntry.order,
+                  openedDateTime: repoEntry.openedDateTime,
+                  status: repoEntry.status,
+                  lastUpdated: Date.now()
+                }
+              },
+              upsert: true
+            }
+          });
+        } else {
+          // Entry was deleted - remove from DB
+          operations.push({
+            deleteOne: { filter: { symbol } }
+          });
+        }
+      }
+
+      if (operations.length > 0) {
+        await StopLimitRepository.bulkWrite(operations, { ordered: false });
+      }
+
+      this.pendingSaves.stopLimitRepository.clear();
+      this.lastSaveTime.stopLimitRepository = Date.now();
+    } catch (err) {
+      console.error('❌ CachePersistenceService: Error saving StopLimit repository to database:', err);
+    }
+  }
+
+  async updateMetadata(ordersCount, positionsCount, stopLimitRepositoryCount = 0) {
     if (!this.isDbAvailable()) {
       return;
     }
@@ -336,8 +435,10 @@ class CachePersistenceService {
           $set: {
             lastOrdersSync: Date.now(),
             lastPositionsSync: Date.now(),
+            lastStopLimitRepositorySync: Date.now(),
             ordersCount,
-            positionsCount
+            positionsCount,
+            stopLimitRepositoryCount
           }
         },
         { upsert: true }
