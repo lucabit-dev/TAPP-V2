@@ -372,6 +372,80 @@ class CachePersistenceService {
   }
 
   /**
+   * Save StopLimit repository entry IMMEDIATELY to database (no debounce)
+   * Used when order is ACK'd to ensure database is source of truth
+   */
+  async saveStopLimitRepositoryEntryImmediately(symbol, repoEntry) {
+    if (!this.isDbAvailable()) {
+      return;
+    }
+
+    try {
+      await StopLimitRepository.findOneAndUpdate(
+        { symbol: symbol.toUpperCase() },
+        {
+          $set: {
+            orderId: repoEntry.orderId,
+            order: repoEntry.order,
+            openedDateTime: repoEntry.openedDateTime,
+            status: repoEntry.status,
+            lastUpdated: Date.now()
+          }
+        },
+        { upsert: true }
+      );
+      console.log(`💾 [STOPLIMIT_DB] Immediately saved StopLimit repository entry for ${symbol.toUpperCase()}: ${repoEntry.orderId}`);
+    } catch (err) {
+      console.error(`❌ CachePersistenceService: Error immediately saving StopLimit repository entry for ${symbol}:`, err);
+      throw err;
+    }
+  }
+
+  /**
+   * Check database directly for existing active StopLimit order
+   * This is the authoritative check before creating new orders
+   */
+  async checkDatabaseForActiveStopLimit(symbol) {
+    if (!this.isDbAvailable()) {
+      return null;
+    }
+
+    try {
+      const normalizedSymbol = symbol.toUpperCase();
+      const dbEntry = await StopLimitRepository.findOne({ symbol: normalizedSymbol }).lean();
+      
+      if (!dbEntry) {
+        return null;
+      }
+
+      // Check if status is active (ACK, DON, REC, etc.)
+      const status = (dbEntry.status || '').toUpperCase();
+      const activeStatuses = new Set(['ACK', 'DON', 'REC', 'QUE', 'QUEUED', 'OPEN', 'NEW', 'PENDING']);
+      const terminalStatuses = new Set(['FIL', 'FLL', 'CAN', 'EXP', 'REJ', 'OUT', 'CANCELLED', 'FILLED', 'REJECTED', 'EXPIRED']);
+
+      if (terminalStatuses.has(status)) {
+        // Status is terminal - order no longer active
+        return null;
+      }
+
+      if (activeStatuses.has(status) || !status) {
+        // Status is active or unknown - return entry
+        return {
+          orderId: dbEntry.orderId,
+          order: dbEntry.order,
+          openedDateTime: dbEntry.openedDateTime,
+          status: dbEntry.status
+        };
+      }
+
+      return null;
+    } catch (err) {
+      console.error(`❌ CachePersistenceService: Error checking database for StopLimit order ${symbol}:`, err);
+      return null;
+    }
+  }
+
+  /**
    * Save StopLimit repository entries to database
    */
   async saveStopLimitRepositoryToDatabase() {

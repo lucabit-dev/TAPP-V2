@@ -219,9 +219,18 @@ function registerStopLimitOrder(msg) {
       });
       console.log(`🔄 [STOPLIMIT_REPO] Updated active StopLimit order for ${symbol}: ${orderId} (was: ${existing.orderId})`);
       
-      // Schedule save to database
+      // CRITICAL: Save to database IMMEDIATELY when ACK'd (not debounced)
+      // This ensures the database is the source of truth before any new creation attempts
       if (cachePersistenceService) {
-        cachePersistenceService.scheduleStopLimitRepositorySave(symbol);
+        // Save immediately to database (synchronous-like, no debounce)
+        cachePersistenceService.saveStopLimitRepositoryEntryImmediately(symbol, {
+          orderId,
+          order: msg,
+          openedDateTime: msg.OpenedDateTime,
+          status
+        }).catch(err => {
+          console.error(`❌ [STOPLIMIT_REPO] Error saving ${symbol} to database immediately:`, err);
+        });
       }
         
         // CRITICAL: Delay guard removal to prevent race conditions
@@ -254,9 +263,18 @@ function registerStopLimitOrder(msg) {
       });
       console.log(`✅ [STOPLIMIT_REPO] Registered new active StopLimit order for ${symbol}: ${orderId}`);
       
-      // Schedule save to database
+      // CRITICAL: Save to database IMMEDIATELY when ACK'd (not debounced)
+      // This ensures the database is the source of truth before any new creation attempts
       if (cachePersistenceService) {
-        cachePersistenceService.scheduleStopLimitRepositorySave(symbol);
+        // Save immediately to database (synchronous-like, no debounce)
+        cachePersistenceService.saveStopLimitRepositoryEntryImmediately(symbol, {
+          orderId,
+          order: msg,
+          openedDateTime: msg.OpenedDateTime,
+          status
+        }).catch(err => {
+          console.error(`❌ [STOPLIMIT_REPO] Error saving ${symbol} to database immediately:`, err);
+        });
       }
       
       // CRITICAL: Delay guard removal to prevent race conditions
@@ -3490,7 +3508,7 @@ function connectOrdersWebSocket() {
             const normalizedSymbol = (symbol || '').toUpperCase();
             
             // CRITICAL: Check if StopLimit already exists BEFORE marking as processed
-            // This prevents creating duplicate StopLimit orders if multiple FLL messages arrive
+            // Check BOTH repository AND database to prevent creating duplicate StopLimit orders
             const existingStopLimit = getActiveStopLimitOrder(normalizedSymbol);
             if (existingStopLimit) {
               console.log(`✅ [DEBUG] StopLimit already exists for ${normalizedSymbol} (${existingStopLimit.orderId}). Skipping creation.`);
@@ -3506,6 +3524,39 @@ function connectOrdersWebSocket() {
                 });
               }
               return; // Don't process - StopLimit already exists
+            }
+            
+            // CRITICAL: Also check database directly (authoritative source of truth)
+            // This catches cases where repository might be empty but database has the order
+            if (cachePersistenceService) {
+              const dbCheck = await cachePersistenceService.checkDatabaseForActiveStopLimit(normalizedSymbol);
+              if (dbCheck) {
+                console.log(`✅ [DEBUG] Database check found active StopLimit ${dbCheck.orderId} for ${normalizedSymbol} (status: ${dbCheck.status}). Skipping creation.`);
+                
+                // Register in repository if not already there
+                if (!stopLimitOrderRepository.has(normalizedSymbol)) {
+                  stopLimitOrderRepository.set(normalizedSymbol, {
+                    orderId: dbCheck.orderId,
+                    order: dbCheck.order,
+                    openedDateTime: dbCheck.openedDateTime,
+                    status: dbCheck.status
+                  });
+                  console.log(`✅ [STOPLIMIT_REPO] Registered StopLimit ${dbCheck.orderId} from database for ${normalizedSymbol}`);
+                }
+                
+                // Mark as processed to prevent retry
+                processedFllOrders.add(orderId);
+                pendingManualBuyOrders.delete(orderId);
+                // Update quantity if needed
+                const position = positionsCache.get(normalizedSymbol);
+                const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+                if (positionQty > 0) {
+                  modifyOrderQuantity(dbCheck.orderId, positionQty).catch(err => {
+                    console.error(`❌ [DEBUG] Error updating StopLimit quantity:`, err);
+                  });
+                }
+                return; // Don't process - StopLimit already exists in database
+              }
             }
             
             // CRITICAL: Mark as processed IMMEDIATELY to prevent duplicate processing
@@ -4741,6 +4792,36 @@ async function handleManualBuyFilled(orderId, order, pending) {
   const symbol = (pending.symbol || (order.Legs?.[0]?.Symbol || '')).toString().toUpperCase();
   const normalizedSymbol = symbol;
   
+  // CRITICAL: Check database FIRST before any other checks (authoritative source of truth)
+  // This ensures we catch orders that exist in DB even if repository is empty
+  if (cachePersistenceService) {
+    const dbCheck = await cachePersistenceService.checkDatabaseForActiveStopLimit(normalizedSymbol);
+    if (dbCheck) {
+      console.log(`🛑 [DEBUG] Database check found active StopLimit ${dbCheck.orderId} for ${normalizedSymbol} (status: ${dbCheck.status}) - aborting creation!`);
+      
+      // Register in repository if not already there
+      if (!stopLimitOrderRepository.has(normalizedSymbol)) {
+        stopLimitOrderRepository.set(normalizedSymbol, {
+          orderId: dbCheck.orderId,
+          order: dbCheck.order,
+          openedDateTime: dbCheck.openedDateTime,
+          status: dbCheck.status
+        });
+        console.log(`✅ [STOPLIMIT_REPO] Registered StopLimit ${dbCheck.orderId} from database for ${normalizedSymbol}`);
+      }
+      
+      // Update quantity if needed
+      const position = positionsCache.get(normalizedSymbol);
+      const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+      if (positionQty > 0) {
+        modifyOrderQuantity(dbCheck.orderId, positionQty).catch(err => {
+          console.error(`❌ [DEBUG] Error updating StopLimit quantity:`, err);
+        });
+      }
+      return; // CRITICAL: Exit early - order already exists in database
+    }
+  }
+  
   // CRITICAL: Symbol-level guard - prevent multiple StopLimit creations for the same symbol
   // This must be checked BEFORE any async operations
   if (stopLimitCreationBySymbol.has(normalizedSymbol)) {
@@ -5422,6 +5503,37 @@ async function handleManualBuyFilled(orderId, order, pending) {
       return;
     }
     
+    // CRITICAL: Check database DIRECTLY before creating (authoritative source of truth)
+    // This catches cases where repository might be empty but database has the order
+    if (cachePersistenceService) {
+      const dbCheck = await cachePersistenceService.checkDatabaseForActiveStopLimit(normalizedSymbol);
+      if (dbCheck) {
+        console.log(`🛑 [DEBUG] CRITICAL: Database check found active StopLimit ${dbCheck.orderId} for ${normalizedSymbol} (status: ${dbCheck.status}) - aborting creation to prevent duplicate!`);
+        
+        // Register in repository if not already there
+        if (!stopLimitOrderRepository.has(normalizedSymbol)) {
+          stopLimitOrderRepository.set(normalizedSymbol, {
+            orderId: dbCheck.orderId,
+            order: dbCheck.order,
+            openedDateTime: dbCheck.openedDateTime,
+            status: dbCheck.status
+          });
+          console.log(`✅ [STOPLIMIT_REPO] Registered StopLimit ${dbCheck.orderId} from database for ${normalizedSymbol}`);
+        }
+        
+        // Update quantity if needed
+        const position = positionsCache.get(normalizedSymbol);
+        const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+        if (positionQty > 0) {
+          const result = await modifyOrderQuantity(dbCheck.orderId, positionQty);
+          if (result.success) {
+            console.log(`✅ [DEBUG] Updated existing StopLimit quantity to ${positionQty}`);
+          }
+        }
+        return; // CRITICAL: Abort creation - order already exists in database
+      }
+    }
+    
     // Mark symbol as in progress - CRITICAL: Do this AFTER all checks to prevent race conditions
     // CRITICAL: Add symbol to guard BEFORE creating order
     // This prevents other calls from creating duplicate StopLimit orders
@@ -5479,6 +5591,36 @@ async function handleManualBuyFilled(orderId, order, pending) {
         stopLimitCreationBySymbol.delete(normalizedSymbol);
         console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (found in repository)`);
         return;
+      }
+      
+      // CRITICAL: Check database DIRECTLY before creating (authoritative source of truth)
+      // This catches cases where repository might be empty but database has the order
+      if (cachePersistenceService) {
+        const dbFinalCheck = await cachePersistenceService.checkDatabaseForActiveStopLimit(normalizedSymbol);
+        if (dbFinalCheck) {
+          console.log(`🛑 [DEBUG] Database final check found active StopLimit ${dbFinalCheck.orderId} (status: ${dbFinalCheck.status}) - aborting creation!`);
+          
+          // Register in repository if not already there
+          if (!stopLimitOrderRepository.has(normalizedSymbol)) {
+            stopLimitOrderRepository.set(normalizedSymbol, {
+              orderId: dbFinalCheck.orderId,
+              order: dbFinalCheck.order,
+              openedDateTime: dbFinalCheck.openedDateTime,
+              status: dbFinalCheck.status
+            });
+            console.log(`✅ [STOPLIMIT_REPO] Registered StopLimit ${dbFinalCheck.orderId} from database for ${normalizedSymbol}`);
+          }
+          
+          const position = positionsCache.get(normalizedSymbol);
+          const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+          if (positionQty > 0) {
+            await modifyOrderQuantity(dbFinalCheck.orderId, positionQty);
+          }
+          // CRITICAL: Remove from guard before returning
+          stopLimitCreationBySymbol.delete(normalizedSymbol);
+          console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (found in database)`);
+          return;
+        }
       }
       
       // Also check via unified search as backup
