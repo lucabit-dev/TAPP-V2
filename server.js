@@ -156,6 +156,9 @@ const pendingManualBuyOrders = new Map();
 // This is the authoritative source for active StopLimit orders
 const stopLimitOrderRepository = new Map(); // Map<symbol, { orderId, order, openedDateTime, status }>
 
+// CRITICAL: StopLimit logic is DISABLED - set to false to pause all stop-limit order creation
+const STOPLIMIT_ENABLED = false;
+
 // Helper functions for StopLimit Order Repository (pattern from sections-buy-bot-main)
 function parseOrderDateTime(dateTimeStr) {
   if (!dateTimeStr) return null;
@@ -194,6 +197,11 @@ function isOrderDeleted(msg) {
 
 // Register or update StopLimit order in repository (clean pattern from sections-buy-bot-main)
 function registerStopLimitOrder(msg) {
+  // CRITICAL: StopLimit logic is DISABLED - return early
+  if (!STOPLIMIT_ENABLED) {
+    return;
+  }
+  
   const leg = msg.Legs?.[0];
   if (!leg) return;
   
@@ -3247,7 +3255,10 @@ function connectPositionsWebSocket() {
             }
             
             // Check StopLimit tracker for P&L-based updates
-            checkStopLimitTracker(normalizedSymbol, dataObj);
+            // CRITICAL: StopLimit tracker is DISABLED
+            if (STOPLIMIT_ENABLED) {
+              checkStopLimitTracker(normalizedSymbol, dataObj);
+            }
           }
         } else {
           // Position closed or quantity is 0, remove from cache
@@ -3600,6 +3611,15 @@ function connectOrdersWebSocket() {
                 });
               }
               return; // Don't call handleManualBuyFilled if order already exists
+            }
+            
+            // CRITICAL: StopLimit logic is DISABLED - skip creation
+            if (!STOPLIMIT_ENABLED) {
+              console.log(`⏸️ [STOPLIMIT] StopLimit creation is DISABLED - skipping for order ${orderId} (${symbol})`);
+              // Still mark as processed to prevent retry
+              processedFllOrders.add(orderId);
+              pendingManualBuyOrders.delete(orderId);
+              return;
             }
             
             console.log(`🚀 [DEBUG] Triggering StopLimit creation/modification for filled manual buy ${orderId} (${symbol})`);
@@ -4466,6 +4486,12 @@ function getPriceAdjustment(price) {
 // Create a SELL StopLimit order using sections-buy-bot-main logic
 // Logic: limit_price = current_price - adjustment, stop_price = limit_price * 1.002
 async function createStopLimitSellOrder(symbol, quantity, buyPrice) {
+  // CRITICAL: StopLimit logic is DISABLED - return early
+  if (!STOPLIMIT_ENABLED) {
+    console.log(`⏸️ [STOPLIMIT] StopLimit creation is DISABLED - skipping for ${symbol}`);
+    return { success: false, error: 'StopLimit creation is disabled' };
+  }
+  
   // Validate inputs
   const normalizedSymbol = (symbol || '').toUpperCase();
   const qty = Math.floor(Number(quantity)) || 0;
@@ -4680,6 +4706,10 @@ async function modifyStopLimitPrice(orderId, stopPrice, limitPrice) {
 // CRITICAL: This function ONLY updates existing StopLimit orders, NEVER creates new ones
 // StopLimit orders are created by handleManualBuyFilled when buy orders fill
 async function checkStopLimitTracker(symbol, position) {
+  // CRITICAL: StopLimit logic is DISABLED - return early
+  if (!STOPLIMIT_ENABLED) {
+    return;
+  }
   try {
     const normalizedSymbol = (symbol || '').toUpperCase();
     const avgPrice = parseFloat(position.AveragePrice || '0');
@@ -4784,6 +4814,12 @@ async function checkStopLimitTracker(symbol, position) {
 
 // When a tracked manual BUY order reaches FLL/FIL: create new StopLimit SELL or add to existing.
 async function handleManualBuyFilled(orderId, order, pending) {
+  // CRITICAL: StopLimit logic is DISABLED - return early
+  if (!STOPLIMIT_ENABLED) {
+    console.log(`⏸️ [STOPLIMIT] StopLimit creation is DISABLED - skipping for order ${orderId}`);
+    return;
+  }
+  
   // Prevent duplicate calls for the same order
   if (stopLimitCreationInProgress.has(orderId)) {
     console.log(`⏸️ [DEBUG] StopLimit creation already in progress for order ${orderId}, skipping duplicate call`);
