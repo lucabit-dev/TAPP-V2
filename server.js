@@ -151,6 +151,19 @@ const ordersCache = new Map(); // Map<OrderID, { OrderID, Symbol, Status, Legs, 
 // Pending manual BUY orders: track orderId → { symbol, quantity, limitPrice } for FLL→StopLimit logic
 const pendingManualBuyOrders = new Map();
 
+// ============================================================================
+// AUTOMATIC STOP-LIMIT SYSTEM (NEW - Separate from existing stop-limit)
+// ============================================================================
+// Track buy orders that should trigger automatic stop-limit orders when fulfilled
+// Maps orderId → { symbol, quantity, buyPrice, timestamp }
+const autoStopLimitBuyOrders = new Map();
+
+// Track symbols that are currently having stop-limit orders created (prevent duplicates)
+const autoStopLimitCreationInProgress = new Set();
+
+// Track processed FLL orders for auto stop-limit (prevent duplicate processing)
+const processedAutoStopLimitFllOrders = new Set();
+
 // StopLimit Order Repository - Single source of truth pattern from sections-buy-bot-main
 // Maps symbol → { orderId, order, openedDateTime, status }
 // This is the authoritative source for active StopLimit orders
@@ -877,8 +890,34 @@ setInterval(() => {
       console.log(`🧹 [CLEANUP] Cleaned ${cleanedProcessedFll} old processed FLL order entries (kept ${processedFllOrders.size})`);
     }
     
-    if (cleanedRepository > 0 || cleanedRecentlySold > 0 || cleanedFilledStopLimits > 0 || cleanedProcessedFll > 0) {
-      console.log(`🧹 [STOPLIMIT_REPO] Cleaned ${cleanedRepository} repository entries, ${cleanedRecentlySold} recently sold entries, ${cleanedFilledStopLimits} filled StopLimit entries, and ${cleanedProcessedFll} processed FLL entries`);
+    // Clean up auto stop-limit buy orders - remove entries older than 1 hour
+    let cleanedAutoStopLimitBuyOrders = 0;
+    const AUTO_STOPLIMIT_BUY_MAX_AGE = 3600000; // 1 hour
+    for (const [orderId, data] of autoStopLimitBuyOrders.entries()) {
+      const age = now - data.timestamp;
+      if (age > AUTO_STOPLIMIT_BUY_MAX_AGE) {
+        autoStopLimitBuyOrders.delete(orderId);
+        cleanedAutoStopLimitBuyOrders++;
+      }
+    }
+    if (cleanedAutoStopLimitBuyOrders > 0) {
+      console.log(`🧹 [CLEANUP] Cleaned ${cleanedAutoStopLimitBuyOrders} old auto stop-limit buy order entries`);
+    }
+    
+    // Clean up processed auto stop-limit FLL orders - remove entries older than 1 hour
+    let cleanedAutoStopLimitFll = 0;
+    if (processedAutoStopLimitFllOrders.size > 1000) {
+      const oldSize = processedAutoStopLimitFllOrders.size;
+      const entriesToKeep = Math.floor(oldSize / 2);
+      const entriesArray = Array.from(processedAutoStopLimitFllOrders);
+      processedAutoStopLimitFllOrders.clear();
+      entriesArray.slice(-entriesToKeep).forEach(id => processedAutoStopLimitFllOrders.add(id));
+      cleanedAutoStopLimitFll = oldSize - processedAutoStopLimitFllOrders.size;
+      console.log(`🧹 [CLEANUP] Cleaned ${cleanedAutoStopLimitFll} old processed auto stop-limit FLL order entries (kept ${processedAutoStopLimitFllOrders.size})`);
+    }
+    
+    if (cleanedRepository > 0 || cleanedRecentlySold > 0 || cleanedFilledStopLimits > 0 || cleanedProcessedFll > 0 || cleanedAutoStopLimitBuyOrders > 0 || cleanedAutoStopLimitFll > 0) {
+      console.log(`🧹 [STOPLIMIT_REPO] Cleaned ${cleanedRepository} repository entries, ${cleanedRecentlySold} recently sold entries, ${cleanedFilledStopLimits} filled StopLimit entries, ${cleanedProcessedFll} processed FLL entries, ${cleanedAutoStopLimitBuyOrders} auto stop-limit buy orders, and ${cleanedAutoStopLimitFll} processed auto stop-limit FLL entries`);
     }
   } catch (err) {
     console.error(`❌ [STOPLIMIT_REPO] Error in StopLimit cleanup:`, err);
@@ -3058,6 +3097,19 @@ async function sendBuyOrder(symbol, configId = null, groupKey = null) {
       
       if (resp.ok) {
         console.log(`✅ Autobuy order sent for ${symbol}: ${notifyStatus}`, responseData ? `Response: ${JSON.stringify(responseData)}` : '');
+        
+        // Track buy order for automatic stop-limit system
+        const orderIdFromApi = responseData?.order_id ?? responseData?.OrderID ?? responseData?.orderId ?? null;
+        if (orderIdFromApi != null) {
+          const oid = String(orderIdFromApi);
+          autoStopLimitBuyOrders.set(oid, {
+            symbol: symbol.toUpperCase(),
+            quantity: quantity,
+            buyPrice: currentPrice,
+            timestamp: Date.now()
+          });
+          console.log(`📌 [AUTO_STOPLIMIT] Tracking buy order ${oid} for ${symbol} (qty ${quantity}, buyPrice ${currentPrice})`);
+        }
       } else {
         errorMessage = extractErrorMessage(responseData, responseText, resp.status, resp.statusText);
         console.error(`❌ Error in autobuy for ${symbol}:`, {
@@ -3499,6 +3551,35 @@ function connectOrdersWebSocket() {
             }
           }
 
+          // ============================================================================
+          // AUTOMATIC STOP-LIMIT SYSTEM: Handle fulfilled buy orders
+          // ============================================================================
+          // Check if this is a tracked buy order for automatic stop-limit
+          const autoStopLimitBuyData = autoStopLimitBuyOrders.get(orderId);
+          if (isFilled && isBuy && autoStopLimitBuyData) {
+            // Prevent duplicate processing
+            if (processedAutoStopLimitFllOrders.has(orderId)) {
+              console.log(`⏭️ [AUTO_STOPLIMIT] Order ${orderId} already processed, skipping duplicate`);
+              return;
+            }
+            
+            // Mark as processed immediately
+            processedAutoStopLimitFllOrders.add(orderId);
+            console.log(`✅ [AUTO_STOPLIMIT] Marked order ${orderId} as processed for FLL`);
+            
+            // Remove from tracking
+            autoStopLimitBuyOrders.delete(orderId);
+            console.log(`✅ [AUTO_STOPLIMIT] Removed ${orderId} from autoStopLimitBuyOrders`);
+            
+            // Trigger automatic stop-limit creation
+            console.log(`🚀 [AUTO_STOPLIMIT] Triggering stop-limit creation for fulfilled buy order ${orderId} (${symbol})`);
+            handleAutoStopLimitBuyFilled(orderId, order, autoStopLimitBuyData).catch(err => {
+              console.error(`❌ [AUTO_STOPLIMIT] Error handling fulfilled buy order ${orderId}:`, err);
+              // On error, remove from processed set so it can be retried if needed
+              processedAutoStopLimitFllOrders.delete(orderId);
+            });
+          }
+
           // When a tracked manual BUY reaches FLL/FIL: create or modify StopLimit SELL
           // CRITICAL: Only process if it's a BUY order AND it's in pendingManualBuyOrders
           // This ensures we only process orders we're tracking, not random FLL messages
@@ -3887,6 +3968,15 @@ app.post('/api/buys/test', async (req, res) => {
         const oid = String(orderIdFromApi);
         pendingManualBuyOrders.set(oid, { symbol, quantity, limitPrice: currentPrice });
         console.log(`📌 [DEBUG] Tracking manual buy order ${oid} for ${symbol} (qty ${quantity}, limitPrice ${currentPrice})`);
+        
+        // Also track for automatic stop-limit system
+        autoStopLimitBuyOrders.set(oid, {
+          symbol: symbol.toUpperCase(),
+          quantity: quantity,
+          buyPrice: currentPrice,
+          timestamp: Date.now()
+        });
+        console.log(`📌 [AUTO_STOPLIMIT] Tracking buy order ${oid} for ${symbol} (qty ${quantity}, buyPrice ${currentPrice})`);
         console.log(`📌 [DEBUG] Full response data:`, JSON.stringify(responseData, null, 2));
         console.log(`📌 [DEBUG] Total tracked manual buys: ${pendingManualBuyOrders.size}`);
         
@@ -4232,6 +4322,19 @@ app.get('/api/buys/test', async (req, res) => {
       
       if (resp.ok) {
         console.log(`✅ Buy order sent for ${symbol}: ${notifyStatus}`, responseData ? `Response: ${JSON.stringify(responseData)}` : '');
+        
+        // Track buy order for automatic stop-limit system
+        const orderIdFromApi = responseData?.order_id ?? responseData?.OrderID ?? responseData?.orderId ?? null;
+        if (orderIdFromApi != null) {
+          const oid = String(orderIdFromApi);
+          autoStopLimitBuyOrders.set(oid, {
+            symbol: symbol.toUpperCase(),
+            quantity: quantity,
+            buyPrice: currentPrice,
+            timestamp: Date.now()
+          });
+          console.log(`📌 [AUTO_STOPLIMIT] Tracking buy order ${oid} for ${symbol} (qty ${quantity}, buyPrice ${currentPrice})`);
+        }
       } else {
         errorMessage = extractErrorMessage(responseData, responseText, resp.status, resp.statusText);
         console.error(`❌ Error buying ${symbol}:`, {
@@ -4712,6 +4815,215 @@ async function modifyStopLimitPrice(orderId, stopPrice, limitPrice) {
     response: data
   });
   return { success: true, data };
+}
+
+// ============================================================================
+// AUTOMATIC STOP-LIMIT SYSTEM FUNCTIONS (NEW - Separate from existing)
+// ============================================================================
+
+// Create automatic stop-limit sell order using stop-limit tracker config values
+// This is separate from createStopLimitSellOrder and always uses tracker config
+async function createAutoStopLimitOrder(symbol, quantity, buyPrice) {
+  const normalizedSymbol = (symbol || '').toUpperCase();
+  const qty = Math.floor(Number(quantity)) || 0;
+  const buy = Number(buyPrice) || 0;
+  
+  if (!normalizedSymbol || qty <= 0 || buy <= 0) {
+    console.error(`❌ [AUTO_STOPLIMIT] Invalid parameters: symbol=${normalizedSymbol}, quantity=${qty}, buyPrice=${buy}`);
+    return { success: false, error: 'Invalid parameters' };
+  }
+  
+  // Get current bid price from position (like sections-buy-bot-main)
+  const position = positionsCache.get(normalizedSymbol);
+  const currentPrice = position ? parseFloat(position.Bid || position.Last || position.AveragePrice || '0') : buy;
+  const price = currentPrice > 0 ? currentPrice : buy;
+  
+  // Check StopLimit tracker config for matching group
+  let useTrackerInitialStop = false;
+  let trackerInitialStopPrice = 0;
+  let matchedGroupId = null;
+  
+  console.log(`🔍 [AUTO_STOPLIMIT] Checking tracker config for ${normalizedSymbol} (buy price: ${buy})`);
+  
+  // Find matching tracker config group
+  for (const [groupId, group] of stopLimitTrackerConfig.entries()) {
+    if (!group.enabled) {
+      continue;
+    }
+    
+    const buyPriceInRange = buy >= group.minPrice && buy <= group.maxPrice;
+    const hasInitialStopPrice = group.initialStopPrice != null && group.initialStopPrice !== 0;
+    
+    if (buyPriceInRange && hasInitialStopPrice) {
+      trackerInitialStopPrice = buy + group.initialStopPrice;
+      useTrackerInitialStop = true;
+      matchedGroupId = groupId;
+      console.log(`✅ [AUTO_STOPLIMIT] Matched group ${groupId}: stop_price offset ${group.initialStopPrice}, calculated stop_price: ${trackerInitialStopPrice}`);
+      break;
+    }
+  }
+  
+  // Calculate prices based on tracker config
+  let stopPrice;
+  let limitPrice;
+  
+  if (useTrackerInitialStop) {
+    stopPrice = Math.max(0, trackerInitialStopPrice);
+    limitPrice = Math.max(0, stopPrice / 1.002);
+    console.log(`📊 [AUTO_STOPLIMIT] Using tracker config: stop_price=${stopPrice.toFixed(2)}, limit_price=${limitPrice.toFixed(2)}`);
+  } else {
+    // If no tracker config found, use default sections-buy-bot-main logic
+    console.log(`⚠️ [AUTO_STOPLIMIT] No matching tracker config found for ${normalizedSymbol} (buy price: ${buy}). Using default logic.`);
+    const adjustment = getPriceAdjustment(price);
+    limitPrice = Math.max(0, price - adjustment);
+    stopPrice = Math.max(0, limitPrice * 1.002);
+    console.log(`📊 [AUTO_STOPLIMIT] Using default values: stop_price=${stopPrice.toFixed(2)}, limit_price=${limitPrice.toFixed(2)}`);
+  }
+  
+  // Round to 2 decimal places
+  limitPrice = Math.round(limitPrice * 100) / 100;
+  stopPrice = Math.round(stopPrice * 100) / 100;
+  
+  const body = {
+    symbol: normalizedSymbol,
+    side: 'SELL',
+    order_type: 'StopLimit',
+    quantity: qty,
+    stop_price: stopPrice,
+    limit_price: limitPrice
+  };
+  
+  console.log(`📤 [AUTO_STOPLIMIT] Creating stop-limit order for ${normalizedSymbol}:`, JSON.stringify({
+    ...body,
+    buy_price: `$${buy.toFixed(2)}`,
+    current_price: `$${price.toFixed(2)}`,
+    calculation_method: useTrackerInitialStop ? 'tracker_config' : 'default',
+    tracker_group_id: matchedGroupId || null
+  }, null, 2));
+  
+  const resp = await fetch(SECTIONS_BOT_ORDER_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  
+  const text = await resp.text().catch(() => '');
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { }
+  
+  if (!resp.ok) {
+    console.error(`❌ [AUTO_STOPLIMIT] Failed to create stop-limit order for ${normalizedSymbol}:`, {
+      status: resp.status,
+      statusText: resp.statusText,
+      response: data || text
+    });
+    return { success: false, error: data?.message || data?.detail || String(resp.status) };
+  }
+  
+  const orderId = data?.order_id ?? data?.OrderID ?? data?.orderId ?? null;
+  console.log(`✅ [AUTO_STOPLIMIT] Stop-limit order created successfully for ${normalizedSymbol}:`, {
+    orderId: orderId,
+    qty: body.quantity,
+    stop_price: `$${body.stop_price.toFixed(2)}`,
+    limit_price: `$${body.limit_price.toFixed(2)}`
+  });
+  
+  return { success: true, data, orderId };
+}
+
+// Handle fulfilled buy order and create automatic stop-limit order
+async function handleAutoStopLimitBuyFilled(orderId, order, buyOrderData) {
+  // Prevent duplicate processing
+  if (autoStopLimitCreationInProgress.has(orderId)) {
+    console.log(`⏸️ [AUTO_STOPLIMIT] Already processing order ${orderId}, skipping duplicate call`);
+    return;
+  }
+  
+  const symbol = (buyOrderData.symbol || (order.Legs?.[0]?.Symbol || '')).toString().toUpperCase();
+  const normalizedSymbol = symbol;
+  
+  // Symbol-level guard to prevent duplicate creation
+  if (autoStopLimitCreationInProgress.has(normalizedSymbol)) {
+    console.log(`⏸️ [AUTO_STOPLIMIT] Stop-limit creation already in progress for ${normalizedSymbol}, skipping`);
+    return;
+  }
+  
+  // Mark as in progress
+  autoStopLimitCreationInProgress.add(orderId);
+  autoStopLimitCreationInProgress.add(normalizedSymbol);
+  
+  try {
+    const quantity = Math.floor(Number(buyOrderData.quantity || order.Legs?.[0]?.ExecQuantity || order.Legs?.[0]?.QuantityOrdered || 0)) || 0;
+    const buyPrice = parseFloat(buyOrderData.buyPrice || buyOrderData.limitPrice || order.FilledPrice || order.LimitPrice || 0) || 0;
+    
+    if (quantity <= 0 || buyPrice <= 0) {
+      console.error(`❌ [AUTO_STOPLIMIT] Invalid order data for ${normalizedSymbol}: quantity=${quantity}, buyPrice=${buyPrice}`);
+      return;
+    }
+    
+    // Wait a bit for position to appear in cache (race condition handling)
+    let existingPosition = positionsCache.get(normalizedSymbol);
+    let hasPosition = existingPosition && parseFloat(existingPosition.Quantity || '0') > 0;
+    
+    if (!hasPosition) {
+      console.log(`⏳ [AUTO_STOPLIMIT] Position not found immediately for ${normalizedSymbol}, waiting...`);
+      for (let i = 0; i < 3; i++) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        existingPosition = positionsCache.get(normalizedSymbol);
+        hasPosition = existingPosition && parseFloat(existingPosition.Quantity || '0') > 0;
+        if (hasPosition) {
+          console.log(`✅ [AUTO_STOPLIMIT] Position found after ${(i + 1) * 500}ms`);
+          break;
+        }
+      }
+    }
+    
+    if (!hasPosition) {
+      console.warn(`⚠️ [AUTO_STOPLIMIT] No position found for ${normalizedSymbol} after waiting - may have been sold immediately`);
+      return;
+    }
+    
+    // Check if stop-limit order already exists for this symbol
+    // Check both repository and cache
+    const existingStopLimit = getActiveStopLimitOrder(normalizedSymbol);
+    if (existingStopLimit) {
+      console.log(`✅ [AUTO_STOPLIMIT] Stop-limit order already exists for ${normalizedSymbol} (${existingStopLimit.orderId}), skipping creation`);
+      return;
+    }
+    
+    // Check cache for existing stop-limit orders
+    for (const [cachedOrderId, cachedOrder] of ordersCache.entries()) {
+      const cachedLeg = cachedOrder.Legs?.[0];
+      const cachedSymbol = (cachedLeg?.Symbol || '').toUpperCase();
+      const cachedSide = (cachedLeg?.BuyOrSell || '').toUpperCase();
+      const cachedType = (cachedOrder.OrderType || '').toUpperCase();
+      const cachedStatus = (cachedOrder.Status || '').toUpperCase();
+      
+      if (cachedSymbol === normalizedSymbol && 
+          cachedSide === 'SELL' && 
+          (cachedType === 'STOPLIMIT' || cachedType === 'STOP_LIMIT') &&
+          (cachedStatus === 'ACK' || cachedStatus === 'DON' || cachedStatus === 'REC')) {
+        console.log(`✅ [AUTO_STOPLIMIT] Found existing stop-limit order ${cachedOrderId} in cache for ${normalizedSymbol}, skipping creation`);
+        return;
+      }
+    }
+    
+    // Create the stop-limit order
+    console.log(`🚀 [AUTO_STOPLIMIT] Creating stop-limit order for fulfilled buy order ${orderId} (${normalizedSymbol})`);
+    const result = await createAutoStopLimitOrder(normalizedSymbol, quantity, buyPrice);
+    
+    if (!result.success) {
+      console.error(`❌ [AUTO_STOPLIMIT] Failed to create stop-limit order for ${normalizedSymbol}:`, result.error);
+    }
+  } catch (err) {
+    console.error(`❌ [AUTO_STOPLIMIT] Error handling fulfilled buy order ${orderId}:`, err);
+  } finally {
+    // Remove from in-progress tracking after a delay to prevent race conditions
+    setTimeout(() => {
+      autoStopLimitCreationInProgress.delete(orderId);
+      autoStopLimitCreationInProgress.delete(normalizedSymbol);
+    }, 2000);
+  }
 }
 
 // Check StopLimit tracker and update orders based on P&L (sections-buy-bot-main pattern)
@@ -7327,15 +7639,6 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
       }
     }
     
-    // CRITICAL: Block StopLimit orders if disabled
-    if (orderType === 'StopLimit' && !STOPLIMIT_ENABLED) {
-      console.log(`⏸️ [STOPLIMIT] StopLimit creation is DISABLED - rejecting stop-limit order request for ${symbol}`);
-      return res.status(400).json({ 
-        success: false, 
-        error: 'StopLimit order creation is currently disabled' 
-      });
-    }
-    
     // Build request body according to Sections Bot API documentation
     // https://inbitme.gitbook.io/sections-bot/xKy06Pb8j01LsqEnmSik/rest-api/ordenes
     const orderBody = {
@@ -7347,18 +7650,42 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
     
     // CRITICAL: For StopLimit orders, calculate stop_price and limit_price from database config
     // Use the same logic as createStopLimitSellOrder() to ensure consistency
+    // NOTE: Manual StopLimit orders are allowed even when STOPLIMIT_ENABLED is false (manual action)
     if (orderType === 'StopLimit' && side === 'SELL') {
       // Get buy price from position (AveragePrice) or current price
-      const position = positionsCache.get(symbol.toUpperCase());
-      const buyPrice = position ? parseFloat(position.AveragePrice || position.Bid || position.Last || '0') : 0;
-      const currentPrice = position ? parseFloat(position.Bid || position.Last || position.AveragePrice || '0') : buyPrice;
+      const normalizedSymbol = symbol.toUpperCase();
+      const position = positionsCache.get(normalizedSymbol);
+      
+      // Try multiple ways to get buy price
+      let buyPrice = 0;
+      let currentPrice = 0;
+      
+      if (position) {
+        // Try AveragePrice first (most accurate for buy price)
+        buyPrice = parseFloat(position.AveragePrice || '0');
+        // If no AveragePrice, try Last or Bid
+        if (buyPrice <= 0) {
+          buyPrice = parseFloat(position.Last || position.Bid || '0');
+        }
+        // Get current price from Bid or Last
+        currentPrice = parseFloat(position.Bid || position.Last || position.AveragePrice || '0');
+      }
+      
+      // If still no price, try to get from request body (if provided)
+      if (buyPrice <= 0 && req.body?.buyPrice) {
+        buyPrice = parseFloat(req.body.buyPrice);
+      }
+      if (currentPrice <= 0 && req.body?.currentPrice) {
+        currentPrice = parseFloat(req.body.currentPrice);
+      }
+      
       const price = currentPrice > 0 ? currentPrice : buyPrice;
       
       if (buyPrice <= 0) {
-        console.error(`❌ [STOPLIMIT] Cannot create StopLimit order for ${symbol}: No buy price found in position`);
+        console.error(`❌ [STOPLIMIT] Cannot create StopLimit order for ${symbol}: No buy price found. Position in cache: ${!!position}, AveragePrice: ${position?.AveragePrice || 'N/A'}, Last: ${position?.Last || 'N/A'}, Bid: ${position?.Bid || 'N/A'}`);
         return res.status(400).json({ 
           success: false, 
-          error: `Cannot create StopLimit order: No position found for ${symbol} or missing buy price` 
+          error: `Cannot create StopLimit order: No position found for ${symbol} or missing buy price. Please ensure the position exists and has an AveragePrice.` 
         });
       }
       
