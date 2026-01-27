@@ -3512,15 +3512,18 @@ function connectOrdersWebSocket() {
             // Check BOTH repository AND database to prevent creating duplicate StopLimit orders
             const existingStopLimit = getActiveStopLimitOrder(normalizedSymbol);
             if (existingStopLimit) {
-              console.log(`✅ [DEBUG] StopLimit already exists for ${normalizedSymbol} (${existingStopLimit.orderId}). Skipping creation.`);
+              console.log(`✅ [DEBUG] StopLimit already exists for ${normalizedSymbol} (${existingStopLimit.orderId}). Re-buy: updating quantity (existing + new buy).`);
               // Mark as processed to prevent retry
               processedFllOrders.add(orderId);
               pendingManualBuyOrders.delete(orderId);
-              // Update quantity if needed
-              const position = positionsCache.get(normalizedSymbol);
-              const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-              if (positionQty > 0) {
-                modifyOrderQuantity(existingStopLimit.orderId, positionQty).catch(err => {
+              // Re-buy: add new bought quantity to existing stop-limit quantity
+              const existingLeg = existingStopLimit.order?.Legs?.[0];
+              const existingStopLimitQty = parseInt(existingLeg?.QuantityRemaining || existingLeg?.QuantityOrdered || '0', 10) || 0;
+              const newBuyQty = Math.floor(Number(pending.quantity || 0)) || 0;
+              const newTotalQty = existingStopLimitQty + newBuyQty;
+              if (newTotalQty > 0) {
+                console.log(`📊 [REBUY] Updating StopLimit ${existingStopLimit.orderId} for ${normalizedSymbol}: ${existingStopLimitQty} + ${newBuyQty} = ${newTotalQty}`);
+                modifyOrderQuantity(existingStopLimit.orderId, newTotalQty).catch(err => {
                   console.error(`❌ [DEBUG] Error updating StopLimit quantity:`, err);
                 });
               }
@@ -3548,11 +3551,14 @@ function connectOrdersWebSocket() {
                 // Mark as processed to prevent retry
                 processedFllOrders.add(orderId);
                 pendingManualBuyOrders.delete(orderId);
-                // Update quantity if needed
-                const position = positionsCache.get(normalizedSymbol);
-                const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-                if (positionQty > 0) {
-                  modifyOrderQuantity(dbCheck.orderId, positionQty).catch(err => {
+                // Re-buy: add new bought quantity to existing stop-limit quantity
+                const dbLeg = dbCheck.order?.Legs?.[0];
+                const dbExistingQty = parseInt(dbLeg?.QuantityRemaining || dbLeg?.QuantityOrdered || '0', 10) || 0;
+                const dbNewBuyQty = Math.floor(Number(pending.quantity || 0)) || 0;
+                const dbNewTotalQty = dbExistingQty + dbNewBuyQty;
+                if (dbNewTotalQty > 0) {
+                  console.log(`📊 [REBUY] Updating StopLimit ${dbCheck.orderId} for ${normalizedSymbol} (from DB): ${dbExistingQty} + ${dbNewBuyQty} = ${dbNewTotalQty}`);
+                  modifyOrderQuantity(dbCheck.orderId, dbNewTotalQty).catch(err => {
                     console.error(`❌ [DEBUG] Error updating StopLimit quantity:`, err);
                   });
                 }
@@ -3589,13 +3595,16 @@ function connectOrdersWebSocket() {
             // If a StopLimit already exists in repository, just update quantity instead of creating new one
             const existingRepoOrder = getActiveStopLimitOrder(normalizedSymbol);
             if (existingRepoOrder) {
-              console.log(`✅ [DEBUG] StopLimit already exists in repository for ${normalizedSymbol} (${existingRepoOrder.orderId}). Updating quantity instead of creating new one.`);
+              console.log(`✅ [DEBUG] StopLimit already exists in repository for ${normalizedSymbol} (${existingRepoOrder.orderId}). Re-buy: updating quantity (existing + new buy).`);
               
-              // Update quantity to match position
-              const position = positionsCache.get(normalizedSymbol);
-              const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-              if (positionQty > 0) {
-                modifyOrderQuantity(existingRepoOrder.orderId, positionQty).catch(err => {
+              // Re-buy: add new bought quantity to existing stop-limit quantity
+              const repoLeg = existingRepoOrder.order?.Legs?.[0];
+              const repoExistingQty = parseInt(repoLeg?.QuantityRemaining || repoLeg?.QuantityOrdered || '0', 10) || 0;
+              const repoNewBuyQty = Math.floor(Number(pending.quantity || 0)) || 0;
+              const repoNewTotalQty = repoExistingQty + repoNewBuyQty;
+              if (repoNewTotalQty > 0) {
+                console.log(`📊 [REBUY] Updating StopLimit ${existingRepoOrder.orderId} for ${normalizedSymbol}: ${repoExistingQty} + ${repoNewBuyQty} = ${repoNewTotalQty}`);
+                modifyOrderQuantity(existingRepoOrder.orderId, repoNewTotalQty).catch(err => {
                   console.error(`❌ [DEBUG] Error updating StopLimit quantity for ${normalizedSymbol}:`, err);
                 });
               }
@@ -4811,11 +4820,14 @@ async function handleManualBuyFilled(orderId, order, pending) {
         console.log(`✅ [STOPLIMIT_REPO] Registered StopLimit ${dbCheck.orderId} from database for ${normalizedSymbol}`);
       }
       
-      // Update quantity if needed
-      const position = positionsCache.get(normalizedSymbol);
-      const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-      if (positionQty > 0) {
-        modifyOrderQuantity(dbCheck.orderId, positionQty).catch(err => {
+      // Re-buy: add new bought quantity to existing stop-limit quantity
+      const dbCheckLeg = dbCheck.order?.Legs?.[0];
+      const dbCheckExistingQty = parseInt(dbCheckLeg?.QuantityRemaining || dbCheckLeg?.QuantityOrdered || '0', 10) || 0;
+      const dbCheckBuyQty = Math.floor(Number(pending.quantity || (order.Legs?.[0]?.ExecQuantity ?? order.Legs?.[0]?.QuantityOrdered) || 0)) || 0;
+      const dbCheckNewTotalQty = dbCheckExistingQty + dbCheckBuyQty;
+      if (dbCheckNewTotalQty > 0) {
+        console.log(`📊 [REBUY] Updating StopLimit ${dbCheck.orderId} for ${normalizedSymbol} (from DB): ${dbCheckExistingQty} + ${dbCheckBuyQty} = ${dbCheckNewTotalQty}`);
+        modifyOrderQuantity(dbCheck.orderId, dbCheckNewTotalQty).catch(err => {
           console.error(`❌ [DEBUG] Error updating StopLimit quantity:`, err);
         });
       }
@@ -4827,14 +4839,17 @@ async function handleManualBuyFilled(orderId, order, pending) {
   // This must be checked BEFORE any async operations
   if (stopLimitCreationBySymbol.has(normalizedSymbol)) {
     console.log(`🛑 [DEBUG] StopLimit creation already in progress for symbol ${normalizedSymbol} (order ${orderId}), aborting to prevent duplicate!`);
-    // Check repository - if StopLimit exists, update quantity instead
+    // Check repository - if StopLimit exists, update quantity (re-buy: existing + new buy)
     const existingRepoOrder = getActiveStopLimitOrder(normalizedSymbol);
     if (existingRepoOrder) {
-      console.log(`✅ [DEBUG] Found existing StopLimit ${existingRepoOrder.orderId} in repository for ${normalizedSymbol} - updating quantity`);
-      const position = positionsCache.get(normalizedSymbol);
-      const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-      if (positionQty > 0) {
-        modifyOrderQuantity(existingRepoOrder.orderId, positionQty).catch(err => {
+      console.log(`✅ [DEBUG] Found existing StopLimit ${existingRepoOrder.orderId} in repository for ${normalizedSymbol} - re-buy: updating quantity`);
+      const guardLeg = existingRepoOrder.order?.Legs?.[0];
+      const guardExistingQty = parseInt(guardLeg?.QuantityRemaining || guardLeg?.QuantityOrdered || '0', 10) || 0;
+      const guardBuyQty = Math.floor(Number(pending.quantity || (order.Legs?.[0]?.ExecQuantity ?? order.Legs?.[0]?.QuantityOrdered) || 0)) || 0;
+      const guardNewTotalQty = guardExistingQty + guardBuyQty;
+      if (guardNewTotalQty > 0) {
+        console.log(`📊 [REBUY] Updating StopLimit ${existingRepoOrder.orderId} for ${normalizedSymbol}: ${guardExistingQty} + ${guardBuyQty} = ${guardNewTotalQty}`);
+        modifyOrderQuantity(existingRepoOrder.orderId, guardNewTotalQty).catch(err => {
           console.error(`❌ [DEBUG] Error updating StopLimit quantity:`, err);
         });
       }
@@ -5020,12 +5035,13 @@ async function handleManualBuyFilled(orderId, order, pending) {
       const isPending = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED', 'PENDING'].includes(pendingStatus);
       
       if (isPending) {
-        console.log(`🛑 [DEBUG] Found PENDING StopLimit order ${pendingOrderId} (status: ${pendingStatus}) for ${normalizedSymbol} - aborting creation to prevent duplicate!`);
-        // Update quantity if needed
-        const position = positionsCache.get(normalizedSymbol);
-        const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-        if (positionQty > 0) {
-          modifyOrderQuantity(pendingOrderId, positionQty).catch(err => {
+        console.log(`🛑 [DEBUG] Found PENDING StopLimit order ${pendingOrderId} (status: ${pendingStatus}) for ${normalizedSymbol} - re-buy: updating quantity (existing + new buy).`);
+        // Re-buy: add new bought quantity to existing stop-limit quantity
+        const pendingExistingQty = pendingStopLimitCheck.quantity || 0;
+        const newTotalQty = pendingExistingQty + quantity;
+        if (newTotalQty > 0) {
+          console.log(`📊 [REBUY] Updating StopLimit ${pendingOrderId} for ${normalizedSymbol}: ${pendingExistingQty} + ${quantity} = ${newTotalQty}`);
+          modifyOrderQuantity(pendingOrderId, newTotalQty).catch(err => {
             console.error(`❌ [DEBUG] Error updating pending StopLimit quantity:`, err);
           });
         }
@@ -5054,41 +5070,22 @@ async function handleManualBuyFilled(orderId, order, pending) {
           const isPending = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(waitStatus);
           
           if (isActive || isPending) {
-            console.log(`✅ [DEBUG] Found active StopLimit order ${waitOrderId} after waiting (status: ${waitStatus}). Updating quantity...`);
-            // CRITICAL: Use actual position quantity, not order quantity
-            // The position quantity reflects the total shares owned (including the new buy)
-            const position = positionsCache.get(normalizedSymbol);
-            const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-            if (positionQty > 0) {
-              // Wait a bit for position to update if needed
-              if (positionQty <= parseInt(waitOrder.Legs?.[0]?.QuantityRemaining || waitOrder.Legs?.[0]?.QuantityOrdered || '0', 10) || 0) {
-                console.log(`⏳ [DEBUG] Position quantity (${positionQty}) may not include new buy. Waiting...`);
-                for (let i = 0; i < 3; i++) {
-                  await new Promise(resolve => setTimeout(resolve, 400));
-                  const updatedPosition = positionsCache.get(normalizedSymbol);
-                  const newQty = updatedPosition ? parseFloat(updatedPosition.Quantity || '0') : 0;
-                  if (newQty > positionQty) {
-                    positionQty = newQty;
-                    break;
-                  }
-                  positionQty = newQty;
-                }
-              }
-              
-              console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares (was: ${waitOrder.Legs?.[0]?.QuantityRemaining || waitOrder.Legs?.[0]?.QuantityOrdered || 0})`);
-              const result = await modifyOrderQuantity(waitOrderId, positionQty);
+            console.log(`✅ [DEBUG] Found active StopLimit order ${waitOrderId} after waiting (status: ${waitStatus}). Re-buy: updating quantity (existing + new buy).`);
+            // Re-buy: add new bought quantity to existing stop-limit quantity
+            const waitLoopExistingQty = parseInt(waitOrder.Legs?.[0]?.QuantityRemaining || waitOrder.Legs?.[0]?.QuantityOrdered || '0', 10) || 0;
+            const waitLoopNewTotalQty = waitLoopExistingQty + quantity;
+            if (waitLoopNewTotalQty > 0) {
+              console.log(`📊 [REBUY] Updating StopLimit ${waitOrderId} for ${normalizedSymbol}: ${waitLoopExistingQty} + ${quantity} = ${waitLoopNewTotalQty}`);
+              const result = await modifyOrderQuantity(waitOrderId, waitLoopNewTotalQty);
               console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
-              
               if (result.success) {
-                // Order updated successfully - repository will be updated by WebSocket handler
                 return;
               } else {
                 console.error(`❌ [DEBUG] Failed to modify StopLimit order ${waitOrderId}: ${result.error}`);
-                // Don't create new - order exists, just modification failed
                 return;
               }
             } else {
-              console.warn(`⚠️ [DEBUG] Position quantity is 0 or not found for ${normalizedSymbol}, cannot update StopLimit`);
+              console.warn(`⚠️ [DEBUG] Re-buy total quantity is 0 for ${normalizedSymbol}, cannot update StopLimit`);
             }
           }
         }
@@ -5104,42 +5101,22 @@ async function handleManualBuyFilled(orderId, order, pending) {
             const isPending = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(completedStatus);
             
             if (isActive || isPending) {
-              console.log(`✅ [DEBUG] Found active StopLimit order ${completedOrderId} after creation completed (status: ${completedStatus}). Updating quantity...`);
-              // CRITICAL: Use actual position quantity, not order quantity
-              let position = positionsCache.get(normalizedSymbol);
-              let positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-              
-              // Wait for position to update if needed
-              if (positionQty > 0) {
-                const orderQty = parseInt(completedOrder.Legs?.[0]?.QuantityRemaining || completedOrder.Legs?.[0]?.QuantityOrdered || '0', 10) || 0;
-                if (positionQty <= orderQty) {
-                  console.log(`⏳ [DEBUG] Position quantity (${positionQty}) may not include new buy. Waiting...`);
-                  for (let i = 0; i < 3; i++) {
-                    await new Promise(resolve => setTimeout(resolve, 400));
-                    position = positionsCache.get(normalizedSymbol);
-                    const newQty = position ? parseFloat(position.Quantity || '0') : 0;
-                    if (newQty > positionQty) {
-                      positionQty = newQty;
-                      break;
-                    }
-                    positionQty = newQty;
-                  }
-                }
-                
-                console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares`);
-                const result = await modifyOrderQuantity(completedOrderId, positionQty);
+              console.log(`✅ [DEBUG] Found active StopLimit order ${completedOrderId} after creation completed (status: ${completedStatus}). Re-buy: updating quantity (existing + new buy).`);
+              // Re-buy: add new bought quantity to existing stop-limit quantity
+              const completedExistingQty = parseInt(completedOrder.Legs?.[0]?.QuantityRemaining || completedOrder.Legs?.[0]?.QuantityOrdered || '0', 10) || 0;
+              const completedNewTotalQty = completedExistingQty + quantity;
+              if (completedNewTotalQty > 0) {
+                console.log(`📊 [REBUY] Updating StopLimit ${completedOrderId} for ${normalizedSymbol}: ${completedExistingQty} + ${quantity} = ${completedNewTotalQty}`);
+                const result = await modifyOrderQuantity(completedOrderId, completedNewTotalQty);
                 console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
-                
                 if (result.success) {
-                  // Order updated successfully - repository will be updated by WebSocket handler
                   return;
                 } else {
                   console.error(`❌ [DEBUG] Failed to modify StopLimit order ${completedOrderId}: ${result.error}`);
-                  // Don't create new - order exists, just modification failed
                   return;
                 }
               } else {
-                console.warn(`⚠️ [DEBUG] Position quantity is 0 or not found for ${normalizedSymbol}, cannot update StopLimit`);
+                console.warn(`⚠️ [DEBUG] Re-buy total quantity is 0 for ${normalizedSymbol}, cannot update StopLimit`);
               }
             }
           }
@@ -5156,41 +5133,22 @@ async function handleManualBuyFilled(orderId, order, pending) {
         const isPending = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(finalWaitStatus);
         
         if (isActive || isPending) {
-          console.log(`✅ [DEBUG] Found active StopLimit order ${finalWaitOrderId} in final wait check (status: ${finalWaitStatus}). Updating quantity...`);
-          // CRITICAL: Use actual position quantity, not order quantity
-          let position = positionsCache.get(normalizedSymbol);
-          let positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-          
-          if (positionQty > 0) {
-            const orderQty = parseInt(finalWaitOrder.Legs?.[0]?.QuantityRemaining || finalWaitOrder.Legs?.[0]?.QuantityOrdered || '0', 10) || 0;
-            if (positionQty <= orderQty) {
-              console.log(`⏳ [DEBUG] Position quantity (${positionQty}) may not include new buy. Waiting...`);
-              for (let i = 0; i < 3; i++) {
-                await new Promise(resolve => setTimeout(resolve, 400));
-                position = positionsCache.get(normalizedSymbol);
-                const newQty = position ? parseFloat(position.Quantity || '0') : 0;
-                if (newQty > positionQty) {
-                  positionQty = newQty;
-                  break;
-                }
-                positionQty = newQty;
-              }
-            }
-            
-            console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares`);
-            const result = await modifyOrderQuantity(finalWaitOrderId, positionQty);
+          console.log(`✅ [DEBUG] Found active StopLimit order ${finalWaitOrderId} in final wait check (status: ${finalWaitStatus}). Re-buy: updating quantity (existing + new buy).`);
+          // Re-buy: add new bought quantity to existing stop-limit quantity
+          const finalWaitExistingQty = parseInt(finalWaitOrder.Legs?.[0]?.QuantityRemaining || finalWaitOrder.Legs?.[0]?.QuantityOrdered || '0', 10) || 0;
+          const finalWaitNewTotalQty = finalWaitExistingQty + quantity;
+          if (finalWaitNewTotalQty > 0) {
+            console.log(`📊 [REBUY] Updating StopLimit ${finalWaitOrderId} for ${normalizedSymbol}: ${finalWaitExistingQty} + ${quantity} = ${finalWaitNewTotalQty}`);
+            const result = await modifyOrderQuantity(finalWaitOrderId, finalWaitNewTotalQty);
             console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
-            
             if (result.success) {
-              // Order updated successfully - repository will be updated by WebSocket handler
               return;
             } else {
               console.error(`❌ [DEBUG] Failed to modify StopLimit order ${finalWaitOrderId}: ${result.error}`);
-              // Don't create new - order exists, just modification failed
               return;
             }
           } else {
-            console.warn(`⚠️ [DEBUG] Position quantity is 0 or not found for ${normalizedSymbol}, cannot update StopLimit`);
+            console.warn(`⚠️ [DEBUG] Re-buy total quantity is 0 for ${normalizedSymbol}, cannot update StopLimit`);
           }
         }
       }
@@ -5209,14 +5167,16 @@ async function handleManualBuyFilled(orderId, order, pending) {
     // CRITICAL: Check repository FIRST (most authoritative source) before unified search
     const repoCheckBeforeUnified = getActiveStopLimitOrder(normalizedSymbol);
     if (repoCheckBeforeUnified) {
-      console.log(`🛑 [DEBUG] Repository has active StopLimit ${repoCheckBeforeUnified.orderId} for ${normalizedSymbol} - aborting creation to prevent duplicate!`);
-      // Update quantity if needed
-      const position = positionsCache.get(normalizedSymbol);
-      const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-      if (positionQty > 0) {
-        const result = await modifyOrderQuantity(repoCheckBeforeUnified.orderId, positionQty);
+      console.log(`🛑 [DEBUG] Repository has active StopLimit ${repoCheckBeforeUnified.orderId} for ${normalizedSymbol} - re-buy: updating quantity (existing + new buy).`);
+      // Re-buy: add new bought quantity to existing stop-limit quantity
+      const repoExistingLeg = repoCheckBeforeUnified.order?.Legs?.[0];
+      const repoExistingQty = parseInt(repoExistingLeg?.QuantityRemaining || repoExistingLeg?.QuantityOrdered || '0', 10) || 0;
+      const repoNewTotalQty = repoExistingQty + quantity;
+      if (repoNewTotalQty > 0) {
+        console.log(`📊 [REBUY] Updating StopLimit ${repoCheckBeforeUnified.orderId} for ${normalizedSymbol}: ${repoExistingQty} + ${quantity} = ${repoNewTotalQty}`);
+        const result = await modifyOrderQuantity(repoCheckBeforeUnified.orderId, repoNewTotalQty);
         if (result.success) {
-          console.log(`✅ [DEBUG] Updated existing StopLimit quantity to ${positionQty}`);
+          console.log(`✅ [DEBUG] Updated existing StopLimit quantity to ${repoNewTotalQty}`);
         }
       }
       return; // CRITICAL: Exit early if order exists in repository
@@ -5231,12 +5191,13 @@ async function handleManualBuyFilled(orderId, order, pending) {
       const isPendingOrActive = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED', 'PENDING'].includes(doubleCheckStatus) || isActiveOrderStatus(doubleCheckStatus);
       
       if (isPendingOrActive) {
-        console.log(`🛑 [DEBUG] Double-check found active/pending StopLimit order ${doubleCheckOrderId} (status: ${doubleCheckStatus}) for ${normalizedSymbol} - aborting creation!`);
-        // Update quantity if needed
-        const position = positionsCache.get(normalizedSymbol);
-        const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-        if (positionQty > 0) {
-          modifyOrderQuantity(doubleCheckOrderId, positionQty).catch(err => {
+        console.log(`🛑 [DEBUG] Double-check found active/pending StopLimit order ${doubleCheckOrderId} (status: ${doubleCheckStatus}) for ${normalizedSymbol} - re-buy: updating quantity (existing + new buy).`);
+        // Re-buy: add new bought quantity to existing stop-limit quantity
+        const doubleCheckExistingQty = doubleCheckPending.quantity || 0;
+        const doubleCheckNewTotalQty = doubleCheckExistingQty + quantity;
+        if (doubleCheckNewTotalQty > 0) {
+          console.log(`📊 [REBUY] Updating StopLimit ${doubleCheckOrderId} for ${normalizedSymbol}: ${doubleCheckExistingQty} + ${quantity} = ${doubleCheckNewTotalQty}`);
+          modifyOrderQuantity(doubleCheckOrderId, doubleCheckNewTotalQty).catch(err => {
             console.error(`❌ [DEBUG] Error updating double-check StopLimit quantity:`, err);
           });
         }
@@ -5255,28 +5216,11 @@ async function handleManualBuyFilled(orderId, order, pending) {
       const isPending = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(currentStatus);
       
       if (isActive || isPending) {
-        console.log(`✅ [DEBUG] Found existing StopLimit order ${existingOrderId} (status: ${currentStatus}, qty: ${existingQty}). Updating quantity...`);
+        console.log(`✅ [DEBUG] Found existing StopLimit order ${existingOrderId} (status: ${currentStatus}, qty: ${existingQty}). Re-buy: updating quantity (existing + new buy).`);
         
-        // CRITICAL: Wait for position to be updated in cache (for rebuy scenarios)
-        // The position might not reflect the new buy quantity yet
-        let position = positionsCache.get(normalizedSymbol);
-        let positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-        
-        // If position quantity doesn't seem to include the new buy, wait a bit
-        if (positionQty > 0 && positionQty <= existingQty) {
-          console.log(`⏳ [DEBUG] Position quantity (${positionQty}) doesn't seem to include new buy yet. Waiting for position update...`);
-          for (let i = 0; i < 5; i++) {
-            await new Promise(resolve => setTimeout(resolve, 400));
-            position = positionsCache.get(normalizedSymbol);
-            const newPositionQty = position ? parseFloat(position.Quantity || '0') : 0;
-            if (newPositionQty > positionQty) {
-              positionQty = newPositionQty;
-              console.log(`✅ [DEBUG] Position quantity updated to ${positionQty} after ${(i + 1) * 400}ms`);
-              break;
-            }
-            positionQty = newPositionQty;
-          }
-        }
+        // Re-buy: add new bought quantity to existing stop-limit quantity
+        const rebuyNewTotalQty = existingQty + quantity;
+        console.log(`📊 [REBUY] Updating StopLimit ${existingOrderId} for ${normalizedSymbol}: ${existingQty} + ${quantity} = ${rebuyNewTotalQty}`);
         
         // If order is pending (not yet fully active), wait briefly for it to stabilize
         // REDUCED: Changed from 1000ms to 300ms for faster StopLimit creation
@@ -5292,53 +5236,41 @@ async function handleManualBuyFilled(orderId, order, pending) {
               // Remove from repository and continue to create new
               stopLimitOrderRepository.delete(normalizedSymbol);
             } else {
-              // Order is still active/pending, proceed with update
-              // Re-check position quantity one more time
-              position = positionsCache.get(normalizedSymbol);
-              positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-              
-              if (positionQty > 0) {
-                const orderQty = parseInt(updatedOrder.Legs?.[0]?.QuantityRemaining || updatedOrder.Legs?.[0]?.QuantityOrdered || '0', 10) || 0;
-                console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares (order was: ${orderQty})`);
-                const result = await modifyOrderQuantity(existingOrderId, positionQty);
+              // Order is still active/pending, proceed with re-buy update
+              if (rebuyNewTotalQty > 0) {
+                const result = await modifyOrderQuantity(existingOrderId, rebuyNewTotalQty);
                 console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
                 
                 // CRITICAL: Validate result - if modification failed, log error but don't create duplicate
                 if (!result.success) {
                   console.error(`❌ [DEBUG] Failed to modify StopLimit order ${existingOrderId}: ${result.error}`);
-                  console.error(`❌ [DEBUG] This might cause issues. Position qty: ${positionQty}, Order qty: ${orderQty}`);
+                  console.error(`❌ [DEBUG] Re-buy qty: existing ${existingQty} + new buy ${quantity} = ${rebuyNewTotalQty}`);
                   // Don't return - let it continue to check if we should create new or retry
                 } else {
                   // Order updated successfully - repository will be updated by WebSocket handler
                   return;
                 }
               } else {
-                console.warn(`⚠️ [DEBUG] Position quantity is 0 or not found for ${normalizedSymbol}, cannot update StopLimit`);
+                console.warn(`⚠️ [DEBUG] Re-buy total quantity is 0 for ${normalizedSymbol}, cannot update StopLimit`);
               }
             }
           }
         } else {
-          // Order is active, update immediately
-          // CRITICAL: Use actual position quantity, not order quantity
-          // The position quantity reflects the total shares owned (including the new buy)
-          if (positionQty > 0) {
-            const orderQty = parseInt(existingOrder.Legs?.[0]?.QuantityRemaining || existingOrder.Legs?.[0]?.QuantityOrdered || '0', 10) || 0;
-            console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares (order currently has: ${orderQty})`);
-            const result = await modifyOrderQuantity(existingOrderId, positionQty);
+          // Order is active, update immediately with re-buy quantity (existing + new buy)
+          if (rebuyNewTotalQty > 0) {
+            const result = await modifyOrderQuantity(existingOrderId, rebuyNewTotalQty);
             console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
             
             // CRITICAL: Validate result - if modification failed, log error
             if (!result.success) {
               console.error(`❌ [DEBUG] Failed to modify StopLimit order ${existingOrderId}: ${result.error}`);
-              console.error(`❌ [DEBUG] Position qty: ${positionQty}, Order qty: ${orderQty}, Status: ${currentStatus}`);
-              // Don't return - continue to see if we should retry or create new
-              // But mark that we tried to update
+              console.error(`❌ [DEBUG] Re-buy qty: existing ${existingQty} + new buy ${quantity} = ${rebuyNewTotalQty}, Status: ${currentStatus}`);
             } else {
               // Order updated successfully - repository will be updated by WebSocket handler
               return;
             }
           } else {
-            console.warn(`⚠️ [DEBUG] Position quantity is 0 or not found for ${normalizedSymbol}, cannot update StopLimit`);
+            console.warn(`⚠️ [DEBUG] Re-buy total quantity is 0 for ${normalizedSymbol}, cannot update StopLimit`);
           }
         }
       } else {
@@ -5362,29 +5294,13 @@ async function handleManualBuyFilled(orderId, order, pending) {
         const { orderId: waitOrderId, order: waitOrder } = waitCheck;
         const waitStatus = (waitOrder?.Status || '').toUpperCase();
         if (isActiveOrderStatus(waitStatus) || ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(waitStatus)) {
-          console.log(`✅ [DEBUG] StopLimit was created while waiting (${waitOrderId}), modifying existing order`);
-          // CRITICAL: Use actual position quantity, not order quantity
-          let position = positionsCache.get(normalizedSymbol);
-          let positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-          
-          if (positionQty > 0) {
-            const orderQty = parseInt(waitOrder.Legs?.[0]?.QuantityRemaining || waitOrder.Legs?.[0]?.QuantityOrdered || '0', 10) || 0;
-            if (positionQty <= orderQty) {
-              console.log(`⏳ [DEBUG] Position quantity (${positionQty}) may not include new buy. Waiting...`);
-              for (let i = 0; i < 3; i++) {
-                await new Promise(resolve => setTimeout(resolve, 400));
-                position = positionsCache.get(normalizedSymbol);
-                const newQty = position ? parseFloat(position.Quantity || '0') : 0;
-                if (newQty > positionQty) {
-                  positionQty = newQty;
-                  break;
-                }
-                positionQty = newQty;
-              }
-            }
-            
-            console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares`);
-            const result = await modifyOrderQuantity(waitOrderId, positionQty);
+          console.log(`✅ [DEBUG] StopLimit was created while waiting (${waitOrderId}), re-buy: updating quantity (existing + new buy).`);
+          // Re-buy: add new bought quantity to existing stop-limit quantity
+          const waitExistingQty = parseInt(waitOrder.Legs?.[0]?.QuantityRemaining || waitOrder.Legs?.[0]?.QuantityOrdered || '0', 10) || 0;
+          const waitNewTotalQty = waitExistingQty + quantity;
+          if (waitNewTotalQty > 0) {
+            console.log(`📊 [REBUY] Updating StopLimit ${waitOrderId} for ${normalizedSymbol}: ${waitExistingQty} + ${quantity} = ${waitNewTotalQty}`);
+            const result = await modifyOrderQuantity(waitOrderId, waitNewTotalQty);
             console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
             
             if (result.success) {
@@ -5396,7 +5312,7 @@ async function handleManualBuyFilled(orderId, order, pending) {
               return;
             }
           } else {
-            console.warn(`⚠️ [DEBUG] Position quantity is 0 or not found for ${normalizedSymbol}, cannot update StopLimit`);
+            console.warn(`⚠️ [DEBUG] Re-buy total quantity is 0 for ${normalizedSymbol}, cannot update StopLimit`);
           }
         }
       }
@@ -5414,29 +5330,13 @@ async function handleManualBuyFilled(orderId, order, pending) {
         const { orderId: raceOrderId, order: raceOrder } = raceCheck;
         const raceStatus = (raceOrder?.Status || '').toUpperCase();
         if (isActiveOrderStatus(raceStatus) || ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(raceStatus)) {
-          console.log(`✅ [DEBUG] Found active StopLimit order ${raceOrderId} after race condition wait. Updating quantity...`);
-          // CRITICAL: Use actual position quantity, not order quantity
-          let position = positionsCache.get(normalizedSymbol);
-          let positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-          
-          if (positionQty > 0) {
-            const orderQty = parseInt(raceOrder.Legs?.[0]?.QuantityRemaining || raceOrder.Legs?.[0]?.QuantityOrdered || '0', 10) || 0;
-            if (positionQty <= orderQty) {
-              console.log(`⏳ [DEBUG] Position quantity (${positionQty}) may not include new buy. Waiting...`);
-              for (let i = 0; i < 3; i++) {
-                await new Promise(resolve => setTimeout(resolve, 400));
-                position = positionsCache.get(normalizedSymbol);
-                const newQty = position ? parseFloat(position.Quantity || '0') : 0;
-                if (newQty > positionQty) {
-                  positionQty = newQty;
-                  break;
-                }
-                positionQty = newQty;
-              }
-            }
-            
-            console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares`);
-            const result = await modifyOrderQuantity(raceOrderId, positionQty);
+          console.log(`✅ [DEBUG] Found active StopLimit order ${raceOrderId} after race condition wait. Re-buy: updating quantity (existing + new buy).`);
+          // Re-buy: add new bought quantity to existing stop-limit quantity
+          const raceExistingQty = parseInt(raceOrder.Legs?.[0]?.QuantityRemaining || raceOrder.Legs?.[0]?.QuantityOrdered || '0', 10) || 0;
+          const raceNewTotalQty = raceExistingQty + quantity;
+          if (raceNewTotalQty > 0) {
+            console.log(`📊 [REBUY] Updating StopLimit ${raceOrderId} for ${normalizedSymbol}: ${raceExistingQty} + ${quantity} = ${raceNewTotalQty}`);
+            const result = await modifyOrderQuantity(raceOrderId, raceNewTotalQty);
             console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
             
             if (result.success) {
@@ -5448,7 +5348,7 @@ async function handleManualBuyFilled(orderId, order, pending) {
               return;
             }
           } else {
-            console.warn(`⚠️ [DEBUG] Position quantity is 0 or not found for ${normalizedSymbol}, cannot update StopLimit`);
+            console.warn(`⚠️ [DEBUG] Re-buy total quantity is 0 for ${normalizedSymbol}, cannot update StopLimit`);
           }
         }
       }
@@ -5471,18 +5371,18 @@ async function handleManualBuyFilled(orderId, order, pending) {
       const isPending = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(finalStatus);
       
       if (isActive || isPending) {
-        console.log(`✅ [DEBUG] Absolute final check found existing StopLimit ${finalOrderId} (status: ${finalStatus}). Updating quantity...`);
-        // CRITICAL: Use actual position quantity, not order quantity
-        const position = positionsCache.get(normalizedSymbol);
-        const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-        if (positionQty > 0) {
-          console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares`);
-          const result = await modifyOrderQuantity(finalOrderId, positionQty);
+        console.log(`✅ [DEBUG] Absolute final check found existing StopLimit ${finalOrderId} (status: ${finalStatus}). Re-buy: updating quantity (existing + new buy).`);
+        // Re-buy: add new bought quantity to existing stop-limit quantity
+        const absFinalExistingQty = absoluteFinalCheck.quantity || 0;
+        const absFinalNewTotalQty = absFinalExistingQty + quantity;
+        if (absFinalNewTotalQty > 0) {
+          console.log(`📊 [REBUY] Updating StopLimit ${finalOrderId} for ${normalizedSymbol}: ${absFinalExistingQty} + ${quantity} = ${absFinalNewTotalQty}`);
+          const result = await modifyOrderQuantity(finalOrderId, absFinalNewTotalQty);
           console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
           // Order updated successfully - repository will be updated by WebSocket handler
           return;
         } else {
-          console.warn(`⚠️ [DEBUG] Position quantity is 0 or not found for ${normalizedSymbol}, cannot update StopLimit`);
+          console.warn(`⚠️ [DEBUG] Re-buy total quantity is 0 for ${normalizedSymbol}, cannot update StopLimit`);
         }
       }
     }
@@ -5491,14 +5391,16 @@ async function handleManualBuyFilled(orderId, order, pending) {
     // This is the absolute last check to prevent duplicate creation
     const repoCheckBeforeProgress = getActiveStopLimitOrder(normalizedSymbol);
     if (repoCheckBeforeProgress) {
-      console.log(`🛑 [DEBUG] CRITICAL: Repository check found active StopLimit ${repoCheckBeforeProgress.orderId} for ${normalizedSymbol} - aborting creation to prevent duplicate!`);
-      // Update quantity if needed
-      const position = positionsCache.get(normalizedSymbol);
-      const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-      if (positionQty > 0) {
-        const result = await modifyOrderQuantity(repoCheckBeforeProgress.orderId, positionQty);
+      console.log(`🛑 [DEBUG] CRITICAL: Repository check found active StopLimit ${repoCheckBeforeProgress.orderId} for ${normalizedSymbol} - re-buy: updating quantity (existing + new buy).`);
+      // Re-buy: add new bought quantity to existing stop-limit quantity
+      const repoProgLeg = repoCheckBeforeProgress.order?.Legs?.[0];
+      const repoProgExistingQty = parseInt(repoProgLeg?.QuantityRemaining || repoProgLeg?.QuantityOrdered || '0', 10) || 0;
+      const repoProgNewTotalQty = repoProgExistingQty + quantity;
+      if (repoProgNewTotalQty > 0) {
+        console.log(`📊 [REBUY] Updating StopLimit ${repoCheckBeforeProgress.orderId} for ${normalizedSymbol}: ${repoProgExistingQty} + ${quantity} = ${repoProgNewTotalQty}`);
+        const result = await modifyOrderQuantity(repoCheckBeforeProgress.orderId, repoProgNewTotalQty);
         if (result.success) {
-          console.log(`✅ [DEBUG] Updated existing StopLimit quantity to ${positionQty}`);
+          console.log(`✅ [DEBUG] Updated existing StopLimit quantity to ${repoProgNewTotalQty}`);
         }
       }
       return;
@@ -5522,13 +5424,15 @@ async function handleManualBuyFilled(orderId, order, pending) {
           console.log(`✅ [STOPLIMIT_REPO] Registered StopLimit ${dbCheck.orderId} from database for ${normalizedSymbol}`);
         }
         
-        // Update quantity if needed
-        const position = positionsCache.get(normalizedSymbol);
-        const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-        if (positionQty > 0) {
-          const result = await modifyOrderQuantity(dbCheck.orderId, positionQty);
+        // Re-buy: add new bought quantity to existing stop-limit quantity
+        const dbProgLeg = dbCheck.order?.Legs?.[0];
+        const dbProgExistingQty = parseInt(dbProgLeg?.QuantityRemaining || dbProgLeg?.QuantityOrdered || '0', 10) || 0;
+        const dbProgNewTotalQty = dbProgExistingQty + quantity;
+        if (dbProgNewTotalQty > 0) {
+          console.log(`📊 [REBUY] Updating StopLimit ${dbCheck.orderId} for ${normalizedSymbol} (from DB): ${dbProgExistingQty} + ${quantity} = ${dbProgNewTotalQty}`);
+          const result = await modifyOrderQuantity(dbCheck.orderId, dbProgNewTotalQty);
           if (result.success) {
-            console.log(`✅ [DEBUG] Updated existing StopLimit quantity to ${positionQty}`);
+            console.log(`✅ [DEBUG] Updated existing StopLimit quantity to ${dbProgNewTotalQty}`);
           }
         }
         return; // CRITICAL: Abort creation - order already exists in database
@@ -5582,11 +5486,13 @@ async function handleManualBuyFilled(orderId, order, pending) {
       // Check repository directly (most authoritative)
       const repoFinalCheck = getActiveStopLimitOrder(normalizedSymbol);
       if (repoFinalCheck) {
-        console.log(`🛑 [DEBUG] Repository final check found active StopLimit ${repoFinalCheck.orderId} - aborting creation!`);
-        const position = positionsCache.get(normalizedSymbol);
-        const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-        if (positionQty > 0) {
-          await modifyOrderQuantity(repoFinalCheck.orderId, positionQty);
+        console.log(`🛑 [DEBUG] Repository final check found active StopLimit ${repoFinalCheck.orderId} - re-buy: updating quantity (existing + new buy).`);
+        const repoFinalLeg = repoFinalCheck.order?.Legs?.[0];
+        const repoFinalExistingQty = parseInt(repoFinalLeg?.QuantityRemaining || repoFinalLeg?.QuantityOrdered || '0', 10) || 0;
+        const repoFinalNewTotalQty = repoFinalExistingQty + quantity;
+        if (repoFinalNewTotalQty > 0) {
+          console.log(`📊 [REBUY] Updating StopLimit ${repoFinalCheck.orderId} for ${normalizedSymbol}: ${repoFinalExistingQty} + ${quantity} = ${repoFinalNewTotalQty}`);
+          await modifyOrderQuantity(repoFinalCheck.orderId, repoFinalNewTotalQty);
         }
         // CRITICAL: Remove from guard before returning
         stopLimitCreationBySymbol.delete(normalizedSymbol);
@@ -5612,10 +5518,13 @@ async function handleManualBuyFilled(orderId, order, pending) {
             console.log(`✅ [STOPLIMIT_REPO] Registered StopLimit ${dbFinalCheck.orderId} from database for ${normalizedSymbol}`);
           }
           
-          const position = positionsCache.get(normalizedSymbol);
-          const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-          if (positionQty > 0) {
-            await modifyOrderQuantity(dbFinalCheck.orderId, positionQty);
+          // Re-buy: add new bought quantity to existing stop-limit quantity
+          const dbFinalLeg = dbFinalCheck.order?.Legs?.[0];
+          const dbFinalExistingQty = parseInt(dbFinalLeg?.QuantityRemaining || dbFinalLeg?.QuantityOrdered || '0', 10) || 0;
+          const dbFinalNewTotalQty = dbFinalExistingQty + quantity;
+          if (dbFinalNewTotalQty > 0) {
+            console.log(`📊 [REBUY] Updating StopLimit ${dbFinalCheck.orderId} for ${normalizedSymbol} (from DB): ${dbFinalExistingQty} + ${quantity} = ${dbFinalNewTotalQty}`);
+            await modifyOrderQuantity(dbFinalCheck.orderId, dbFinalNewTotalQty);
           }
           // CRITICAL: Remove from guard before returning
           stopLimitCreationBySymbol.delete(normalizedSymbol);
@@ -5633,31 +5542,13 @@ async function handleManualBuyFilled(orderId, order, pending) {
         const isPending = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(finalStatus);
         
         if (isActive || isPending) {
-          console.log(`✅ [DEBUG] Found existing StopLimit ${finalOrderId} in final check (status: ${finalStatus}). Updating quantity...`);
-          // CRITICAL: Use actual position quantity, not order quantity
-          // Wait a bit for position to update if needed
-          let position = positionsCache.get(normalizedSymbol);
-          let positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-          
-          if (positionQty > 0) {
-            const orderQty = parseInt(finalOrder.Legs?.[0]?.QuantityRemaining || finalOrder.Legs?.[0]?.QuantityOrdered || '0', 10) || 0;
-            // If position quantity doesn't seem updated, wait a bit
-            if (positionQty <= orderQty) {
-              console.log(`⏳ [DEBUG] Position quantity (${positionQty}) may not include new buy. Waiting...`);
-              for (let i = 0; i < 3; i++) {
-                await new Promise(resolve => setTimeout(resolve, 300));
-                position = positionsCache.get(normalizedSymbol);
-                const newQty = position ? parseFloat(position.Quantity || '0') : 0;
-                if (newQty > positionQty) {
-                  positionQty = newQty;
-                  break;
-                }
-                positionQty = newQty;
-              }
-            }
-            
-            console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares (order has: ${orderQty})`);
-            const result = await modifyOrderQuantity(finalOrderId, positionQty);
+          console.log(`✅ [DEBUG] Found existing StopLimit ${finalOrderId} in final check (status: ${finalStatus}). Re-buy: updating quantity (existing + new buy).`);
+          // Re-buy: add new bought quantity to existing stop-limit quantity
+          const finalCheckExistingQty = finalCheck.quantity || 0;
+          const finalCheckNewTotalQty = finalCheckExistingQty + quantity;
+          if (finalCheckNewTotalQty > 0) {
+            console.log(`📊 [REBUY] Updating StopLimit ${finalOrderId} for ${normalizedSymbol}: ${finalCheckExistingQty} + ${quantity} = ${finalCheckNewTotalQty}`);
+            const result = await modifyOrderQuantity(finalOrderId, finalCheckNewTotalQty);
             console.log(`📝 [DEBUG] Modify order result:`, JSON.stringify(result, null, 2));
             
             // CRITICAL: Validate result
@@ -5675,11 +5566,8 @@ async function handleManualBuyFilled(orderId, order, pending) {
             stopLimitCreationBySymbol.delete(normalizedSymbol);
             console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (updated existing order)`);
             return;
-            
-            // Order updated successfully - repository will be updated by WebSocket handler
-            return;
           } else {
-            console.warn(`⚠️ [DEBUG] Position quantity is 0 or not found for ${normalizedSymbol}, cannot update StopLimit`);
+            console.warn(`⚠️ [DEBUG] Re-buy total quantity is 0 for ${normalizedSymbol}, cannot update StopLimit`);
           }
         } else {
           console.log(`⚠️ [DEBUG] Final check found order ${finalOrderId} but status ${finalStatus} is not active/pending. Will create new.`);
@@ -5706,16 +5594,14 @@ async function handleManualBuyFilled(orderId, order, pending) {
           const isPending = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(stopLimitStatus);
           
           if (isActive || isPending) {
-            console.log(`🛑 [DEBUG] Found StopLimit order ${stopLimitId} (status: ${stopLimitStatus}) in active sells - updating instead of creating duplicate...`);
+            console.log(`🛑 [DEBUG] Found StopLimit order ${stopLimitId} (status: ${stopLimitStatus}) in active sells - re-buy: updating quantity (existing + new buy).`);
             
-            // Get position quantity
-            let position = positionsCache.get(normalizedSymbol);
-            let positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-            
-            if (positionQty > 0) {
-              const orderQty = parseInt(stopLimitOrder.order.Legs?.[0]?.QuantityRemaining || stopLimitOrder.order.Legs?.[0]?.QuantityOrdered || '0', 10) || 0;
-              console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares (order has: ${orderQty})`);
-              const result = await modifyOrderQuantity(stopLimitId, positionQty);
+            // Re-buy: add new bought quantity to existing stop-limit quantity
+            const stopLimitOrderQty = parseInt(stopLimitOrder.order.Legs?.[0]?.QuantityRemaining || stopLimitOrder.order.Legs?.[0]?.QuantityOrdered || '0', 10) || 0;
+            const stopLimitNewTotalQty = stopLimitOrderQty + quantity;
+            if (stopLimitNewTotalQty > 0) {
+              console.log(`📊 [REBUY] Updating StopLimit ${stopLimitId} for ${normalizedSymbol}: ${stopLimitOrderQty} + ${quantity} = ${stopLimitNewTotalQty}`);
+              const result = await modifyOrderQuantity(stopLimitId, stopLimitNewTotalQty);
               
               if (result.success) {
                 console.log(`✅ [DEBUG] Successfully updated StopLimit ${stopLimitId} - prevented duplicate creation`);
@@ -5784,17 +5670,14 @@ async function handleManualBuyFilled(orderId, order, pending) {
         const isPending = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED'].includes(absFinalStatus);
         
         if (isActive || isPending) {
-          console.log(`🛑 [DEBUG] CRITICAL: Found existing StopLimit ${absFinalOrderId} in absolute final check before creation! (status: ${absFinalStatus})`);
-          console.log(`🛑 [DEBUG] This should not happen - updating quantity instead of creating duplicate...`);
+          console.log(`🛑 [DEBUG] CRITICAL: Found existing StopLimit ${absFinalOrderId} in absolute final check before creation! (status: ${absFinalStatus}) - re-buy: updating quantity (existing + new buy).`);
           
-          // Get position quantity
-          let position = positionsCache.get(normalizedSymbol);
-          let positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-          
-          if (positionQty > 0) {
-            const orderQty = parseInt(absFinalOrder.Legs?.[0]?.QuantityRemaining || absFinalOrder.Legs?.[0]?.QuantityOrdered || '0', 10) || 0;
-            console.log(`📊 [DEBUG] Updating StopLimit quantity to match position: ${positionQty} shares (order has: ${orderQty})`);
-            const result = await modifyOrderQuantity(absFinalOrderId, positionQty);
+          // Re-buy: add new bought quantity to existing stop-limit quantity
+          const absFinalOrderQty = parseInt(absFinalOrder.Legs?.[0]?.QuantityRemaining || absFinalOrder.Legs?.[0]?.QuantityOrdered || '0', 10) || 0;
+          const absFinalNewTotalQty = absFinalOrderQty + quantity;
+          if (absFinalNewTotalQty > 0) {
+            console.log(`📊 [REBUY] Updating StopLimit ${absFinalOrderId} for ${normalizedSymbol}: ${absFinalOrderQty} + ${quantity} = ${absFinalNewTotalQty}`);
+            const result = await modifyOrderQuantity(absFinalOrderId, absFinalNewTotalQty);
             
             if (result.success) {
               console.log(`✅ [DEBUG] Successfully updated existing StopLimit ${absFinalOrderId} - prevented duplicate creation`);
@@ -5816,11 +5699,13 @@ async function handleManualBuyFilled(orderId, order, pending) {
       // CRITICAL: One more repository check right before creation (last chance to prevent duplicate)
       const lastRepoCheck = getActiveStopLimitOrder(normalizedSymbol);
       if (lastRepoCheck) {
-        console.log(`🛑 [DEBUG] LAST CHECK: Repository has active StopLimit ${lastRepoCheck.orderId} - aborting creation!`);
-        const position = positionsCache.get(normalizedSymbol);
-        const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
-        if (positionQty > 0) {
-          await modifyOrderQuantity(lastRepoCheck.orderId, positionQty);
+        console.log(`🛑 [DEBUG] LAST CHECK: Repository has active StopLimit ${lastRepoCheck.orderId} - re-buy: updating quantity (existing + new buy).`);
+        const lastRepoLeg = lastRepoCheck.order?.Legs?.[0];
+        const lastRepoExistingQty = parseInt(lastRepoLeg?.QuantityRemaining || lastRepoLeg?.QuantityOrdered || '0', 10) || 0;
+        const lastRepoNewTotalQty = lastRepoExistingQty + quantity;
+        if (lastRepoNewTotalQty > 0) {
+          console.log(`📊 [REBUY] Updating StopLimit ${lastRepoCheck.orderId} for ${normalizedSymbol}: ${lastRepoExistingQty} + ${quantity} = ${lastRepoNewTotalQty}`);
+          await modifyOrderQuantity(lastRepoCheck.orderId, lastRepoNewTotalQty);
         }
         // CRITICAL: Remove from guard before returning
         stopLimitCreationBySymbol.delete(normalizedSymbol);
