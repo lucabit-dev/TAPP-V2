@@ -4387,6 +4387,9 @@ async function createStopLimitSellOrder(symbol, quantity, buyPrice) {
     stop_price: stopPrice,
     limit_price: limitPrice
   };
+  // Calculate adjustment for logging (only used if not using tracker config)
+  const adjustment = useTrackerInitialStop ? null : getPriceAdjustment(price);
+  
   console.log(`📤 [DEBUG] Creating StopLimit SELL order for ${normalizedSymbol}:`, JSON.stringify({
     ...body,
     buy_price: `$${buy.toFixed(2)}`,
@@ -4396,7 +4399,8 @@ async function createStopLimitSellOrder(symbol, quantity, buyPrice) {
     limit_price: `$${limitPrice.toFixed(2)}`,
     calculation_method: useTrackerInitialStop ? 'tracker_initial_stop' : 'sections_buy_bot_main',
     tracker_group_id: matchedGroupId || null,
-    tracker_initial_stop_price: useTrackerInitialStop ? trackerInitialStopPrice : null
+    tracker_initial_stop_price: useTrackerInitialStop ? trackerInitialStopPrice : null,
+    tracker_initial_stop_offset: useTrackerInitialStop ? (stopLimitTrackerConfig.get(matchedGroupId)?.initialStopPrice || null) : null
   }, null, 2));
   
   const resp = await fetch(SECTIONS_BOT_ORDER_URL, {
@@ -4755,11 +4759,12 @@ async function handleManualBuyFilled(orderId, order, pending) {
   let existingPosition = positionsCache.get(normalizedSymbol);
   let hasExistingPosition = existingPosition && parseFloat(existingPosition.Quantity || '0') > 0;
   
-  // If position not found immediately, wait for positions WebSocket to update (up to 3 seconds)
+  // If position not found immediately, wait for positions WebSocket to update (up to 1.5 seconds)
   // This handles the race condition where buy order fills before position appears in cache
+  // REDUCED: Changed from 3 seconds (6 * 500ms) to 1.5 seconds (3 * 500ms) for faster StopLimit creation
   if (!hasExistingPosition) {
     console.log(`⏳ [DEBUG] Position not found in cache for ${normalizedSymbol} immediately. Waiting for positions WebSocket update...`);
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 3; i++) {
       await new Promise(resolve => setTimeout(resolve, 500)); // Wait 500ms between checks
       existingPosition = positionsCache.get(normalizedSymbol);
       hasExistingPosition = existingPosition && parseFloat(existingPosition.Quantity || '0') > 0;
@@ -4834,8 +4839,9 @@ async function handleManualBuyFilled(orderId, order, pending) {
       // Check repository for existing order
       const earlyPendingCheck = getActiveStopLimitOrder(normalizedSymbol);
       
-      // Wait for the pending order to be processed (up to 5 seconds)
-      for (let i = 0; i < 10; i++) {
+      // Wait for the pending order to be processed (up to 2 seconds)
+      // REDUCED: Changed from 5 seconds (10 * 500ms) to 2 seconds (4 * 500ms) for faster StopLimit creation
+      for (let i = 0; i < 4; i++) {
         await new Promise(resolve => setTimeout(resolve, 500));
         
         // Use unified search to check for existing order (more reliable than checking maps directly)
@@ -4994,10 +5000,10 @@ async function handleManualBuyFilled(orderId, order, pending) {
     // This ensures we catch orders regardless of where they are in the system
     console.log(`🔍 [DEBUG] Starting unified check for existing StopLimit for ${normalizedSymbol}...`);
     
-    // CRITICAL: Wait longer for repository to update if order was just created/ACK'd
+    // CRITICAL: Wait briefly for repository to update if order was just created/ACK'd
     // This prevents race conditions where we check before repository is updated
-    // Increased from 300ms to 1000ms to allow StopLimit orders to be registered
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    // REDUCED: Changed from 1000ms to 300ms for faster StopLimit creation
+    await new Promise(resolve => setTimeout(resolve, 300));
     
     // CRITICAL: Check repository FIRST (most authoritative source) before unified search
     const repoCheckBeforeUnified = getActiveStopLimitOrder(normalizedSymbol);
@@ -5071,10 +5077,11 @@ async function handleManualBuyFilled(orderId, order, pending) {
           }
         }
         
-        // If order is pending (not yet fully active), wait a moment for it to stabilize
+        // If order is pending (not yet fully active), wait briefly for it to stabilize
+        // REDUCED: Changed from 1000ms to 300ms for faster StopLimit creation
         if (isPending && !isActive) {
           console.log(`⏳ [DEBUG] Order ${existingOrderId} is pending (${currentStatus}), waiting for stabilization...`);
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          await new Promise(resolve => setTimeout(resolve, 300));
           // Re-fetch order to get latest status
           const updatedOrder = ordersCache.get(existingOrderId);
           if (updatedOrder) {
@@ -5146,8 +5153,9 @@ async function handleManualBuyFilled(orderId, order, pending) {
     // Check if StopLimit creation is already in progress for this symbol (prevent loops)
     if (stopLimitCreationBySymbol.has(normalizedSymbol)) {
       console.log(`⏸️ [DEBUG] StopLimit creation already in progress for ${normalizedSymbol}, waiting...`);
-      // Wait a bit and check again using unified search
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Wait briefly and check again using unified search
+      // REDUCED: Changed from 1000ms to 300ms for faster StopLimit creation
+      await new Promise(resolve => setTimeout(resolve, 300));
       const waitCheck = findExistingStopLimitSellForSymbol(normalizedSymbol);
       if (waitCheck) {
         const { orderId: waitOrderId, order: waitOrder } = waitCheck;
@@ -5197,7 +5205,8 @@ async function handleManualBuyFilled(orderId, order, pending) {
     // This can happen if two different buy orders for the same symbol fill at nearly the same time
     if (stopLimitCreationBySymbol.has(normalizedSymbol)) {
       console.log(`⚠️ [DEBUG] StopLimit creation already in progress for ${normalizedSymbol} (race condition detected). Waiting...`);
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // REDUCED: Changed from 1000ms to 300ms for faster StopLimit creation
+      await new Promise(resolve => setTimeout(resolve, 300));
       // Use unified search to check again after waiting
       const raceCheck = findExistingStopLimitSellForSymbol(normalizedSymbol);
       if (raceCheck) {
@@ -5250,8 +5259,8 @@ async function handleManualBuyFilled(orderId, order, pending) {
     
     // CRITICAL: One final check before marking as in progress
     // This catches any orders that might have been created between our checks and now
-    // Wait a bit more to ensure repository is fully updated
-    await new Promise(resolve => setTimeout(resolve, 500));
+    // REDUCED: Changed from 500ms to 200ms for faster StopLimit creation
+    await new Promise(resolve => setTimeout(resolve, 200));
     
     const absoluteFinalCheck = findExistingStopLimitSellForSymbol(normalizedSymbol);
     if (absoluteFinalCheck) {
