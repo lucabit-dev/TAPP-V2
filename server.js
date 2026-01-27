@@ -3365,7 +3365,7 @@ function connectOrdersWebSocket() {
       }
     });
     
-    ordersWs.on('message', (data) => {
+    ordersWs.on('message', async (data) => {
       try {
         const messageStr = Buffer.isBuffer(data) ? data.toString('utf8') : data.toString();
         const dataObj = JSON.parse(messageStr);
@@ -3434,6 +3434,7 @@ function connectOrdersWebSocket() {
             // CRITICAL: If StopLimit was REJECTED with "remaining on sell orders" message,
             // it means there's already an active stop-loss order. Find and register it.
             if (status === 'REJ' || status === 'REJECTED') {
+              const stopLimitSymbol = (symbol || '').toUpperCase();
               const rejectReason = (order.RejectReason || '').toLowerCase();
               if (rejectReason.includes('remaining on sell orders') || rejectReason.includes('remaining on sell')) {
                 console.log(`⚠️ [DEBUG] StopLimit ${orderId} rejected for ${stopLimitSymbol} - searching for existing active stop-loss order...`);
