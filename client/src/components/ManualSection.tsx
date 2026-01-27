@@ -208,7 +208,12 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
     }
   };
 
-  const handleBuyClick = useCallback(async (symbol: string | null | undefined) => {
+  const handleBuyClick = useCallback(async (symbol: string | null | undefined, e?: React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    
     if (!symbol) return;
     
     const cleanSymbol = String(symbol).trim().toUpperCase();
@@ -217,6 +222,7 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
     if (buyingSymbols.has(cleanSymbol)) return; // Prevent duplicate clicks
     
     // CRITICAL: Set loading state IMMEDIATELY and synchronously
+    // Use multiple state updates in sequence to ensure React processes them
     setBuyingSymbols(prev => {
       if (prev.has(cleanSymbol)) return prev; // Already processing
       const newSet = new Set(prev);
@@ -225,8 +231,9 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
     });
     setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: null }));
     
-    // Use setTimeout(0) to ensure state update is flushed before async work
-    await new Promise(resolve => setTimeout(resolve, 0));
+    // Force a microtask to ensure state is updated before async work
+    // This ensures the button's disabled state is applied immediately
+    await Promise.resolve();
     
     try {
       const resp = await fetchWithAuth(`${API_BASE_URL}/buys/test`, {
@@ -523,10 +530,8 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                             return (
                               <button
                                 onClick={(e) => {
-                                  e.preventDefault();
-                                  e.stopPropagation();
                                   if (!isDisabled) {
-                                    handleBuyClick(symbolVal);
+                                    handleBuyClick(symbolVal, e);
                                   }
                                 }}
                                 disabled={isDisabled}

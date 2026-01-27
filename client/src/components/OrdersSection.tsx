@@ -327,7 +327,12 @@ const OrdersSection: React.FC = () => {
   };
 
   // Cancel order handler - optimized for immediate UI feedback
-  const handleCancelOrder = useCallback(async (orderId: string) => {
+  const handleCancelOrder = useCallback(async (orderId: string, e?: React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    
     // Early return check BEFORE setting state
     if (cancelingOrders.has(orderId)) return; // Already canceling
     
@@ -339,8 +344,9 @@ const OrdersSection: React.FC = () => {
       return newSet;
     });
     
-    // Use setTimeout(0) to ensure state update is flushed before async work
-    await new Promise(resolve => setTimeout(resolve, 0));
+    // Force a microtask to ensure state is updated before async work
+    // This ensures the button's disabled state is applied immediately
+    await Promise.resolve();
     
     try {
       const response = await fetchWithAuth(`${API_BASE_URL}/orders/${encodeURIComponent(orderId)}`, {
@@ -510,11 +516,7 @@ const OrdersSection: React.FC = () => {
                         <div className="col-span-1 text-center">
                           {canCancel ? (
                             <button
-                              onClick={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                handleCancelOrder(order.OrderID);
-                              }}
+                              onClick={(e) => handleCancelOrder(order.OrderID, e)}
                               disabled={isCanceling}
                               className="px-2 py-1 text-xs font-semibold rounded transition-all duration-75 bg-[#f87171] hover:bg-[#ef4444] active:scale-95 text-[#14130e] disabled:bg-[#2a2820] disabled:text-[#eae9e9] disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none"
                               title={isCanceling ? 'Cancelling...' : 'Cancel order'}

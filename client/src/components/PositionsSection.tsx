@@ -321,7 +321,12 @@ const PositionsWithStopLimitSection: React.FC = () => {
     return sum + (isNaN(pl) ? 0 : pl);
   }, 0), [mergedPositions]);
 
-  const handleSell = useCallback(async (position: Position) => {
+  const handleSell = useCallback(async (position: Position, e?: React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    
     const positionId = position.PositionID;
     const symbol = position.Symbol?.trim().toUpperCase();
     const quantity = parseInt(position.Quantity || '0', 10);
@@ -345,8 +350,9 @@ const PositionsWithStopLimitSection: React.FC = () => {
       return newSet;
     });
     
-    // Use setTimeout(0) to ensure state update is flushed before async work
-    await new Promise(resolve => setTimeout(resolve, 0));
+    // Force a microtask to ensure state is updated before async work
+    // This ensures the button's disabled state is applied immediately
+    await Promise.resolve();
     
     try {
       const response = await fetchWithAuth(`${API_BASE_URL}/sell`, {
@@ -777,11 +783,7 @@ const PositionsWithStopLimitSection: React.FC = () => {
                         {/* Sell Button */}
                         <div className="text-center">
                           <button
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              handleSell(position);
-                            }}
+                            onClick={(e) => handleSell(position, e)}
                             disabled={sellingPositions.has(position.PositionID)}
                             className={`px-2 py-1 rounded text-xs font-medium transition-all duration-75 ${
                               sellingPositions.has(position.PositionID)

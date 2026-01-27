@@ -87,6 +87,7 @@ const mongoose = require('mongoose');
 connectDatabase()
   .then(() => {
     loadManualWeightsFromDb();
+    loadStopLimitTrackerConfigFromDb();
     initializeCachePersistence();
   })
   .catch(() => {
@@ -5942,7 +5943,7 @@ app.get('/api/stoplimit-tracker/config', requireAuth, (req, res) => {
   }
 });
 
-app.post('/api/stoplimit-tracker/config', requireAuth, (req, res) => {
+app.post('/api/stoplimit-tracker/config', requireAuth, async (req, res) => {
   try {
     const { groups } = req.body;
     
@@ -5973,6 +5974,9 @@ app.post('/api/stoplimit-tracker/config', requireAuth, (req, res) => {
         enabled
       });
     });
+    
+    // Save to MongoDB
+    await saveStopLimitTrackerConfigToDb();
     
     console.log(`✅ StopLimit tracker config updated: ${groups.length} group(s)`);
     res.json({ success: true, data: { groups: groups.length } });
@@ -7727,6 +7731,73 @@ const manualListIndicators = new Map(); // symbol -> indicators
 let manualUpdateTimeout = null;
 
 const isDbConnected = () => mongoose.connection && mongoose.connection.readyState === 1;
+
+// Load StopLimit Tracker Config from MongoDB
+async function loadStopLimitTrackerConfigFromDb() {
+  if (!isDbConnected()) {
+    console.warn('⚠️ MongoDB not connected; StopLimit tracker config kept in memory only');
+    return;
+  }
+  
+  try {
+    const { StopLimitTrackerConfig, STOPLIMIT_TRACKER_CONFIG_ID } = require('./models/stopLimitTrackerConfig.model');
+    const doc = await StopLimitTrackerConfig.findById(STOPLIMIT_TRACKER_CONFIG_ID);
+    
+    if (doc && doc.groups && Array.isArray(doc.groups)) {
+      stopLimitTrackerConfig.clear();
+      doc.groups.forEach(group => {
+        if (group.groupId) {
+          stopLimitTrackerConfig.set(group.groupId, {
+            minPrice: parseFloat(group.minPrice || '0'),
+            maxPrice: parseFloat(group.maxPrice || '999999'),
+            initialStopPrice: parseFloat(group.initialStopPrice || '0'),
+            enabled: group.enabled !== false,
+            steps: Array.isArray(group.steps) ? group.steps.map(step => ({
+              pnl: parseFloat(step.pnl || '0'),
+              stop: parseFloat(step.stop || '0')
+            })) : []
+          });
+        }
+      });
+      console.log(`✅ Loaded StopLimit tracker config from DB: ${doc.groups.length} group(s)`);
+    } else {
+      console.log('📋 No StopLimit tracker config found in DB, using empty config');
+    }
+  } catch (err) {
+    console.error('❌ Error loading StopLimit tracker config from DB:', err.message);
+  }
+}
+
+// Save StopLimit Tracker Config to MongoDB
+async function saveStopLimitTrackerConfigToDb() {
+  if (!isDbConnected()) {
+    console.warn('⚠️ MongoDB not connected; StopLimit tracker config kept in memory only');
+    return;
+  }
+  
+  try {
+    const { StopLimitTrackerConfig, STOPLIMIT_TRACKER_CONFIG_ID } = require('./models/stopLimitTrackerConfig.model');
+    
+    const groups = Array.from(stopLimitTrackerConfig.entries()).map(([groupId, group]) => ({
+      groupId,
+      minPrice: group.minPrice,
+      maxPrice: group.maxPrice,
+      initialStopPrice: group.initialStopPrice,
+      enabled: group.enabled,
+      steps: group.steps || []
+    }));
+    
+    await StopLimitTrackerConfig.findByIdAndUpdate(
+      STOPLIMIT_TRACKER_CONFIG_ID,
+      { groups },
+      { upsert: true, new: true }
+    );
+    
+    console.log(`✅ Saved StopLimit tracker config to DB: ${groups.length} group(s)`);
+  } catch (err) {
+    console.error('❌ Error saving StopLimit tracker config to DB:', err.message);
+  }
+}
 
 async function loadManualWeightsFromDb() {
   if (!isDbConnected()) {
