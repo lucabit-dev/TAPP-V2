@@ -4724,6 +4724,28 @@ async function handleManualBuyFilled(orderId, order, pending) {
   stopLimitCreationInProgress.add(orderId);
   
   try {
+    // CRITICAL: Check for ANY pending StopLimit orders in cache FIRST (before symbol guard)
+    // This catches orders that were just created but not yet ACK'd
+    const pendingStopLimitCheck = findExistingStopLimitSellForSymbol(normalizedSymbol);
+    if (pendingStopLimitCheck) {
+      const { orderId: pendingOrderId, order: pendingOrder } = pendingStopLimitCheck;
+      const pendingStatus = (pendingOrder?.Status || '').toUpperCase();
+      const isPending = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED', 'PENDING'].includes(pendingStatus);
+      
+      if (isPending) {
+        console.log(`🛑 [DEBUG] Found PENDING StopLimit order ${pendingOrderId} (status: ${pendingStatus}) for ${normalizedSymbol} - aborting creation to prevent duplicate!`);
+        // Update quantity if needed
+        const position = positionsCache.get(normalizedSymbol);
+        const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+        if (positionQty > 0) {
+          modifyOrderQuantity(pendingOrderId, positionQty).catch(err => {
+            console.error(`❌ [DEBUG] Error updating pending StopLimit quantity:`, err);
+          });
+        }
+        return; // CRITICAL: Exit early if pending order exists
+      }
+    }
+    
     // CRITICAL: Early check - if StopLimit creation is already in progress for THIS symbol, wait
     // This prevents race conditions when multiple buys of the same symbol happen quickly
     if (stopLimitCreationBySymbol.has(normalizedSymbol)) {
@@ -4891,9 +4913,10 @@ async function handleManualBuyFilled(orderId, order, pending) {
     // This ensures we catch orders regardless of where they are in the system
     console.log(`🔍 [DEBUG] Starting unified check for existing StopLimit for ${normalizedSymbol}...`);
     
-    // CRITICAL: Wait a moment for repository to update if order was just created/ACK'd
+    // CRITICAL: Wait longer for repository to update if order was just created/ACK'd
     // This prevents race conditions where we check before repository is updated
-    await new Promise(resolve => setTimeout(resolve, 300));
+    // Increased from 300ms to 1000ms to allow StopLimit orders to be registered
+    await new Promise(resolve => setTimeout(resolve, 1000));
     
     // CRITICAL: Check repository FIRST (most authoritative source) before unified search
     const repoCheckBeforeUnified = getActiveStopLimitOrder(normalizedSymbol);
@@ -4909,6 +4932,28 @@ async function handleManualBuyFilled(orderId, order, pending) {
         }
       }
       return; // CRITICAL: Exit early if order exists in repository
+    }
+    
+    // CRITICAL: Double-check for pending orders in cache (not just repository)
+    // This catches orders that were just created but not yet registered in repository
+    const doubleCheckPending = findExistingStopLimitSellForSymbol(normalizedSymbol);
+    if (doubleCheckPending) {
+      const { orderId: doubleCheckOrderId, order: doubleCheckOrder } = doubleCheckPending;
+      const doubleCheckStatus = (doubleCheckOrder?.Status || '').toUpperCase();
+      const isPendingOrActive = ['ACK', 'DON', 'REC', 'QUE', 'QUEUED', 'PENDING'].includes(doubleCheckStatus) || isActiveOrderStatus(doubleCheckStatus);
+      
+      if (isPendingOrActive) {
+        console.log(`🛑 [DEBUG] Double-check found active/pending StopLimit order ${doubleCheckOrderId} (status: ${doubleCheckStatus}) for ${normalizedSymbol} - aborting creation!`);
+        // Update quantity if needed
+        const position = positionsCache.get(normalizedSymbol);
+        const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+        if (positionQty > 0) {
+          modifyOrderQuantity(doubleCheckOrderId, positionQty).catch(err => {
+            console.error(`❌ [DEBUG] Error updating double-check StopLimit quantity:`, err);
+          });
+        }
+        return; // CRITICAL: Exit early if pending/active order exists
+      }
     }
     
     const existingStopLimit = findExistingStopLimitSellForSymbol(normalizedSymbol);
