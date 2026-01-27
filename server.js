@@ -3204,6 +3204,7 @@ function connectPositionsWebSocket() {
           
           // Clean up in-progress creation flag
           stopLimitCreationBySymbol.delete(normalizedSymbol);
+        console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (after creation)`);
           
           // CRITICAL: Mark symbol as recently sold to prevent StopLimit creation loops
           recentlySoldSymbols.set(normalizedSymbol, Date.now());
@@ -3357,6 +3358,15 @@ function connectOrdersWebSocket() {
           const legSide = (order.Legs?.[0]?.BuyOrSell || '').toUpperCase();
           if ((orderType === 'STOPLIMIT' || orderType === 'STOP_LIMIT') && legSide === 'SELL') {
             registerStopLimitOrder(order);
+            
+            // CRITICAL: If StopLimit was just ACK'd and handleManualBuyFilled is in progress for this symbol,
+            // remove it from the guard to prevent duplicate creation
+            const stopLimitSymbol = (symbol || '').toUpperCase();
+            if (status === 'ACK' && stopLimitCreationBySymbol.has(stopLimitSymbol)) {
+              console.log(`🛑 [DEBUG] StopLimit ${orderId} ACK'd for ${stopLimitSymbol} - removing from creation guard to prevent duplicate!`);
+              stopLimitCreationBySymbol.delete(stopLimitSymbol);
+              console.log(`🔓 [DEBUG] Removed ${stopLimitSymbol} from stopLimitCreationBySymbol guard (StopLimit ACK'd)`);
+            }
           }
 
           // When a tracked manual BUY reaches FLL/FIL: create or modify StopLimit SELL
@@ -4554,7 +4564,28 @@ async function handleManualBuyFilled(orderId, order, pending) {
     return;
   }
   
-  console.log(`🎯 [DEBUG] handleManualBuyFilled called for order ${orderId}`);
+  const symbol = (pending.symbol || (order.Legs?.[0]?.Symbol || '')).toString().toUpperCase();
+  const normalizedSymbol = symbol;
+  
+  // CRITICAL: Symbol-level guard - prevent multiple StopLimit creations for the same symbol
+  // This must be checked BEFORE any async operations
+  if (stopLimitCreationBySymbol.has(normalizedSymbol)) {
+    console.log(`🛑 [DEBUG] StopLimit creation already in progress for symbol ${normalizedSymbol} (order ${orderId}), aborting to prevent duplicate!`);
+    // Check repository - if StopLimit exists, update quantity instead
+    const existingRepoOrder = getActiveStopLimitOrder(normalizedSymbol);
+    if (existingRepoOrder) {
+      console.log(`✅ [DEBUG] Found existing StopLimit ${existingRepoOrder.orderId} in repository for ${normalizedSymbol} - updating quantity`);
+      const position = positionsCache.get(normalizedSymbol);
+      const positionQty = position ? parseFloat(position.Quantity || '0') : 0;
+      if (positionQty > 0) {
+        modifyOrderQuantity(existingRepoOrder.orderId, positionQty).catch(err => {
+          console.error(`❌ [DEBUG] Error updating StopLimit quantity:`, err);
+        });
+      }
+    }
+    return; // CRITICAL: Exit early if symbol is already being processed
+  }
+  
   console.log(`🎯 [DEBUG] Order object:`, JSON.stringify({
     OrderID: order.OrderID,
     Status: order.Status,
@@ -4564,9 +4595,6 @@ async function handleManualBuyFilled(orderId, order, pending) {
     Legs: order.Legs
   }, null, 2));
   console.log(`🎯 [DEBUG] Pending data:`, JSON.stringify(pending, null, 2));
-  
-  const symbol = (pending.symbol || (order.Legs?.[0]?.Symbol || '')).toString().toUpperCase();
-  const normalizedSymbol = symbol; // Already normalized from toUpperCase() above
   const leg = order.Legs && order.Legs[0] ? order.Legs[0] : null;
   const quantity = Math.floor(Number(pending.quantity || leg?.ExecQuantity || leg?.QuantityOrdered || 0)) || 0;
   
@@ -5215,7 +5243,10 @@ async function handleManualBuyFilled(orderId, order, pending) {
     }
     
     // Mark symbol as in progress - CRITICAL: Do this AFTER all checks to prevent race conditions
+    // CRITICAL: Add symbol to guard BEFORE creating order
+    // This prevents other calls from creating duplicate StopLimit orders
     stopLimitCreationBySymbol.add(normalizedSymbol);
+    console.log(`🔒 [DEBUG] Added ${normalizedSymbol} to stopLimitCreationBySymbol guard`);
     console.log(`🔒 [DEBUG] Marked ${normalizedSymbol} as in progress for StopLimit creation`);
     console.log(`📊 [DEBUG] Current state - Repository: ${stopLimitOrderRepository.size} entries, In Progress: ${stopLimitCreationBySymbol.size} symbols`);
     
@@ -5264,6 +5295,9 @@ async function handleManualBuyFilled(orderId, order, pending) {
         if (positionQty > 0) {
           await modifyOrderQuantity(repoFinalCheck.orderId, positionQty);
         }
+        // CRITICAL: Remove from guard before returning
+        stopLimitCreationBySymbol.delete(normalizedSymbol);
+        console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (found in repository)`);
         return;
       }
       
@@ -5308,8 +5342,16 @@ async function handleManualBuyFilled(orderId, order, pending) {
               console.error(`❌ [DEBUG] Failed to modify StopLimit order ${finalOrderId} in final check: ${result.error}`);
               // Don't create new - the order exists, just modification failed
               // This prevents duplicate creation
+              // CRITICAL: Remove from guard before returning
+              stopLimitCreationBySymbol.delete(normalizedSymbol);
+              console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (modification failed)`);
               return;
             }
+            
+            // CRITICAL: Remove from guard after successful update
+            stopLimitCreationBySymbol.delete(normalizedSymbol);
+            console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (updated existing order)`);
+            return;
             
             // Order updated successfully - repository will be updated by WebSocket handler
             return;
@@ -5522,6 +5564,7 @@ async function handleManualBuyFilled(orderId, order, pending) {
       // Increased to 5 seconds to prevent race conditions when multiple buys happen quickly
       setTimeout(() => {
         stopLimitCreationBySymbol.delete(normalizedSymbol);
+        console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (after creation)`);
         console.log(`🧹 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol (guard released)`);
       }, 5000);
     }
@@ -6478,7 +6521,8 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
             console.log(`✅ StopLimit order ${stopLimitOrderId} cancelled successfully for ${normalizedSymbol}`);
             // Remove from repository IMMEDIATELY
             stopLimitOrderRepository.delete(normalizedSymbol);
-            stopLimitCreationBySymbol.delete(normalizedSymbol); // Also remove from in-progress
+            stopLimitCreationBySymbol.delete(normalizedSymbol);
+        console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (after creation)`); // Also remove from in-progress
             // Remove from cache
             ordersCache.delete(stopLimitOrderId);
             if (cachePersistenceService) {
@@ -6490,18 +6534,21 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
             // Even if cancellation failed, remove from repository to prevent loops
             stopLimitOrderRepository.delete(normalizedSymbol);
             stopLimitCreationBySymbol.delete(normalizedSymbol);
+        console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (after creation)`);
           }
         } catch (cancelErr) {
           console.error(`❌ Error cancelling StopLimit order ${stopLimitOrderId} for ${normalizedSymbol}:`, cancelErr.message);
           // Even on error, remove from repository to prevent loops
           stopLimitOrderRepository.delete(normalizedSymbol);
           stopLimitCreationBySymbol.delete(normalizedSymbol);
+        console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (after creation)`);
         }
       } else {
         console.log(`ℹ️ No active StopLimit order found in repository for ${normalizedSymbol}`);
         // Clean up repository and in-progress flags
         stopLimitOrderRepository.delete(normalizedSymbol);
         stopLimitCreationBySymbol.delete(normalizedSymbol);
+        console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (after creation)`);
       }
       
       // Helper function to find active sell orders in the global orders cache
@@ -6617,6 +6664,7 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
                 // Remove from repository (single source of truth)
                 stopLimitOrderRepository.delete(normalizedSymbol);
                 stopLimitCreationBySymbol.delete(normalizedSymbol);
+        console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (after creation)`);
                 ordersCache.delete(stopLimitId);
                 if (cachePersistenceService) {
                   cachePersistenceService.scheduleOrderSave(stopLimitId);
@@ -6754,6 +6802,7 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
               // Remove from repository (single source of truth)
               stopLimitOrderRepository.delete(normalizedSymbol);
               stopLimitCreationBySymbol.delete(normalizedSymbol);
+        console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (after creation)`);
               ordersCache.delete(finalStopLimitId);
               if (cachePersistenceService) {
                 cachePersistenceService.scheduleOrderSave(finalStopLimitId);
@@ -6801,6 +6850,7 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
         console.log(`🧹 [STOPLIMIT_REPO] Final cleanup: Removing StopLimit from repository for ${normalizedSymbol} after manual sell (order ${finalRepoCheck.orderId})`);
         stopLimitOrderRepository.delete(normalizedSymbol);
         stopLimitCreationBySymbol.delete(normalizedSymbol);
+        console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (after creation)`);
         
         // CRITICAL: Mark symbol as recently sold to prevent StopLimit creation loops
         recentlySoldSymbols.set(normalizedSymbol, Date.now());
@@ -6811,6 +6861,7 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
         console.log(`🏷️ [DEBUG] Marked ${normalizedSymbol} as recently sold (no StopLimit found)`);
         // Also clean up in-progress flag
         stopLimitCreationBySymbol.delete(normalizedSymbol);
+        console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (after creation)`);
       }
       
       // CRITICAL: Clean up any cancelled/filled StopLimit orders in cache for this symbol
