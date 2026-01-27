@@ -4302,16 +4302,34 @@ async function createStopLimitSellOrder(symbol, quantity, buyPrice) {
   // If tracker config has initialStopPrice, use it to calculate limit_price
   let useTrackerInitialStop = false;
   let trackerInitialStopPrice = 0;
+  let matchedGroupId = null;
+  
+  // Debug: Log all tracker config groups
+  console.log(`🔍 [STOPLIMIT_TRACKER] Checking tracker config for ${normalizedSymbol} (buy price: ${buy})`);
+  console.log(`🔍 [STOPLIMIT_TRACKER] Tracker config has ${stopLimitTrackerConfig.size} group(s)`);
   
   for (const [groupId, group] of stopLimitTrackerConfig.entries()) {
-    if (!group.enabled) continue;
+    console.log(`🔍 [STOPLIMIT_TRACKER] Checking group ${groupId}: enabled=${group.enabled}, minPrice=${group.minPrice}, maxPrice=${group.maxPrice}, initialStopPrice=${group.initialStopPrice}`);
+    
+    if (!group.enabled) {
+      console.log(`⏭️ [STOPLIMIT_TRACKER] Group ${groupId} is disabled, skipping`);
+      continue;
+    }
+    
     if (buy >= group.minPrice && buy <= group.maxPrice && group.initialStopPrice > 0) {
       // Use the group's initial stop_price
       trackerInitialStopPrice = group.initialStopPrice;
       useTrackerInitialStop = true;
-      console.log(`📊 [STOPLIMIT_TRACKER] Using initial stop_price ${trackerInitialStopPrice} from group ${groupId} for ${normalizedSymbol} (buy price: ${buy})`);
+      matchedGroupId = groupId;
+      console.log(`✅ [STOPLIMIT_TRACKER] MATCHED! Using initial stop_price ${trackerInitialStopPrice} from group ${groupId} for ${normalizedSymbol} (buy price: ${buy}, range: ${group.minPrice}-${group.maxPrice})`);
       break;
+    } else {
+      console.log(`❌ [STOPLIMIT_TRACKER] Group ${groupId} doesn't match: buy=${buy}, range=${group.minPrice}-${group.maxPrice}, initialStopPrice=${group.initialStopPrice}`);
     }
+  }
+  
+  if (!useTrackerInitialStop) {
+    console.log(`⚠️ [STOPLIMIT_TRACKER] No matching tracker config found for ${normalizedSymbol} (buy price: ${buy}). Using default sections-buy-bot-main logic.`);
   }
   
   // Calculate stop_price (sections-buy-bot-main: stop_price = limit_price * 1.002)
@@ -4345,7 +4363,9 @@ async function createStopLimitSellOrder(symbol, quantity, buyPrice) {
     price_adjustment: adjustment,
     stop_price: `$${stopPrice.toFixed(2)}`,
     limit_price: `$${limitPrice.toFixed(2)}`,
-    calculation_method: useTrackerInitialStop ? 'tracker_initial_stop' : 'sections_buy_bot_main'
+    calculation_method: useTrackerInitialStop ? 'tracker_initial_stop' : 'sections_buy_bot_main',
+    tracker_group_id: matchedGroupId || null,
+    tracker_initial_stop_price: useTrackerInitialStop ? trackerInitialStopPrice : null
   }, null, 2));
   
   const resp = await fetch(SECTIONS_BOT_ORDER_URL, {
@@ -7798,16 +7818,23 @@ async function loadStopLimitTrackerConfigFromDb() {
       stopLimitTrackerConfig.clear();
       doc.groups.forEach(group => {
         if (group.groupId) {
+          const minPrice = parseFloat(group.minPrice || '0');
+          const maxPrice = parseFloat(group.maxPrice || '999999');
+          const initialStopPrice = parseFloat(group.initialStopPrice || '0');
+          const enabled = group.enabled !== false;
+          
           stopLimitTrackerConfig.set(group.groupId, {
-            minPrice: parseFloat(group.minPrice || '0'),
-            maxPrice: parseFloat(group.maxPrice || '999999'),
-            initialStopPrice: parseFloat(group.initialStopPrice || '0'),
-            enabled: group.enabled !== false,
+            minPrice,
+            maxPrice,
+            initialStopPrice,
+            enabled,
             steps: Array.isArray(group.steps) ? group.steps.map(step => ({
               pnl: parseFloat(step.pnl || '0'),
               stop: parseFloat(step.stop || '0')
             })) : []
           });
+          
+          console.log(`📊 [STOPLIMIT_TRACKER] Loaded group ${group.groupId}: enabled=${enabled}, minPrice=${minPrice}, maxPrice=${maxPrice}, initialStopPrice=${initialStopPrice}, steps=${group.steps?.length || 0}`);
         }
       });
       console.log(`✅ Loaded StopLimit tracker config from DB: ${doc.groups.length} group(s)`);
@@ -7816,6 +7843,7 @@ async function loadStopLimitTrackerConfigFromDb() {
     }
   } catch (err) {
     console.error('❌ Error loading StopLimit tracker config from DB:', err.message);
+    console.error('❌ Stack:', err.stack);
   }
 }
 
