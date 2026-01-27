@@ -4334,14 +4334,18 @@ async function createStopLimitSellOrder(symbol, quantity, buyPrice) {
     
     // Check if buy price falls within this group's price range
     const buyPriceInRange = buy >= group.minPrice && buy <= group.maxPrice;
-    const hasInitialStopPrice = group.initialStopPrice > 0;
+    // CRITICAL: initialStopPrice is an OFFSET (difference), not an absolute price
+    // It can be negative (e.g., -0.15 means stop_price = buy_price - 0.15)
+    const hasInitialStopPrice = group.initialStopPrice != null && group.initialStopPrice !== 0;
     
     if (buyPriceInRange && hasInitialStopPrice) {
-      // Use the group's initial stop_price - TRACKER CONFIG TAKES PRIORITY
-      trackerInitialStopPrice = group.initialStopPrice;
+      // CRITICAL: initialStopPrice is an OFFSET from buy price, not an absolute price
+      // Example: buy=$5.50, initialStopPrice=-0.15 → stop_price = $5.50 + (-0.15) = $5.35
+      trackerInitialStopPrice = buy + group.initialStopPrice;
       useTrackerInitialStop = true;
       matchedGroupId = groupId;
-      console.log(`✅ [STOPLIMIT_TRACKER] MATCHED! Using initial stop_price ${trackerInitialStopPrice} from group ${groupId} for ${normalizedSymbol} (buy price: ${buy}, range: ${group.minPrice}-${group.maxPrice})`);
+      console.log(`✅ [STOPLIMIT_TRACKER] MATCHED! Using initial stop_price offset ${group.initialStopPrice} from group ${groupId} for ${normalizedSymbol}`);
+      console.log(`✅ [STOPLIMIT_TRACKER] Calculated stop_price: ${buy} + ${group.initialStopPrice} = ${trackerInitialStopPrice} (buy price: ${buy}, range: ${group.minPrice}-${group.maxPrice})`);
       break;
     } else {
       console.log(`❌ [STOPLIMIT_TRACKER] Group ${groupId} doesn't match: buy=${buy}, range=${group.minPrice}-${group.maxPrice}, initialStopPrice=${group.initialStopPrice}, buyPriceInRange=${buyPriceInRange}, hasInitialStopPrice=${hasInitialStopPrice}`);
@@ -4353,11 +4357,12 @@ async function createStopLimitSellOrder(symbol, quantity, buyPrice) {
   let limitPrice;
   
   if (useTrackerInitialStop) {
-    // TRACKER CONFIG: Use initial stop_price from tracker config
-    stopPrice = trackerInitialStopPrice;
+    // TRACKER CONFIG: Use initial stop_price offset from tracker config
+    // trackerInitialStopPrice is already calculated as: buy + initialStopPrice (offset)
+    stopPrice = Math.max(0, trackerInitialStopPrice);
     // Calculate limit_price from stop_price (limit_price = stop_price / 1.002)
     limitPrice = Math.max(0, stopPrice / 1.002);
-    console.log(`📊 [STOPLIMIT_TRACKER] Using tracker config values: stop_price=${stopPrice}, limit_price=${limitPrice} (calculated from stop_price / 1.002)`);
+    console.log(`📊 [STOPLIMIT_TRACKER] Using tracker config values: stop_price=${stopPrice.toFixed(2)} (buy ${buy.toFixed(2)} + offset), limit_price=${limitPrice.toFixed(2)} (calculated from stop_price / 1.002)`);
   } else {
     // DEFAULT: Use sections-buy-bot-main logic
     console.log(`⚠️ [STOPLIMIT_TRACKER] No matching tracker config found for ${normalizedSymbol} (buy price: ${buy}). Using default sections-buy-bot-main logic.`);
