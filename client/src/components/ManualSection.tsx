@@ -217,12 +217,29 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
     setBuyingSymbols(prev => new Set(prev).add(cleanSymbol));
     setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: null }));
     
+    // Safety timeout: ensure button is always re-enabled after 30 seconds max
+    const timeoutId = setTimeout(() => {
+      console.warn(`⚠️ Buy operation timeout for ${cleanSymbol}, re-enabling button`);
+      setBuyingSymbols(prev => {
+        const next = new Set(prev);
+        next.delete(cleanSymbol);
+        return next;
+      });
+      setBuyStatuses(prev => {
+        const next = { ...prev };
+        delete next[cleanSymbol];
+        return next;
+      });
+    }, 30000);
+    
     try {
       const resp = await fetchWithAuth(`${API_BASE_URL}/buys/test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol: cleanSymbol })
       });
+      
+      clearTimeout(timeoutId);
       
       if (!resp.ok) {
         // HTTP error (500, etc) - try to get error message
@@ -237,43 +254,44 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
             return next;
           });
         }, 3000);
-        return;
-      }
-      
-      const data = await resp.json().catch(() => ({}));
-      
-      if (data?.success) {
-        const quantity = data.data?.quantity || 'N/A';
-        const limitPrice = data.data?.limitPrice ? `$${parseFloat(data.data.limitPrice).toFixed(2)}` : 'N/A';
-        console.log(`✅ Buy signal sent for ${cleanSymbol}:`, data.data?.notifyStatus);
-        addNotification(`Buy order sent successfully for ${quantity} ${cleanSymbol} at ${limitPrice}`, 'success');
-        setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'success' }));
-        
-        // Start 5-second cooldown for all BUY buttons
-        setBuyCooldown(5);
-        
-        // Clear status after 3 seconds
-        setTimeout(() => {
-          setBuyStatuses(prev => {
-            const next = { ...prev };
-            delete next[cleanSymbol];
-            return next;
-          });
-        }, 3000);
+        // Don't return here - let finally block clean up
       } else {
-        const errorMsg = data.error || data.data?.notifyStatus || 'Unknown error';
-        console.error(`❌ Failed to send buy signal for ${cleanSymbol}:`, errorMsg);
-        addNotification(`Failed to buy ${cleanSymbol}: ${errorMsg}`, 'error');
-        setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'error' }));
-        setTimeout(() => {
-          setBuyStatuses(prev => {
-            const next = { ...prev };
-            delete next[cleanSymbol];
-            return next;
-          });
-        }, 3000);
+        const data = await resp.json().catch(() => ({}));
+        
+        if (data?.success) {
+          const quantity = data.data?.quantity || 'N/A';
+          const limitPrice = data.data?.limitPrice ? `$${parseFloat(data.data.limitPrice).toFixed(2)}` : 'N/A';
+          console.log(`✅ Buy signal sent for ${cleanSymbol}:`, data.data?.notifyStatus);
+          addNotification(`Buy order sent successfully for ${quantity} ${cleanSymbol} at ${limitPrice}`, 'success');
+          setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'success' }));
+          
+          // Start 5-second cooldown for all BUY buttons
+          setBuyCooldown(5);
+          
+          // Clear status after 3 seconds
+          setTimeout(() => {
+            setBuyStatuses(prev => {
+              const next = { ...prev };
+              delete next[cleanSymbol];
+              return next;
+            });
+          }, 3000);
+        } else {
+          const errorMsg = data.error || data.data?.notifyStatus || 'Unknown error';
+          console.error(`❌ Failed to send buy signal for ${cleanSymbol}:`, errorMsg);
+          addNotification(`Failed to buy ${cleanSymbol}: ${errorMsg}`, 'error');
+          setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'error' }));
+          setTimeout(() => {
+            setBuyStatuses(prev => {
+              const next = { ...prev };
+              delete next[cleanSymbol];
+              return next;
+            });
+          }, 3000);
+        }
       }
     } catch (error: any) {
+      clearTimeout(timeoutId);
       const errorMsg = error.message || 'Unknown error';
       console.error(`❌ Error sending buy signal for ${cleanSymbol}:`, error);
       addNotification(`Error buying ${cleanSymbol}: ${errorMsg}`, 'error');
@@ -286,6 +304,8 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
         });
       }, 3000);
     } finally {
+      // Always clean up, even on errors or early returns
+      clearTimeout(timeoutId);
       setBuyingSymbols(prev => {
         const next = new Set(prev);
         next.delete(cleanSymbol);

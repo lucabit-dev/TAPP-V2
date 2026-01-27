@@ -336,6 +336,16 @@ const PositionsWithStopLimitSection: React.FC = () => {
     const action = position.LongShort === 'Long' ? 'sell' : 'close';
     setSellingPositions(prev => new Set(prev).add(positionId));
     
+    // Safety timeout: ensure button is always re-enabled after 30 seconds max
+    const timeoutId = setTimeout(() => {
+      console.warn(`⚠️ Sell operation timeout for ${symbol}, re-enabling button`);
+      setSellingPositions(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(positionId);
+        return newSet;
+      });
+    }, 30000);
+    
     try {
       const response = await fetchWithAuth(`${API_BASE_URL}/sell`, {
         method: 'POST',
@@ -348,23 +358,28 @@ const PositionsWithStopLimitSection: React.FC = () => {
         })
       });
       
+      clearTimeout(timeoutId);
+      
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}: ${response.statusText}` }));
         addNotification(`Failed to ${action} ${symbol}: ${errorData.error || `HTTP ${response.status}`}`, 'error');
-        return;
-      }
-      
-      const data = await response.json();
-      
-      if (data.success) {
-        console.log(`✅ Sell order sent for ${quantity} ${symbol}:`, data.data?.notifyStatus);
-        addNotification(`Sell order sent successfully for ${quantity} ${symbol}`, 'success');
+        // Don't return here - let finally block clean up
       } else {
-        addNotification(`Failed to ${action} ${symbol}: ${data.error || data.data?.notifyStatus || 'Unknown error'}`, 'error');
+        const data = await response.json();
+        
+        if (data.success) {
+          console.log(`✅ Sell order sent for ${quantity} ${symbol}:`, data.data?.notifyStatus);
+          addNotification(`Sell order sent successfully for ${quantity} ${symbol}`, 'success');
+        } else {
+          addNotification(`Failed to ${action} ${symbol}: ${data.error || data.data?.notifyStatus || 'Unknown error'}`, 'error');
+        }
       }
     } catch (err: any) {
+      clearTimeout(timeoutId);
       addNotification(`Error ${action === 'sell' ? 'selling' : 'closing'} ${symbol}: ${err.message || 'Unknown error'}`, 'error');
     } finally {
+      // Always clean up, even on errors
+      clearTimeout(timeoutId);
       setSellingPositions(prev => {
         const newSet = new Set(prev);
         newSet.delete(positionId);
