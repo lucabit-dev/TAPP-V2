@@ -4,7 +4,6 @@ import { useAuth } from '../auth/AuthContext';
 import NotificationContainer from './NotificationContainer';
 import ConfirmationModal from './ConfirmationModal';
 import ProgressModal from './ProgressModal';
-import StopLimitTrackerModal from './StopLimitTrackerModal';
 import type { NotificationProps } from './Notification';
 
 interface Position {
@@ -66,7 +65,6 @@ const PositionsWithStopLimitSection: React.FC = () => {
     message?: string;
     type?: 'danger' | 'warning' | 'info' | 'success';
   } | null>(null);
-  const [stopLimitTrackerModalOpen, setStopLimitTrackerModalOpen] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -336,16 +334,6 @@ const PositionsWithStopLimitSection: React.FC = () => {
     const action = position.LongShort === 'Long' ? 'sell' : 'close';
     setSellingPositions(prev => new Set(prev).add(positionId));
     
-    // Safety timeout: ensure button is always re-enabled after 30 seconds max
-    const timeoutId = setTimeout(() => {
-      console.warn(`⚠️ Sell operation timeout for ${symbol}, re-enabling button`);
-      setSellingPositions(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(positionId);
-        return newSet;
-      });
-    }, 30000);
-    
     try {
       const response = await fetchWithAuth(`${API_BASE_URL}/sell`, {
         method: 'POST',
@@ -358,28 +346,23 @@ const PositionsWithStopLimitSection: React.FC = () => {
         })
       });
       
-      clearTimeout(timeoutId);
-      
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}: ${response.statusText}` }));
         addNotification(`Failed to ${action} ${symbol}: ${errorData.error || `HTTP ${response.status}`}`, 'error');
-        // Don't return here - let finally block clean up
+        return;
+      }
+      
+      const data = await response.json();
+      
+      if (data.success) {
+        console.log(`✅ Sell order sent for ${quantity} ${symbol}:`, data.data?.notifyStatus);
+        addNotification(`Sell order sent successfully for ${quantity} ${symbol}`, 'success');
       } else {
-        const data = await response.json();
-        
-        if (data.success) {
-          console.log(`✅ Sell order sent for ${quantity} ${symbol}:`, data.data?.notifyStatus);
-          addNotification(`Sell order sent successfully for ${quantity} ${symbol}`, 'success');
-        } else {
-          addNotification(`Failed to ${action} ${symbol}: ${data.error || data.data?.notifyStatus || 'Unknown error'}`, 'error');
-        }
+        addNotification(`Failed to ${action} ${symbol}: ${data.error || data.data?.notifyStatus || 'Unknown error'}`, 'error');
       }
     } catch (err: any) {
-      clearTimeout(timeoutId);
       addNotification(`Error ${action === 'sell' ? 'selling' : 'closing'} ${symbol}: ${err.message || 'Unknown error'}`, 'error');
     } finally {
-      // Always clean up, even on errors
-      clearTimeout(timeoutId);
       setSellingPositions(prev => {
         const newSet = new Set(prev);
         newSet.delete(positionId);
@@ -561,11 +544,6 @@ const PositionsWithStopLimitSection: React.FC = () => {
         />
       )}
       
-      <StopLimitTrackerModal
-        isOpen={stopLimitTrackerModalOpen}
-        onClose={() => setStopLimitTrackerModalOpen(false)}
-      />
-      
       {/* Header */}
       <div className="p-5 border-b border-[#2a2820]/60 bg-gradient-to-r from-[#14130e] to-[#0f0e0a]">
         <div className="flex justify-between items-center mb-3">
@@ -592,13 +570,6 @@ const PositionsWithStopLimitSection: React.FC = () => {
                 {isConnected ? 'Connected' : 'Disconnected'}
               </span>
             </div>
-            <button
-              onClick={() => setStopLimitTrackerModalOpen(true)}
-              className="ml-3 px-3 py-1.5 rounded-sm text-xs font-bold transition-all bg-[#007acc] hover:bg-[#005a9e] text-white shadow-[0_0_8px_rgba(0,122,204,0.3)]"
-              title="Configure StopLimit Tracker"
-            >
-              StopLimit Tracker
-            </button>
             {mergedPositions.length > 0 && (
               <button
                 onClick={handleSellAll}
