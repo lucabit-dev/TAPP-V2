@@ -21,6 +21,7 @@ const OrdersSection = lazy(() => import('./components/OrdersSection'));
 const L2Section = lazy(() => import('./components/L2Section'));
 const ChartsSection = lazy(() => import('./components/ChartsSection'));
 const Login = lazy(() => import('./components/Login'));
+const StopLimitTrackerModal = lazy(() => import('./components/StopLimitTrackerModal'));
 
 // Loading fallback component - Minimalistic design
 const LoadingFallback = () => (
@@ -136,6 +137,7 @@ function App() {
   const [isHidingHeader, setIsHidingHeader] = useState(false);
   const [showStockInfoModal, setShowStockInfoModal] = useState(false);
   const [selectedStockInfo, setSelectedStockInfo] = useState<any>(null);
+  const [showStopLimitTrackerModal, setShowStopLimitTrackerModal] = useState(false);
   const [additionalFilters, setAdditionalFilters] = useState({
     vwapAboveEma200: false,
     vwapAboveEma18: false
@@ -143,6 +145,17 @@ function App() {
   const alertsEndRef = useRef<HTMLDivElement>(null);
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+
+  // Listen for custom event to open StopLimit Tracker modal
+  useEffect(() => {
+    const handleOpenModal = () => {
+      setShowStopLimitTrackerModal(true);
+    };
+    window.addEventListener('openStopLimitTrackerModal', handleOpenModal);
+    return () => {
+      window.removeEventListener('openStopLimitTrackerModal', handleOpenModal);
+    };
+  }, []);
 
   // Keep scroll position at top when new alerts arrive
   const scrollToTop = () => {
@@ -1802,6 +1815,16 @@ function App() {
           )}
         </Suspense>
       </div>
+
+      {/* StopLimit Tracker Modal */}
+      <Suspense fallback={null}>
+        {showStopLimitTrackerModal && (
+          <StopLimitTrackerModal
+            isOpen={showStopLimitTrackerModal}
+            onClose={() => setShowStopLimitTrackerModal(false)}
+          />
+        )}
+      </Suspense>
     </div>
   );
 }

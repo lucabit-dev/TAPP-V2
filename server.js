@@ -6297,6 +6297,97 @@ app.post('/api/stoplimit-tracker/config', requireAuth, async (req, res) => {
   }
 });
 
+// Add a new group
+app.post('/api/stoplimit-tracker/config/group', requireAuth, async (req, res) => {
+  try {
+    const { minPrice, maxPrice, initialStopPrice, enabled = true, steps = [] } = req.body;
+    
+    if (minPrice === undefined || maxPrice === undefined || initialStopPrice === undefined) {
+      return res.status(400).json({ success: false, error: 'minPrice, maxPrice, and initialStopPrice are required' });
+    }
+    
+    const groupId = `group_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const group = {
+      minPrice: parseFloat(minPrice),
+      maxPrice: parseFloat(maxPrice),
+      initialStopPrice: parseFloat(initialStopPrice),
+      enabled: enabled !== false,
+      steps: Array.isArray(steps) ? steps.map(step => ({
+        pnl: parseFloat(step.pnl || '0'),
+        stop: parseFloat(step.stop || '0')
+      })) : []
+    };
+    
+    stopLimitTrackerConfig.set(groupId, group);
+    
+    // Save to MongoDB
+    await saveStopLimitTrackerConfigToDb();
+    
+    console.log(`✅ StopLimit tracker group added: ${groupId}`);
+    res.json({ success: true, data: { groupId, ...group } });
+  } catch (e) {
+    console.error('Error adding StopLimit tracker group:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// Update an existing group
+app.put('/api/stoplimit-tracker/config/group/:groupId', requireAuth, async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const { minPrice, maxPrice, initialStopPrice, enabled, steps } = req.body;
+    
+    if (!stopLimitTrackerConfig.has(groupId)) {
+      return res.status(404).json({ success: false, error: 'Group not found' });
+    }
+    
+    const existingGroup = stopLimitTrackerConfig.get(groupId);
+    const updatedGroup = {
+      minPrice: minPrice !== undefined ? parseFloat(minPrice) : existingGroup.minPrice,
+      maxPrice: maxPrice !== undefined ? parseFloat(maxPrice) : existingGroup.maxPrice,
+      initialStopPrice: initialStopPrice !== undefined ? parseFloat(initialStopPrice) : existingGroup.initialStopPrice,
+      enabled: enabled !== undefined ? enabled : existingGroup.enabled,
+      steps: steps !== undefined ? (Array.isArray(steps) ? steps.map(step => ({
+        pnl: parseFloat(step.pnl || '0'),
+        stop: parseFloat(step.stop || '0')
+      })) : existingGroup.steps) : existingGroup.steps
+    };
+    
+    stopLimitTrackerConfig.set(groupId, updatedGroup);
+    
+    // Save to MongoDB
+    await saveStopLimitTrackerConfigToDb();
+    
+    console.log(`✅ StopLimit tracker group updated: ${groupId}`);
+    res.json({ success: true, data: { groupId, ...updatedGroup } });
+  } catch (e) {
+    console.error('Error updating StopLimit tracker group:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// Delete a group
+app.delete('/api/stoplimit-tracker/config/group/:groupId', requireAuth, async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    
+    if (!stopLimitTrackerConfig.has(groupId)) {
+      return res.status(404).json({ success: false, error: 'Group not found' });
+    }
+    
+    stopLimitTrackerConfig.delete(groupId);
+    
+    // Save to MongoDB
+    await saveStopLimitTrackerConfigToDb();
+    
+    console.log(`✅ StopLimit tracker group deleted: ${groupId}`);
+    res.json({ success: true, data: { groupId } });
+  } catch (e) {
+    console.error('Error deleting StopLimit tracker group:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 app.get('/api/stoplimit-tracker/progress', requireAuth, (req, res) => {
   try {
     const progress = Array.from(stopLimitTrackerProgress.entries()).map(([symbol, data]) => ({
