@@ -3172,7 +3172,6 @@ let ordersWsReconnectTimer = null;
 let lastOrdersConnectAttempt = 0;
 let ordersReconnectAttempts = 0;
 let lastOrdersError = null;
-let ordersWsConnectedAt = null; // Track when orders WebSocket connected
 
 function connectPositionsWebSocket() {
   const apiKey = process.env.PNL_API_KEY;
@@ -3371,7 +3370,6 @@ function connectOrdersWebSocket() {
       console.log('✅ Orders WebSocket connected for orders cache');
       ordersReconnectAttempts = 0;
       lastOrdersError = null;
-      ordersWsConnectedAt = Date.now(); // Track connection time
       // Clear reconnect timer on successful connection
       if (ordersWsReconnectTimer) {
         clearTimeout(ordersWsReconnectTimer);
@@ -3671,68 +3669,9 @@ function connectOrdersWebSocket() {
           // 3. Order is NOT in pendingManualBuyOrders (wasn't tracked initially)
           // 4. Order hasn't been processed yet
           // 5. Order type is Limit (manual buys use Limit orders)
-          // 6. Order is RECENT (within last 5 minutes) - prevents processing old orders after reconnection
           if (isFilled && isBuy && !pending && !processedFllOrders.has(orderId)) {
             const orderType = (order.OrderType || '').toUpperCase();
             if (orderType === 'LIMIT' || orderType === 'LMT') {
-              // CRITICAL: Check if order is recent to prevent processing stale orders after reconnection
-              // This prevents the FALLBACK logic from creating stop-limits for old orders when WebSocket reconnects
-              const orderOpenedTime = parseOrderDateTime(order.OpenedDateTime);
-              const now = Date.now();
-              const FALLBACK_MAX_AGE_MS = 10 * 60 * 1000; // 10 minutes - absolute maximum age
-              const FALLBACK_RECENT_AGE_MS = 5 * 60 * 1000; // 5 minutes - preferred recent window
-              
-              // Determine if order is recent enough to process
-              let isRecentOrder = false;
-              let skipReason = '';
-              
-              if (!orderOpenedTime) {
-                // No timestamp available - skip to prevent processing old orders
-                skipReason = 'no OpenedDateTime timestamp';
-                isRecentOrder = false;
-              } else {
-                const orderAge = now - orderOpenedTime.getTime();
-                
-                // Absolute check: never process orders older than 10 minutes
-                if (orderAge > FALLBACK_MAX_AGE_MS) {
-                  skipReason = `too old (${Math.round(orderAge / 1000 / 60)} minutes)`;
-                  isRecentOrder = false;
-                } else if (ordersWsConnectedAt) {
-                  // If WebSocket just connected, only process orders opened AFTER connection (new orders)
-                  // This prevents processing old orders that were sent during reconnection
-                  const timeSinceConnection = now - ordersWsConnectedAt;
-                  const orderOpenedAfterConnection = orderOpenedTime.getTime() >= ordersWsConnectedAt;
-                  
-                  if (orderOpenedAfterConnection) {
-                    // Order was opened after WebSocket connected - it's a new order
-                    isRecentOrder = true;
-                  } else if (timeSinceConnection < FALLBACK_RECENT_AGE_MS) {
-                    // WebSocket just connected (< 5 min ago) and order is old - skip it
-                    skipReason = `opened before WebSocket connection (${Math.round((ordersWsConnectedAt - orderOpenedTime.getTime()) / 1000)}s before)`;
-                    isRecentOrder = false;
-                  } else {
-                    // WebSocket has been connected for a while, use age-based check
-                    isRecentOrder = orderAge <= FALLBACK_RECENT_AGE_MS;
-                    if (!isRecentOrder) {
-                      skipReason = `older than ${Math.round(FALLBACK_RECENT_AGE_MS / 1000 / 60)} minutes`;
-                    }
-                  }
-                } else {
-                  // No connection timestamp - use age-based check
-                  isRecentOrder = orderAge <= FALLBACK_RECENT_AGE_MS;
-                  if (!isRecentOrder) {
-                    skipReason = `older than ${Math.round(FALLBACK_RECENT_AGE_MS / 1000 / 60)} minutes`;
-                  }
-                }
-              }
-              
-              if (!isRecentOrder) {
-                const ageSeconds = orderOpenedTime ? Math.round((now - orderOpenedTime.getTime()) / 1000) : 'unknown';
-                console.log(`⏭️ [FALLBACK] Skipping order ${orderId} for ${normalizedSymbol}: ${skipReason} (age: ${ageSeconds}s). Only processing recent orders to prevent duplicate stop-limit creation after reconnection.`);
-                processedFllOrders.add(orderId); // Mark as processed to prevent retry
-                return;
-              }
-              
               const normalizedSymbol = (symbol || '').toUpperCase();
               const leg = order.Legs?.[0];
               const quantity = Math.floor(Number(leg?.ExecQuantity || leg?.QuantityOrdered || 0)) || 0;
@@ -3744,7 +3683,7 @@ function connectOrdersWebSocket() {
               
               if (normalizedSymbol && quantity > 0 && buyPrice > 0) {
                 console.log(`🔄 [FALLBACK] Detected untracked filled BUY order ${orderId} for ${normalizedSymbol} - attempting stop-limit creation`);
-                console.log(`🔄 [FALLBACK] Order details: qty=${quantity}, buyPrice=${buyPrice}, filledPrice=${filledPrice}, limitPrice=${limitPrice}, opened=${orderOpenedTime?.toISOString() || 'unknown'}`);
+                console.log(`🔄 [FALLBACK] Order details: qty=${quantity}, buyPrice=${buyPrice}, filledPrice=${filledPrice}, limitPrice=${limitPrice}`);
                 
                 // Check if stop-limit already exists
                 const existingStopLimit = getActiveStopLimitOrder(normalizedSymbol);
