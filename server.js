@@ -4899,6 +4899,17 @@ async function handleManualBuyFilled(orderId, order, pending) {
   const symbol = (pending.symbol || (order.Legs?.[0]?.Symbol || '')).toString().toUpperCase();
   const normalizedSymbol = symbol;
   
+  // TE-SPECIFIC: Enhanced logging at start of function
+  if (normalizedSymbol === 'TE') {
+    console.log(`🔍 [TE_DEBUG] ========== TE StopLimit Creation Started ==========`);
+    console.log(`🔍 [TE_DEBUG] Order ID: ${orderId}`);
+    console.log(`🔍 [TE_DEBUG] Order Status: ${order.Status}`);
+    console.log(`🔍 [TE_DEBUG] Pending Data:`, JSON.stringify(pending, null, 2));
+    console.log(`🔍 [TE_DEBUG] Guard Status: ${stopLimitCreationBySymbol.has('TE')}`);
+    console.log(`🔍 [TE_DEBUG] Repository Status:`, getActiveStopLimitOrder('TE'));
+    console.log(`🔍 [TE_DEBUG] In Progress Set:`, Array.from(stopLimitCreationInProgress));
+  }
+  
   // CRITICAL: Check database FIRST before any other checks (authoritative source of truth)
   // This ensures we catch orders that exist in DB even if repository is empty
   if (cachePersistenceService) {
@@ -4932,27 +4943,60 @@ async function handleManualBuyFilled(orderId, order, pending) {
     }
   }
   
-  // CRITICAL: Symbol-level guard - prevent multiple StopLimit creations for the same symbol
-  // This must be checked BEFORE any async operations
-  if (stopLimitCreationBySymbol.has(normalizedSymbol)) {
-    console.log(`🛑 [DEBUG] StopLimit creation already in progress for symbol ${normalizedSymbol} (order ${orderId}), aborting to prevent duplicate!`);
-    // Check repository - if StopLimit exists, update quantity (re-buy: existing + new buy)
-    const existingRepoOrder = getActiveStopLimitOrder(normalizedSymbol);
-    if (existingRepoOrder) {
-      console.log(`✅ [DEBUG] Found existing StopLimit ${existingRepoOrder.orderId} in repository for ${normalizedSymbol} - re-buy: updating quantity`);
-      const guardLeg = existingRepoOrder.order?.Legs?.[0];
-      const guardExistingQty = parseInt(guardLeg?.QuantityRemaining || guardLeg?.QuantityOrdered || '0', 10) || 0;
-      const guardBuyQty = Math.floor(Number(pending.quantity || (order.Legs?.[0]?.ExecQuantity ?? order.Legs?.[0]?.QuantityOrdered) || 0)) || 0;
-      const guardNewTotalQty = guardExistingQty + guardBuyQty;
-      if (guardNewTotalQty > 0) {
-        console.log(`📊 [REBUY] Updating StopLimit ${existingRepoOrder.orderId} for ${normalizedSymbol}: ${guardExistingQty} + ${guardBuyQty} = ${guardNewTotalQty}`);
-        modifyOrderQuantity(existingRepoOrder.orderId, guardNewTotalQty).catch(err => {
-          console.error(`❌ [DEBUG] Error updating StopLimit quantity:`, err);
-        });
+    // CRITICAL: Symbol-level guard - prevent multiple StopLimit creations for the same symbol
+    // This must be checked BEFORE any async operations
+    if (stopLimitCreationBySymbol.has(normalizedSymbol)) {
+      console.log(`🛑 [DEBUG] StopLimit creation already in progress for symbol ${normalizedSymbol} (order ${orderId}), aborting to prevent duplicate!`);
+      
+      // TE-SPECIFIC: Enhanced logging for TE to diagnose the issue
+      if (normalizedSymbol === 'TE') {
+        console.log(`🔍 [TE_DEBUG] TE guard check - Order: ${orderId}, Guard set: ${stopLimitCreationBySymbol.has('TE')}`);
+        console.log(`🔍 [TE_DEBUG] Repository check for TE:`, getActiveStopLimitOrder('TE'));
+        console.log(`🔍 [TE_DEBUG] In progress set:`, Array.from(stopLimitCreationInProgress));
+      }
+      
+      // Check repository - if StopLimit exists, update quantity (re-buy: existing + new buy)
+      const existingRepoOrder = getActiveStopLimitOrder(normalizedSymbol);
+      if (existingRepoOrder) {
+        console.log(`✅ [DEBUG] Found existing StopLimit ${existingRepoOrder.orderId} in repository for ${normalizedSymbol} - re-buy: updating quantity`);
+        const guardLeg = existingRepoOrder.order?.Legs?.[0];
+        const guardExistingQty = parseInt(guardLeg?.QuantityRemaining || guardLeg?.QuantityOrdered || '0', 10) || 0;
+        const guardBuyQty = Math.floor(Number(pending.quantity || (order.Legs?.[0]?.ExecQuantity ?? order.Legs?.[0]?.QuantityOrdered) || 0)) || 0;
+        const guardNewTotalQty = guardExistingQty + guardBuyQty;
+        if (guardNewTotalQty > 0) {
+          console.log(`📊 [REBUY] Updating StopLimit ${existingRepoOrder.orderId} for ${normalizedSymbol}: ${guardExistingQty} + ${guardBuyQty} = ${guardNewTotalQty}`);
+          modifyOrderQuantity(existingRepoOrder.orderId, guardNewTotalQty).catch(err => {
+            console.error(`❌ [DEBUG] Error updating StopLimit quantity:`, err);
+          });
+        }
+        // CRITICAL: Clear guard if order exists - prevents stuck guards
+        stopLimitCreationBySymbol.delete(normalizedSymbol);
+        console.log(`🔓 [DEBUG] Cleared guard for ${normalizedSymbol} (found existing order)`);
+        return; // CRITICAL: Exit early if symbol is already being processed
+      }
+      
+      // CRITICAL: If guard is set but no order exists, it might be stuck
+      // Wait briefly and check again, then clear guard if still no order
+      console.log(`⚠️ [DEBUG] Guard set for ${normalizedSymbol} but no order found. Waiting and rechecking...`);
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const stuckGuardCheck = findExistingStopLimitSellForSymbol(normalizedSymbol);
+      if (!stuckGuardCheck) {
+        console.warn(`⚠️ [DEBUG] Guard for ${normalizedSymbol} appears stuck (no order found after wait). Clearing guard and proceeding...`);
+        stopLimitCreationBySymbol.delete(normalizedSymbol);
+        // Continue to create order below instead of returning
+      } else {
+        console.log(`✅ [DEBUG] Found order ${stuckGuardCheck.orderId} after wait. Updating quantity...`);
+        const stuckQty = stuckGuardCheck.quantity || 0;
+        const stuckNewQty = stuckQty + quantity;
+        if (stuckNewQty > 0) {
+          modifyOrderQuantity(stuckGuardCheck.orderId, stuckNewQty).catch(err => {
+            console.error(`❌ [DEBUG] Error updating StopLimit quantity:`, err);
+          });
+        }
+        stopLimitCreationBySymbol.delete(normalizedSymbol);
+        return;
       }
     }
-    return; // CRITICAL: Exit early if symbol is already being processed
-  }
   
   console.log(`🎯 [DEBUG] Order object:`, JSON.stringify({
     OrderID: order.OrderID,
@@ -5915,6 +5959,28 @@ async function handleManualBuyFilled(orderId, order, pending) {
       
       // NOTE: Order ID will be saved to tracking map when WebSocket confirms ACK status
       // Don't save it here to prevent loops if order gets rejected
+    } catch (err) {
+      // CRITICAL: On any error, ensure guard is cleared
+      console.error(`❌ [DEBUG] Error in StopLimit creation for ${normalizedSymbol}:`, err);
+      
+      // TE-SPECIFIC: Enhanced error logging
+      if (normalizedSymbol === 'TE') {
+        console.error(`🔍 [TE_DEBUG] TE creation error - Order: ${orderId}, Error:`, err.message || err);
+        console.error(`🔍 [TE_DEBUG] Stack:`, err.stack);
+      }
+      
+      // Clear guard on error to prevent stuck guards
+      if (stopLimitCreationBySymbol.has(normalizedSymbol)) {
+        stopLimitCreationBySymbol.delete(normalizedSymbol);
+        console.log(`🔓 [DEBUG] Cleared guard for ${normalizedSymbol} due to error`);
+      }
+      
+      // Remove pending order from repository if it exists
+      const repoEntry = stopLimitOrderRepository.get(normalizedSymbol);
+      if (repoEntry && repoEntry.orderId && repoEntry.orderId.startsWith('pending_')) {
+        stopLimitOrderRepository.delete(normalizedSymbol);
+        console.log(`🗑️ [STOPLIMIT_REPO] Removed pending order from repository for ${normalizedSymbol} (error occurred)`);
+      }
     } finally {
       // CRITICAL: Don't remove guard here - let registerStopLimitOrder handle it when order is ACK'd
       // This ensures the guard stays active until the order is actually registered in repository
@@ -5926,12 +5992,17 @@ async function handleManualBuyFilled(orderId, order, pending) {
         if (!repoCheck && stopLimitCreationBySymbol.has(normalizedSymbol)) {
           // Order was not registered - creation likely failed, safe to remove guard
           stopLimitCreationBySymbol.delete(normalizedSymbol);
-          console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (creation failed, no order registered)`);
+          console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (creation failed, no order registered after timeout)`);
+          
+          // TE-SPECIFIC: Log when guard is cleared for TE
+          if (normalizedSymbol === 'TE') {
+            console.log(`🔍 [TE_DEBUG] TE guard cleared after timeout - Order: ${orderId}, No order found in repository`);
+          }
         } else if (repoCheck) {
           // Order exists - guard will be removed by registerStopLimitOrder when ACK'd
           console.log(`⏳ [DEBUG] Guard for ${normalizedSymbol} will be removed when order ${repoCheck.orderId} is ACK'd`);
         }
-      }, 3000); // Check after 3 seconds
+      }, 5000); // Increased to 5 seconds to give more time for order to be registered
     }
   } finally {
     // Remove from in-progress set
