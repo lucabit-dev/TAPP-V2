@@ -48,6 +48,20 @@ const OrdersSection: React.FC = () => {
   const reconnectTimerRef = React.useRef<number | null>(null);
   const connectionTimeoutRef = React.useRef<number | null>(null);
 
+  // Small helper to add a client-side timeout to actions (cancel)
+  // This keeps the UI responsive even if the backend or broker is slow
+  const fetchWithTimeout = React.useCallback(
+    (input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 10000) => {
+      const controller = new AbortController();
+      const id = window.setTimeout(() => controller.abort(), timeoutMs);
+      return fetchWithAuth(input, { ...init, signal: controller.signal })
+        .finally(() => {
+          window.clearTimeout(id);
+        });
+    },
+    [fetchWithAuth]
+  );
+
   const connectWebSocket = React.useCallback(() => {
     if (connectionTimeoutRef.current) {
       window.clearTimeout(connectionTimeoutRef.current);
@@ -313,7 +327,7 @@ const OrdersSection: React.FC = () => {
     await Promise.resolve();
     
     try {
-      const response = await fetchWithAuth(`${API_BASE_URL}/orders/${encodeURIComponent(orderId)}`, {
+      const response = await fetchWithTimeout(`${API_BASE_URL}/orders/${encodeURIComponent(orderId)}`, {
         method: 'DELETE'
       });
       
@@ -326,8 +340,13 @@ const OrdersSection: React.FC = () => {
         alert(`Failed to cancel order: ${data.error || 'Unknown error'}`);
       }
     } catch (err: any) {
-      console.error(`❌ Error cancelling order ${orderId}:`, err);
-      alert(`Error cancelling order: ${err.message || 'Unknown error'}`);
+      if (err?.name === 'AbortError') {
+        console.error(`⏱️ Timeout cancelling order ${orderId}`, err);
+        alert('Cancel request timed out. Please check connection or try again.');
+      } else {
+        console.error(`❌ Error cancelling order ${orderId}:`, err);
+        alert(`Error cancelling order: ${err.message || 'Unknown error'}`);
+      }
     } finally {
       // Always clean up loading state
       setCancelingOrders(prev => {

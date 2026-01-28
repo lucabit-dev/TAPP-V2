@@ -3628,6 +3628,93 @@ function connectOrdersWebSocket() {
             }
           }
 
+          // FALLBACK: Handle filled BUY orders that weren't tracked in pendingManualBuyOrders
+          // This catches cases where the API response didn't include order_id or had a different status code
+          // Only process if:
+          // 1. Order is filled (FLL/FIL)
+          // 2. Order is a BUY order
+          // 3. Order is NOT in pendingManualBuyOrders (wasn't tracked initially)
+          // 4. Order hasn't been processed yet
+          // 5. Order type is Limit (manual buys use Limit orders)
+          if (isFilled && isBuy && !pending && !processedFllOrders.has(orderId)) {
+            const orderType = (order.OrderType || '').toUpperCase();
+            if (orderType === 'LIMIT' || orderType === 'LMT') {
+              const normalizedSymbol = (symbol || '').toUpperCase();
+              const leg = order.Legs?.[0];
+              const quantity = Math.floor(Number(leg?.ExecQuantity || leg?.QuantityOrdered || 0)) || 0;
+              
+              // Extract buy price from order
+              const filledPrice = parseFloat(order.FilledPrice || 0) || 0;
+              const limitPrice = parseFloat(order.LimitPrice || 0) || 0;
+              const buyPrice = filledPrice > 0 ? filledPrice : limitPrice;
+              
+              if (normalizedSymbol && quantity > 0 && buyPrice > 0) {
+                console.log(`🔄 [FALLBACK] Detected untracked filled BUY order ${orderId} for ${normalizedSymbol} - attempting stop-limit creation`);
+                console.log(`🔄 [FALLBACK] Order details: qty=${quantity}, buyPrice=${buyPrice}, filledPrice=${filledPrice}, limitPrice=${limitPrice}`);
+                
+                // Check if stop-limit already exists
+                const existingStopLimit = getActiveStopLimitOrder(normalizedSymbol);
+                if (existingStopLimit) {
+                  console.log(`✅ [FALLBACK] StopLimit already exists for ${normalizedSymbol} (${existingStopLimit.orderId}). Skipping.`);
+                  processedFllOrders.add(orderId);
+                  return;
+                }
+                
+                // Check database
+                if (cachePersistenceService) {
+                  const dbCheck = await cachePersistenceService.checkDatabaseForActiveStopLimit(normalizedSymbol);
+                  if (dbCheck) {
+                    console.log(`✅ [FALLBACK] Database check found active StopLimit ${dbCheck.orderId} for ${normalizedSymbol}. Skipping.`);
+                    processedFllOrders.add(orderId);
+                    return;
+                  }
+                }
+                
+                // Check if position exists
+                let existingPosition = positionsCache.get(normalizedSymbol);
+                let hasExistingPosition = existingPosition && parseFloat(existingPosition.Quantity || '0') > 0;
+                
+                // Wait for position if not found immediately
+                if (!hasExistingPosition) {
+                  console.log(`⏳ [FALLBACK] Position not found for ${normalizedSymbol}, waiting...`);
+                  for (let i = 0; i < 3; i++) {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    existingPosition = positionsCache.get(normalizedSymbol);
+                    hasExistingPosition = existingPosition && parseFloat(existingPosition.Quantity || '0') > 0;
+                    if (hasExistingPosition) break;
+                  }
+                }
+                
+                if (!hasExistingPosition) {
+                  console.warn(`⚠️ [FALLBACK] No position found for ${normalizedSymbol} after waiting - skipping stop-limit creation`);
+                  processedFllOrders.add(orderId);
+                  return;
+                }
+                
+                // Create synthetic pending data for handleManualBuyFilled
+                const syntheticPending = {
+                  symbol: normalizedSymbol,
+                  quantity: quantity,
+                  limitPrice: buyPrice
+                };
+                
+                // Mark as processed to prevent duplicate processing
+                processedFllOrders.add(orderId);
+                
+                // Create stop-limit using handleManualBuyFilled
+                console.log(`🚀 [FALLBACK] Creating stop-limit for untracked buy order ${orderId} (${normalizedSymbol})`);
+                if (!stopLimitCreationInProgress.has(orderId)) {
+                  handleManualBuyFilled(orderId, order, syntheticPending).catch(err => {
+                    console.error(`❌ [FALLBACK] Error creating stop-limit for ${orderId}:`, err);
+                    processedFllOrders.delete(orderId); // Allow retry on error
+                  });
+                }
+              } else {
+                console.warn(`⚠️ [FALLBACK] Invalid order data for ${orderId}: symbol=${normalizedSymbol}, quantity=${quantity}, buyPrice=${buyPrice}`);
+              }
+            }
+          }
+
           // Log order updates for debugging (only for active orders)
           if (isActiveOrderStatus(order.Status)) {
             console.log(`📋 Order cache updated: ${orderId} (${symbol}, Status: ${order.Status})`);
@@ -3877,9 +3964,19 @@ app.post('/api/buys/test', async (req, res) => {
         // The API response status might be stale or incorrect. We wait for WebSocket
         // to confirm FLL status before creating StopLimit to ensure accuracy.
         // The WebSocket handler will call handleManualBuyFilled when it receives FLL status.
-      } else if (orderIdFromApi == null) {
-        console.warn(`⚠️ [DEBUG] Buy order sent for ${symbol} but no order_id in response. Response:`, JSON.stringify(responseData, null, 2));
+      } else {
+        // Log why order wasn't tracked for debugging
+        if (orderIdFromApi == null) {
+          console.warn(`⚠️ [DEBUG] Buy order sent for ${symbol} but no order_id in response. Response:`, JSON.stringify(responseData, null, 2));
+          console.warn(`⚠️ [DEBUG] This order will NOT trigger automatic stop-limit creation. Fallback mechanism will attempt to create stop-limit when order fills via WebSocket.`);
+        } else if (!notifyStatus.startsWith('200') && !notifyStatus.startsWith('201')) {
+          console.warn(`⚠️ [DEBUG] Buy order sent for ${symbol} with order_id ${orderIdFromApi} but status is ${notifyStatus} (not 200/201). Response:`, JSON.stringify(responseData, null, 2));
+          console.warn(`⚠️ [DEBUG] This order will NOT trigger automatic stop-limit creation. Fallback mechanism will attempt to create stop-limit when order fills via WebSocket.`);
+        }
       }
+    } else {
+      console.warn(`⚠️ [DEBUG] Buy order sent for ${symbol} but response data is not an object. Response:`, responseData);
+      console.warn(`⚠️ [DEBUG] This order will NOT trigger automatic stop-limit creation. Fallback mechanism will attempt to create stop-limit when order fills via WebSocket.`);
     }
 
     // Find which config/origin this symbol belongs to

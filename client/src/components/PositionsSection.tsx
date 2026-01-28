@@ -70,6 +70,20 @@ const PositionsSection: React.FC = () => {
   const reconnectTimerRef = useRef<number | null>(null);
   const connectionTimeoutRef = useRef<number | null>(null);
 
+  // Small helper to add a client-side timeout to actions (sell / sell all)
+  // This keeps the UI responsive even if the backend or broker is slow
+  const fetchWithTimeout = useCallback(
+    (input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 10000) => {
+      const controller = new AbortController();
+      const id = window.setTimeout(() => controller.abort(), timeoutMs);
+      return fetchWithAuth(input, { ...init, signal: controller.signal })
+        .finally(() => {
+          window.clearTimeout(id);
+        });
+    },
+    [fetchWithAuth]
+  );
+
   // WebSocket connection for positions
   const connectWebSocket = useCallback(() => {
     if (connectionTimeoutRef.current) {
@@ -353,7 +367,7 @@ const PositionsSection: React.FC = () => {
     await Promise.resolve();
     
     try {
-      const response = await fetchWithAuth(`${API_BASE_URL}/sell`, {
+      const response = await fetchWithTimeout(`${API_BASE_URL}/sell`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -379,7 +393,11 @@ const PositionsSection: React.FC = () => {
         addNotification(`Failed to ${action} ${symbol}: ${data.error || data.data?.notifyStatus || 'Unknown error'}`, 'error');
       }
     } catch (err: any) {
-      addNotification(`Error ${action === 'sell' ? 'selling' : 'closing'} ${symbol}: ${err.message || 'Unknown error'}`, 'error');
+      if (err?.name === 'AbortError') {
+        addNotification(`Sell request for ${symbol} timed out. Please check connection or try again.`, 'error');
+      } else {
+        addNotification(`Error ${action === 'sell' ? 'selling' : 'closing'} ${symbol}: ${err.message || 'Unknown error'}`, 'error');
+      }
     } finally {
       // Always clean up loading state
       setSellingPositions(prev => {
@@ -459,7 +477,7 @@ const PositionsSection: React.FC = () => {
             return updated;
           }, 'Sending sell all command...');
           
-          const response = await fetchWithAuth(`${API_BASE_URL}/sell_all`, {
+          const response = await fetchWithTimeout(`${API_BASE_URL}/sell_all`, {
             method: 'POST',
             headers: { 'Accept': '*/*' }
           });

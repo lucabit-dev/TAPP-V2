@@ -98,6 +98,20 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
   const [tempQuantity, setTempQuantity] = useState<Record<string, string>>({});
   const [buyCooldown, setBuyCooldown] = useState<number>(0); // Cooldown in seconds
 
+  // Small helper to add a client-side timeout to actions (manual BUY)
+  // This keeps the UI responsive even if the backend or broker is slow
+  const fetchWithTimeout = useCallback(
+    (input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 10000) => {
+      const controller = new AbortController();
+      const id = window.setTimeout(() => controller.abort(), timeoutMs);
+      return fetchWithAuth(input, { ...init, signal: controller.signal })
+        .finally(() => {
+          window.clearTimeout(id);
+        });
+    },
+    [fetchWithAuth]
+  );
+
   useEffect(() => {
     // Initial load of buys enabled status
     const loadBuysStatus = async () => {
@@ -236,7 +250,7 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
     await Promise.resolve();
     
     try {
-      const resp = await fetchWithAuth(`${API_BASE_URL}/buys/test`, {
+      const resp = await fetchWithTimeout(`${API_BASE_URL}/buys/test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol: cleanSymbol })
@@ -292,9 +306,14 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
         }, 3000);
       }
     } catch (error: any) {
-      const errorMsg = error.message || 'Unknown error';
-      console.error(`❌ Error sending buy signal for ${cleanSymbol}:`, error);
-      addNotification(`Error buying ${cleanSymbol}: ${errorMsg}`, 'error');
+      if (error?.name === 'AbortError') {
+        console.error(`⏱️ Timeout sending buy signal for ${cleanSymbol}`, error);
+        addNotification(`Buy request for ${cleanSymbol} timed out. Please check connection or try again.`, 'error');
+      } else {
+        const errorMsg = error.message || 'Unknown error';
+        console.error(`❌ Error sending buy signal for ${cleanSymbol}:`, error);
+        addNotification(`Error buying ${cleanSymbol}: ${errorMsg}`, 'error');
+      }
       setBuyStatuses(prev => ({ ...prev, [cleanSymbol]: 'error' }));
       setTimeout(() => {
         setBuyStatuses(prev => {
