@@ -3022,13 +3022,17 @@ async function sendBuyOrder(symbol, configId = null, groupKey = null) {
     let errorMessage = null;
     
     try {
-      const resp = await fetch('https://sections-bot.inbitme.com/order', {
+      const resp = await robustFetch('https://sections-bot.inbitme.com/order', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json'
         },
         body: JSON.stringify(orderBody)
+      }, {
+        maxRetries: 3,
+        timeout: 10000,
+        retryDelay: 1000
       });
       
       notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
@@ -3296,6 +3300,7 @@ function connectPositionsWebSocket() {
       console.error('❌ Positions WebSocket error:', error.message);
       lastPositionUpdateTime = null;
       lastPositionsError = error?.message || 'Unknown error';
+      // Don't reconnect here - let 'close' event handle it
     });
     
     positionsWs.on('close', (code, reason) => {
@@ -3306,13 +3311,20 @@ function connectPositionsWebSocket() {
         lastPositionsError = reason.toString();
       }
       
-      // Reconnect after delay (exponential backoff, max 30 seconds)
-      positionsReconnectAttempts = Math.min(positionsReconnectAttempts + 1, 6);
-      const delay = Math.min(30000, 1000 * Math.pow(2, Math.max(0, positionsReconnectAttempts - 1)));
-      positionsWsReconnectTimer = setTimeout(() => {
-        console.log('🔄 Reconnecting positions WebSocket...');
-        connectPositionsWebSocket();
-      }, delay);
+      // Only reconnect if it wasn't a clean close (code 1000)
+      if (code !== 1000) {
+        // Reconnect after delay (exponential backoff, max 30 seconds)
+        positionsReconnectAttempts = Math.min(positionsReconnectAttempts + 1, 6);
+        const delay = Math.min(30000, 1000 * Math.pow(2, Math.max(0, positionsReconnectAttempts - 1)));
+        console.log(`🔄 Scheduling positions WebSocket reconnection in ${delay}ms (attempt ${positionsReconnectAttempts})...`);
+        positionsWsReconnectTimer = setTimeout(() => {
+          console.log('🔄 Reconnecting positions WebSocket...');
+          connectPositionsWebSocket();
+        }, delay);
+      } else {
+        console.log('✅ Positions WebSocket closed cleanly, not reconnecting');
+        positionsReconnectAttempts = 0;
+      }
     });
     
   } catch (err) {
@@ -3692,21 +3704,21 @@ function connectOrdersWebSocket() {
                 }
                 
                 // Check if position exists
-                let existingPosition = positionsCache.get(normalizedSymbol);
-                let hasExistingPosition = existingPosition && parseFloat(existingPosition.Quantity || '0') > 0;
+                let fallbackPositionCheck = positionsCache.get(normalizedSymbol);
+                let hasFallbackPosition = fallbackPositionCheck && parseFloat(fallbackPositionCheck.Quantity || '0') > 0;
                 
                 // Wait for position if not found immediately
-                if (!hasExistingPosition) {
+                if (!hasFallbackPosition) {
                   console.log(`⏳ [FALLBACK] Position not found for ${normalizedSymbol}, waiting...`);
                   for (let i = 0; i < 3; i++) {
                     await new Promise(resolve => setTimeout(resolve, 500));
-                    existingPosition = positionsCache.get(normalizedSymbol);
-                    hasExistingPosition = existingPosition && parseFloat(existingPosition.Quantity || '0') > 0;
-                    if (hasExistingPosition) break;
+                    fallbackPositionCheck = positionsCache.get(normalizedSymbol);
+                    hasFallbackPosition = fallbackPositionCheck && parseFloat(fallbackPositionCheck.Quantity || '0') > 0;
+                    if (hasFallbackPosition) break;
                   }
                 }
                 
-                if (!hasExistingPosition) {
+                if (!hasFallbackPosition) {
                   console.warn(`⚠️ [FALLBACK] No position found for ${normalizedSymbol} after waiting - skipping stop-limit creation`);
                   processedFllOrders.add(orderId);
                   return;
@@ -3775,6 +3787,7 @@ function connectOrdersWebSocket() {
     ordersWs.on('error', (error) => {
       console.error('❌ Orders WebSocket error:', error.message);
       lastOrdersError = error?.message || 'Unknown error';
+      // Don't reconnect here - let 'close' event handle it
     });
     
     ordersWs.on('close', (code, reason) => {
@@ -3784,13 +3797,20 @@ function connectOrdersWebSocket() {
         lastOrdersError = reason.toString();
       }
       
-      // Reconnect after delay (exponential backoff, max 30 seconds)
-      ordersReconnectAttempts = Math.min(ordersReconnectAttempts + 1, 6);
-      const delay = Math.min(30000, 1000 * Math.pow(2, Math.max(0, ordersReconnectAttempts - 1)));
-      ordersWsReconnectTimer = setTimeout(() => {
-        console.log('🔄 Reconnecting orders WebSocket...');
-        connectOrdersWebSocket();
-      }, delay);
+      // Only reconnect if it wasn't a clean close (code 1000)
+      if (code !== 1000) {
+        // Reconnect after delay (exponential backoff, max 30 seconds)
+        ordersReconnectAttempts = Math.min(ordersReconnectAttempts + 1, 6);
+        const delay = Math.min(30000, 1000 * Math.pow(2, Math.max(0, ordersReconnectAttempts - 1)));
+        console.log(`🔄 Scheduling orders WebSocket reconnection in ${delay}ms (attempt ${ordersReconnectAttempts})...`);
+        ordersWsReconnectTimer = setTimeout(() => {
+          console.log('🔄 Reconnecting orders WebSocket...');
+          connectOrdersWebSocket();
+        }, delay);
+      } else {
+        console.log('✅ Orders WebSocket closed cleanly, not reconnecting');
+        ordersReconnectAttempts = 0;
+      }
     });
     
   } catch (err) {
@@ -3924,13 +3944,17 @@ app.post('/api/buys/test', async (req, res) => {
     let errorMessage = null;
     
     try {
-      const resp = await fetch('https://sections-bot.inbitme.com/order', {
+      const resp = await robustFetch('https://sections-bot.inbitme.com/order', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json'
         },
         body: JSON.stringify(orderBody)
+      }, {
+        maxRetries: 3,
+        timeout: 10000,
+        retryDelay: 1000
       });
       
       notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
@@ -4163,13 +4187,17 @@ app.post('/api/sells/test', async (req, res) => {
     let errorMessage = null;
     
     try {
-      const resp = await fetch('https://sections-bot.inbitme.com/order', {
+      const resp = await robustFetch('https://sections-bot.inbitme.com/order', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json'
         },
         body: JSON.stringify(orderBody)
+      }, {
+        maxRetries: 3,
+        timeout: 10000,
+        retryDelay: 1000
       });
       
       notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
@@ -4306,13 +4334,17 @@ app.get('/api/buys/test', async (req, res) => {
     let errorMessage = null;
     
     try {
-      const resp = await fetch('https://sections-bot.inbitme.com/order', {
+      const resp = await robustFetch('https://sections-bot.inbitme.com/order', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json'
         },
         body: JSON.stringify(orderBody)
+      }, {
+        maxRetries: 3,
+        timeout: 10000,
+        retryDelay: 1000
       });
       
       notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
@@ -4486,11 +4518,15 @@ async function deleteOrder(orderId) {
     const orderIdStr = orderId.toString().trim();
     console.log(`🗑️ Deleting order: ${orderIdStr}`);
 
-    const resp = await fetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(orderIdStr)}`, {
+    const resp = await robustFetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(orderIdStr)}`, {
       method: 'DELETE',
       headers: {
         'Accept': '*/*'
       }
+    }, {
+      maxRetries: 3,
+      timeout: 8000, // 8 second timeout for cancel operations
+      retryDelay: 500 // Start with 500ms delay
     });
 
     const status = `${resp.status} ${resp.statusText || ''}`.trim();
@@ -4532,6 +4568,110 @@ async function deleteOrder(orderId) {
 }
 
 const SECTIONS_BOT_ORDER_URL = 'https://sections-bot.inbitme.com/order';
+
+// Robust fetch wrapper with retry logic, timeout, and better error handling
+async function robustFetch(url, options = {}, retryConfig = {}) {
+  const {
+    maxRetries = 3,
+    retryDelay = 1000, // Start with 1 second
+    timeout = 10000, // 10 second timeout
+    retryableStatuses = [408, 429, 500, 502, 503, 504], // Retry on these HTTP statuses
+    retryableErrors = ['ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'ECONNREFUSED']
+  } = retryConfig;
+
+  const startTime = Date.now();
+  let lastError = null;
+  let lastResponse = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      // Create AbortController for timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+      // Enhanced headers with keep-alive for connection reuse
+      const enhancedHeaders = {
+        'Connection': 'keep-alive',
+        'Keep-Alive': 'timeout=5, max=1000',
+        ...options.headers
+      };
+
+      const fetchOptions = {
+        ...options,
+        headers: enhancedHeaders,
+        signal: controller.signal
+      };
+
+      const response = await fetch(url, fetchOptions);
+      clearTimeout(timeoutId);
+
+      const elapsed = Date.now() - startTime;
+
+      // Check if we should retry based on status code
+      if (!response.ok && retryableStatuses.includes(response.status) && attempt < maxRetries) {
+        const delay = retryDelay * Math.pow(2, attempt); // Exponential backoff
+        console.warn(`⚠️ [NETWORK] Request failed with status ${response.status} (attempt ${attempt + 1}/${maxRetries + 1}). Retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        lastResponse = response;
+        continue;
+      }
+
+      // Success or non-retryable error
+      if (response.ok) {
+        console.log(`✅ [NETWORK] Request succeeded (${elapsed}ms, attempt ${attempt + 1}): ${options.method || 'GET'} ${url}`);
+      } else {
+        console.error(`❌ [NETWORK] Request failed after ${elapsed}ms (attempt ${attempt + 1}): ${response.status} ${response.statusText}`);
+      }
+
+      return response;
+
+    } catch (error) {
+      const elapsed = Date.now() - startTime;
+      lastError = error;
+
+      // Check if error is retryable
+      const isRetryable = retryableErrors.some(errCode => 
+        error.code === errCode || error.message?.includes(errCode) || error.name === 'AbortError'
+      );
+
+      if (isRetryable && attempt < maxRetries) {
+        const delay = retryDelay * Math.pow(2, attempt); // Exponential backoff
+        const errorType = error.name === 'AbortError' ? 'timeout' : error.code || error.message;
+        console.warn(`⚠️ [NETWORK] Request failed with ${errorType} (attempt ${attempt + 1}/${maxRetries + 1}). Retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+
+      // Non-retryable error or max retries reached
+      console.error(`❌ [NETWORK] Request failed after ${elapsed}ms (attempt ${attempt + 1}):`, {
+        error: error.message || error,
+        code: error.code,
+        name: error.name,
+        url,
+        method: options.method || 'GET'
+      });
+
+      // Return a mock error response for consistent error handling
+      return {
+        ok: false,
+        status: 0,
+        statusText: error.message || 'Network Error',
+        json: async () => ({ error: error.message || 'Network Error', code: error.code }),
+        text: async () => error.message || 'Network Error'
+      };
+    }
+  }
+
+  // If we get here, all retries failed
+  console.error(`❌ [NETWORK] All retry attempts failed for ${options.method || 'GET'} ${url}`);
+  return lastResponse || {
+    ok: false,
+    status: 0,
+    statusText: lastError?.message || 'Network Error',
+    json: async () => ({ error: lastError?.message || 'Network Error' }),
+    text: async () => lastError?.message || 'Network Error'
+  };
+}
 
 // Find existing active SELL StopLimit order for a symbol. Returns { orderId, quantity, order } or null.
 // This function searches tracking map → pending map → cache to catch orders in any state
@@ -4701,11 +4841,16 @@ async function createStopLimitSellOrder(symbol, quantity, buyPrice) {
     tracker_initial_stop_offset: useTrackerInitialStop ? (stopLimitTrackerConfig.get(matchedGroupId)?.initialStopPrice || null) : null
   }, null, 2));
   
-  const resp = await fetch(SECTIONS_BOT_ORDER_URL, {
+  const resp = await robustFetch(SECTIONS_BOT_ORDER_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
     body: JSON.stringify(body)
+  }, {
+    maxRetries: 3,
+    timeout: 10000, // 10 second timeout for order creation
+    retryDelay: 1000
   });
+  
   const text = await resp.text().catch(() => '');
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { }
@@ -4745,11 +4890,16 @@ async function modifyOrderQuantity(orderId, newQuantity) {
   const body = { order_id: String(orderId), quantity: Math.floor(Number(newQuantity)) || 0 };
   console.log(`📤 [DEBUG] Modifying order quantity:`, JSON.stringify(body, null, 2));
   
-  const resp = await fetch(SECTIONS_BOT_ORDER_URL, {
+  const resp = await robustFetch(SECTIONS_BOT_ORDER_URL, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
     body: JSON.stringify(body)
+  }, {
+    maxRetries: 3,
+    timeout: 8000, // 8 second timeout for modifications
+    retryDelay: 500
   });
+  
   const text = await resp.text().catch(() => '');
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { }
@@ -4778,11 +4928,16 @@ async function modifyStopLimitPrice(orderId, stopPrice, limitPrice) {
   };
   console.log(`📤 [DEBUG] Modifying StopLimit order prices:`, JSON.stringify(body, null, 2));
   
-  const resp = await fetch(SECTIONS_BOT_ORDER_URL, {
+  const resp = await robustFetch(SECTIONS_BOT_ORDER_URL, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
     body: JSON.stringify(body)
+  }, {
+    maxRetries: 3,
+    timeout: 8000,
+    retryDelay: 500
   });
+  
   const text = await resp.text().catch(() => '');
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { }
@@ -5079,10 +5234,10 @@ async function handleManualBuyFilled(orderId, order, pending) {
   
   // CRITICAL: Check if position exists - if it does, this is a rebuy and we should clear stale tracking
   // This handles cases like JBLU where stock was sold manually but then rebought
-  const existingPosition = positionsCache.get(normalizedSymbol);
-  const hasExistingPosition = existingPosition && parseFloat(existingPosition.Quantity || '0') > 0;
+  const rebuyPositionCheck = positionsCache.get(normalizedSymbol);
+  const hasRebuyPosition = rebuyPositionCheck && parseFloat(rebuyPositionCheck.Quantity || '0') > 0;
   
-  if (hasExistingPosition) {
+  if (hasRebuyPosition) {
     // Position exists - this is a rebuy, clear any stale tracking that might block creation
     if (recentlySoldSymbols.has(normalizedSymbol)) {
       console.log(`✅ [DEBUG] ${normalizedSymbol} has position (rebuy detected) - clearing recently sold tracking`);
@@ -5164,19 +5319,19 @@ async function handleManualBuyFilled(orderId, order, pending) {
   // This prevents creating StopLimit for positions that were just sold
   // However, we need to wait a bit for positions WebSocket to update the cache
   // (there's a timing difference between orders WebSocket and positions WebSocket)
-  let existingPosition = positionsCache.get(normalizedSymbol);
-  let hasExistingPosition = existingPosition && parseFloat(existingPosition.Quantity || '0') > 0;
+  let positionCheck = positionsCache.get(normalizedSymbol);
+  let hasPosition = positionCheck && parseFloat(positionCheck.Quantity || '0') > 0;
   
   // If position not found immediately, wait for positions WebSocket to update (up to 1.5 seconds)
   // This handles the race condition where buy order fills before position appears in cache
   // REDUCED: Changed from 3 seconds (6 * 500ms) to 1.5 seconds (3 * 500ms) for faster StopLimit creation
-  if (!hasExistingPosition) {
+  if (!hasPosition) {
     console.log(`⏳ [DEBUG] Position not found in cache for ${normalizedSymbol} immediately. Waiting for positions WebSocket update...`);
     for (let i = 0; i < 3; i++) {
       await new Promise(resolve => setTimeout(resolve, 500)); // Wait 500ms between checks
-      existingPosition = positionsCache.get(normalizedSymbol);
-      hasExistingPosition = existingPosition && parseFloat(existingPosition.Quantity || '0') > 0;
-      if (hasExistingPosition) {
+      positionCheck = positionsCache.get(normalizedSymbol);
+      hasPosition = positionCheck && parseFloat(positionCheck.Quantity || '0') > 0;
+      if (hasPosition) {
         console.log(`✅ [DEBUG] Position found in cache for ${normalizedSymbol} after ${(i + 1) * 500}ms wait`);
         break;
       }
@@ -5185,7 +5340,7 @@ async function handleManualBuyFilled(orderId, order, pending) {
   
   // DEFENSIVE: If position still doesn't exist after waiting, it was likely sold
   // Clean up any stale StopLimit tracking and abort
-  if (!hasExistingPosition) {
+  if (!hasPosition) {
     console.warn(`⚠️ [DEBUG] handleManualBuyFilled: No position found for ${normalizedSymbol} after waiting - position may have been sold. Cleaning up any stale StopLimit tracking...`);
       // Clean up any stale tracking (repository pattern)
       stopLimitOrderRepository.delete(normalizedSymbol);
@@ -5205,8 +5360,8 @@ async function handleManualBuyFilled(orderId, order, pending) {
     legQuantityOrdered: leg?.QuantityOrdered,
     buyPrice: fillPrice,
     note: 'StopLimit prices calculated using sections-buy-bot-main logic with current bid price',
-    hasExistingPosition: hasExistingPosition,
-    existingPositionQuantity: hasExistingPosition ? parseFloat(existingPosition.Quantity || '0') : 0
+    hasExistingPosition: hasPosition,
+    existingPositionQuantity: hasPosition ? parseFloat(positionCheck.Quantity || '0') : 0
   });
   
   if (!normalizedSymbol || quantity <= 0) {
@@ -5838,9 +5993,13 @@ async function handleManualBuyFilled(orderId, order, pending) {
         // Cancel non-StopLimit sell orders
         const cancelOrderDirectly = async (orderId) => {
           try {
-            const resp = await fetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(orderId)}`, {
+            const resp = await robustFetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(orderId)}`, {
               method: 'DELETE',
               headers: { 'Accept': '*/*' }
+            }, {
+              maxRetries: 2,
+              timeout: 6000,
+              retryDelay: 500
             });
             const isSuccess = resp.ok || resp.status === 200 || resp.status === 204 || resp.status === 404;
             if (isSuccess) {
@@ -5961,9 +6120,13 @@ async function handleManualBuyFilled(orderId, order, pending) {
           
           // Try to cancel the one we just created
           try {
-            const cancelResp = await fetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(result.orderId)}`, {
+            const cancelResp = await robustFetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(result.orderId)}`, {
               method: 'DELETE',
               headers: { 'Accept': '*/*' }
+            }, {
+              maxRetries: 2,
+              timeout: 6000,
+              retryDelay: 500
             });
             if (cancelResp.ok || cancelResp.status === 200 || cancelResp.status === 204 || cancelResp.status === 404) {
               console.log(`✅ Cancelled duplicate StopLimit order ${result.orderId}`);
@@ -7105,9 +7268,13 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
         const stopLimitOrderId = stopLimit.orderId;
         console.log(`🛑 Cancelling StopLimit order ${stopLimitOrderId} for ${normalizedSymbol} before manual sell...`);
         try {
-          const cancelResp = await fetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(stopLimitOrderId)}`, {
+          const cancelResp = await robustFetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(stopLimitOrderId)}`, {
             method: 'DELETE',
             headers: { 'Accept': '*/*' }
+          }, {
+            maxRetries: 2,
+            timeout: 6000,
+            retryDelay: 500
           });
           if (cancelResp.ok || cancelResp.status === 200 || cancelResp.status === 204 || cancelResp.status === 404) {
             console.log(`✅ StopLimit order ${stopLimitOrderId} cancelled successfully for ${normalizedSymbol}`);
@@ -7183,11 +7350,15 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
       const cancelOrderDirectly = async (orderId) => {
         try {
           console.log(`🗑️ Attempting to cancel order ${orderId}...`);
-          const resp = await fetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(orderId)}`, {
+          const resp = await robustFetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(orderId)}`, {
             method: 'DELETE',
             headers: {
               'Accept': '*/*'
             }
+          }, {
+            maxRetries: 2,
+            timeout: 6000,
+            retryDelay: 500
           });
           
           const statusCode = resp.status;
@@ -7247,9 +7418,13 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
           if (isActive || isPending) {
             console.log(`🛑 [STOPLIMIT_REPO] Found additional StopLimit order ${stopLimitId} (status: ${stopLimitStatus}) - cancelling before general cleanup...`);
             try {
-              const cancelResp = await fetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(stopLimitId)}`, {
+              const cancelResp = await robustFetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(stopLimitId)}`, {
                 method: 'DELETE',
                 headers: { 'Accept': '*/*' }
+              }, {
+                maxRetries: 2,
+                timeout: 6000,
+                retryDelay: 500
               });
               if (cancelResp.ok || cancelResp.status === 200 || cancelResp.status === 204 || cancelResp.status === 404) {
                 console.log(`✅ Additional StopLimit order ${stopLimitId} cancelled successfully`);
@@ -7385,9 +7560,13 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
         if (isActive || isPending) {
           console.warn(`🛑 [DEBUG] CRITICAL: Found StopLimit order ${finalStopLimitId} (status: ${finalStopLimitStatus}) right before placing sell order! Cancelling immediately...`);
           try {
-            const cancelResp = await fetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(finalStopLimitId)}`, {
+            const cancelResp = await robustFetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(finalStopLimitId)}`, {
               method: 'DELETE',
               headers: { 'Accept': '*/*' }
+            }, {
+              maxRetries: 2,
+              timeout: 6000,
+              retryDelay: 500
             });
             if (cancelResp.ok || cancelResp.status === 200 || cancelResp.status === 204 || cancelResp.status === 404) {
               console.log(`✅ Final StopLimit order ${finalStopLimitId} cancelled successfully`);
@@ -7498,13 +7677,17 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
     try {
       console.log(`📤 Sending sell order to external API:`, JSON.stringify(orderBody, null, 2));
       
-      const resp = await fetch('https://sections-bot.inbitme.com/order', {
+      const resp = await robustFetch('https://sections-bot.inbitme.com/order', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json'
         },
         body: JSON.stringify(orderBody)
+      }, {
+        maxRetries: 3,
+        timeout: 10000,
+        retryDelay: 1000
       });
       
       notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
@@ -7659,11 +7842,15 @@ app.post('/api/sell_all', requireDbReady, requireAuth, async (req, res) => {
     let errorMessage = null;
     
     try {
-      const resp = await fetch('https://sections-bot.inbitme.com/sell_all', {
+      const resp = await robustFetch('https://sections-bot.inbitme.com/sell_all', {
         method: 'POST',
         headers: {
           'Accept': '*/*'
         }
+      }, {
+        maxRetries: 3,
+        timeout: 15000, // Longer timeout for sell_all
+        retryDelay: 1000
       });
       
       notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
