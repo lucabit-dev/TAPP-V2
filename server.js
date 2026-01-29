@@ -4026,20 +4026,15 @@ function connectOrdersWebSocket() {
         lastOrdersError = reason.toString();
       }
       
-      // Only reconnect if it wasn't a clean close (code 1000)
-      if (code !== 1000) {
-        // Reconnect after delay (exponential backoff, max 30 seconds)
-        ordersReconnectAttempts = Math.min(ordersReconnectAttempts + 1, 6);
-        const delay = Math.min(30000, 1000 * Math.pow(2, Math.max(0, ordersReconnectAttempts - 1)));
-        console.log(`🔄 Scheduling orders WebSocket reconnection in ${delay}ms (attempt ${ordersReconnectAttempts})...`);
-        ordersWsReconnectTimer = setTimeout(() => {
-          console.log('🔄 Reconnecting orders WebSocket...');
-          connectOrdersWebSocket();
-        }, delay);
-      } else {
-        console.log('✅ Orders WebSocket closed cleanly, not reconnecting');
-        ordersReconnectAttempts = 0;
-      }
+      // Always reconnect: orders stream is required for stop-limit creation
+      // Some providers close idle sockets with code 1000; we still need to restore the stream.
+      ordersReconnectAttempts = Math.min(ordersReconnectAttempts + 1, 6);
+      const delay = Math.min(30000, 1000 * Math.pow(2, Math.max(0, ordersReconnectAttempts - 1)));
+      console.log(`🔄 Scheduling orders WebSocket reconnection in ${delay}ms (attempt ${ordersReconnectAttempts})...`);
+      ordersWsReconnectTimer = setTimeout(() => {
+        console.log('🔄 Reconnecting orders WebSocket...');
+        connectOrdersWebSocket();
+      }, delay);
     });
     
   } catch (err) {
