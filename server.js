@@ -3863,7 +3863,7 @@ function connectOrdersWebSocket() {
                 
                 if (!hasFallbackPosition) {
                   console.log(`⏳ [FALLBACK] Position not found for ${normalizedSymbol}, waiting for positions WS (instant-fill race)...`);
-                  for (let i = 0; i < 6; i++) {
+                  for (let i = 0; i < 10; i++) {
                     await new Promise(resolve => setTimeout(resolve, 500));
                     fallbackPositionCheck = positionsCache.get(normalizedSymbol);
                     hasFallbackPosition = fallbackPositionCheck && parseFloat(fallbackPositionCheck.Quantity || '0') > 0;
@@ -3875,7 +3875,7 @@ function connectOrdersWebSocket() {
                 }
                 
                 if (!hasFallbackPosition) {
-                  console.warn(`⚠️ [FALLBACK] No position found for ${normalizedSymbol} after 3s - skipping (do not mark recently sold; may be timing)`);
+                  console.warn(`⚠️ [FALLBACK] No position found for ${normalizedSymbol} after 5s - skipping (do not mark recently sold; may be timing)`);
                   processedFllOrders.add(orderId);
                   return;
                 }
@@ -5484,10 +5484,10 @@ async function handleManualBuyFilled(orderId, order, pending) {
   let hasPosition = positionCheck && parseFloat(positionCheck.Quantity || '0') > 0;
   
   // If position not found immediately, wait for positions WebSocket (instant fills: FLL can arrive before position update)
-  // Wait up to 3s so we don't skip stop-limit creation for instant fills like CATX
+  // Wait up to 5s so we don't skip stop-limit creation for instant fills / after reconnect (positions WS delayed)
   if (!hasPosition) {
-    console.log(`⏳ [DEBUG] Position not found in cache for ${normalizedSymbol}. Waiting for positions WebSocket (up to 3s)...`);
-    for (let i = 0; i < 6; i++) {
+    console.log(`⏳ [DEBUG] Position not found in cache for ${normalizedSymbol}. Waiting for positions WebSocket (up to 5s)...`);
+    for (let i = 0; i < 10; i++) {
       await new Promise(resolve => setTimeout(resolve, 500));
       positionCheck = positionsCache.get(normalizedSymbol);
       hasPosition = positionCheck && parseFloat(positionCheck.Quantity || '0') > 0;
@@ -5499,10 +5499,12 @@ async function handleManualBuyFilled(orderId, order, pending) {
   }
   
   if (!hasPosition) {
-    console.warn(`⚠️ [DEBUG] handleManualBuyFilled: No position for ${normalizedSymbol} after 3s - aborting (may be sold or positions WS delayed)`);
+    console.warn(`⚠️ [DEBUG] handleManualBuyFilled: No position for ${normalizedSymbol} after 5s - aborting (may be sold or positions WS delayed)`);
     stopLimitOrderRepository.delete(normalizedSymbol);
     stopLimitCreationBySymbol.delete(normalizedSymbol);
-    recentlySoldSymbols.set(normalizedSymbol, Date.now());
+    // CRITICAL: Do NOT set recentlySoldSymbols here. We aborted due to timing (positions WS delayed),
+    // not because we sold. Marking recently sold would block future stop-limit creation for this symbol.
+    // Align with fallback: "do not mark recently sold; may be timing".
     return;
   }
   
