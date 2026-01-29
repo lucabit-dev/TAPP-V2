@@ -909,17 +909,17 @@ setInterval(async () => {
       console.log(`🧹 [CLEANUP] Cleaned ${cleanedProcessedFll} old processed FLL order entries (kept ${processedFllOrders.size})`);
     }
     
-    // Orders WebSocket activity watchdog: if we have pending buys but no order updates for 10+ min, force reconnect.
-    // Handles silent drops / half-open connections after ~10 min idle (e.g. Railway/Vercel deploy).
+    // Orders WebSocket activity watchdog: force reconnect when no messages (orders or heartbeats) for ~5 min.
+    // Keeps stop-limit tracking alive on Railway (~5 min idle timeouts) and recovers from half-open connections.
+    // Run regardless of pending buys so we reconnect proactively before user buys.
     if (process.env.PNL_API_KEY && typeof connectOrdersWebSocket === 'function') {
       const wsOpen = ordersWs && ordersWs.readyState === WebSocket.OPEN;
-      const hasPending = pendingManualBuyOrders && pendingManualBuyOrders.size > 0;
-      if (wsOpen && hasPending) {
+      if (wsOpen) {
         const lastActivity = lastOrderUpdateTime != null ? lastOrderUpdateTime : lastOrdersConnectedAt;
         const idleMs = now - (lastActivity || 0);
-        const IDLE_RECONNECT_MS = 10 * 60 * 1000; // 10 minutes
+        const IDLE_RECONNECT_MS = 5 * 60 * 1000; // 5 minutes
         if (idleMs >= IDLE_RECONNECT_MS) {
-          console.warn(`⚠️ [ORDERS_WS] No order updates for ${Math.round(idleMs / 1000)}s despite ${pendingManualBuyOrders.size} pending buy(s) - forcing reconnect`);
+          console.warn(`⚠️ [ORDERS_WS] No messages for ${Math.round(idleMs / 1000)}s - forcing reconnect (keep stop-limit tracking alive)`);
           connectOrdersWebSocket();
         }
       }
@@ -3232,6 +3232,8 @@ let lastOrdersError = null;
 // Do NOT skip orders that were placed during this session and filled late (e.g. SATL opened 12:20, filled 12:26).
 let ordersReconnectWindowUntil = 0;
 let lastOrdersConnectedAt = 0; // When orders WS last opened; orders opened before this are treated as replayed
+let ordersWsPingInterval = null; // Keepalive ping interval; cleared on close
+let positionsWsPingInterval = null; // Keepalive ping for positions WS; cleared on close
 
 function connectPositionsWebSocket() {
   const apiKey = process.env.PNL_API_KEY;
@@ -3244,7 +3246,11 @@ function connectPositionsWebSocket() {
   
   lastPositionsConnectAttempt = Date.now();
 
-  // Close existing connection if any
+  // Close existing connection if any; clear ping keepalive
+  if (positionsWsPingInterval) {
+    clearInterval(positionsWsPingInterval);
+    positionsWsPingInterval = null;
+  }
   if (positionsWs) {
     try {
       positionsWs.close();
@@ -3277,6 +3283,14 @@ function connectPositionsWebSocket() {
           console.warn('⚠️ [RECONNECT] Positions WS: failed to reconcile from DB:', e.message);
         }
       }
+      // Ping keepalive: prevent idle timeout (~5 min) on Railway / Sections Bot / proxies
+      if (positionsWsPingInterval) clearInterval(positionsWsPingInterval);
+      const positionsSocketForPing = positionsWs;
+      positionsWsPingInterval = setInterval(() => {
+        if (positionsSocketForPing && positionsSocketForPing.readyState === WebSocket.OPEN) {
+          try { positionsSocketForPing.ping(); } catch (_) {}
+        }
+      }, 90000); // Every 90s
     });
     
     positionsWs.on('message', (data) => {
@@ -3372,9 +3386,16 @@ function connectPositionsWebSocket() {
       // Don't reconnect here - let 'close' event handle it
     });
     
+    const positionsSocketRef = positionsWs;
     positionsWs.on('close', (code, reason) => {
       console.log(`🔌 Positions WebSocket closed (${code}): ${reason || 'No reason'}`);
-      positionsWs = null;
+      if (positionsWs === positionsSocketRef) {
+        positionsWs = null;
+        if (positionsWsPingInterval) {
+          clearInterval(positionsWsPingInterval);
+          positionsWsPingInterval = null;
+        }
+      }
       lastPositionUpdateTime = null;
       if (reason) {
         lastPositionsError = reason.toString();
@@ -3420,7 +3441,11 @@ function connectOrdersWebSocket() {
     return;
   }
   
-  // Close existing connection if any
+  // Close existing connection if any; clear ping keepalive
+  if (ordersWsPingInterval) {
+    clearInterval(ordersWsPingInterval);
+    ordersWsPingInterval = null;
+  }
   if (ordersWs) {
     try {
       ordersWs.close();
@@ -3457,8 +3482,16 @@ function connectOrdersWebSocket() {
       }
       lastOrdersConnectedAt = Date.now();
       lastOrderUpdateTime = null; // Reset so we don't use stale value from previous connection; watchdog uses this
-      ordersReconnectWindowUntil = Date.now() + 30000; // 30s: during window do not create NEW stop-limits (only update existing); prevents creating for replayed/sold stocks
+      ordersReconnectWindowUntil = Date.now() + 10000; // 10s: during window do not create NEW stop-limits (only update existing); short window so tracking works soon after reconnect
       console.log(`🔄 [RECONNECT] Orders WS: window until ${new Date(ordersReconnectWindowUntil).toISOString()} - no new stop-limits during window, only updates to existing`);
+      // Ping keepalive: prevent idle timeout (~5 min) on Railway / Sections Bot / proxies
+      if (ordersWsPingInterval) clearInterval(ordersWsPingInterval);
+      const ordersSocketForPing = ordersWs;
+      ordersWsPingInterval = setInterval(() => {
+        if (ordersSocketForPing && ordersSocketForPing.readyState === WebSocket.OPEN) {
+          try { ordersSocketForPing.ping(); } catch (_) {}
+        }
+      }, 90000); // Every 90s
     });
     
     ordersWs.on('message', async (data) => {
@@ -3466,8 +3499,9 @@ function connectOrdersWebSocket() {
         const messageStr = Buffer.isBuffer(data) ? data.toString('utf8') : data.toString();
         const dataObj = JSON.parse(messageStr);
         
-        // Skip heartbeat messages and stream status
+        // Skip heartbeat messages and stream status (but count as activity so we don't treat as idle)
         if (dataObj.Heartbeat || dataObj.StreamStatus) {
+          lastOrderUpdateTime = Date.now();
           return;
         }
         
@@ -3965,8 +3999,14 @@ function connectOrdersWebSocket() {
     const ordersSocketRef = ordersWs;
     ordersWs.on('close', (code, reason) => {
       console.log(`🔌 Orders WebSocket closed (${code}): ${reason || 'No reason'}`);
-      // Only clear global ref if this close is for the current socket (avoids wiping new connection when watchdog forces reconnect)
-      if (ordersWs === ordersSocketRef) ordersWs = null;
+      // Only clear global ref and ping interval if this close is for the current socket (avoids wiping new connection when watchdog forces reconnect)
+      if (ordersWs === ordersSocketRef) {
+        ordersWs = null;
+        if (ordersWsPingInterval) {
+          clearInterval(ordersWsPingInterval);
+          ordersWsPingInterval = null;
+        }
+      }
       if (reason) {
         lastOrdersError = reason.toString();
       }
