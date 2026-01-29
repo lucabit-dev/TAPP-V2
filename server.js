@@ -3387,23 +3387,15 @@ function connectOrdersWebSocket() {
           return;
         }
         
-          // Handle order updates
-          if (dataObj.OrderID) {
-            const order = dataObj;
-            const orderId = order.OrderID;
-            const status = (order.Status || '').toUpperCase();
-            const isFilled = (status === 'FLL' || status === 'FIL');
-            const isRejected = (status === 'REJ' || status === 'REJECTED');
-            const isBuy = (order.Legs?.[0]?.BuyOrSell || '').toUpperCase() === 'BUY';
-            const pending = pendingManualBuyOrders.get(orderId);
-            const symbol = order.Legs?.[0]?.Symbol || 'UNKNOWN';
-            
-            // CRITICAL: Mark rejected orders as processed immediately to prevent retries
-            // This prevents the fallback mechanism from trying to create stop-limits for rejected orders
-            if (isRejected && isBuy) {
-              processedFllOrders.add(orderId);
-              console.log(`🚫 [DEBUG] Marked rejected BUY order ${orderId} (${symbol}) as processed to prevent retries`);
-            }
+        // Handle order updates
+        if (dataObj.OrderID) {
+          const order = dataObj;
+          const orderId = order.OrderID;
+          const status = (order.Status || '').toUpperCase();
+          const isFilled = (status === 'FLL' || status === 'FIL');
+          const isBuy = (order.Legs?.[0]?.BuyOrSell || '').toUpperCase() === 'BUY';
+          const pending = pendingManualBuyOrders.get(orderId);
+          const symbol = order.Legs?.[0]?.Symbol || 'UNKNOWN';
 
           // Debug logging for tracked orders
           if (pending) {
@@ -3677,43 +3669,9 @@ function connectOrdersWebSocket() {
           // 3. Order is NOT in pendingManualBuyOrders (wasn't tracked initially)
           // 4. Order hasn't been processed yet
           // 5. Order type is Limit (manual buys use Limit orders)
-          // 6. Order is RECENT (within last 30 minutes) - prevents processing old orders from database/reconnection
-          // 7. Order is NOT rejected - rejected orders should never trigger stop-limit creation
-          if (isFilled && isBuy && !pending && !processedFllOrders.has(orderId) && !isRejected) {
+          if (isFilled && isBuy && !pending && !processedFllOrders.has(orderId)) {
             const orderType = (order.OrderType || '').toUpperCase();
             if (orderType === 'LIMIT' || orderType === 'LMT') {
-              // CRITICAL: Check order timestamp to prevent processing old orders
-              // This prevents reprocessing orders that were loaded from database or sent after WebSocket reconnection
-              const orderDateTime = parseOrderDateTime(order.OpenedDateTime);
-              const now = Date.now();
-              const MAX_ORDER_AGE_MS = 30 * 60 * 1000; // 30 minutes - only process recent orders
-              
-              if (orderDateTime) {
-                const orderAge = now - orderDateTime.getTime();
-                if (orderAge > MAX_ORDER_AGE_MS) {
-                  console.log(`⏭️ [FALLBACK] Skipping old filled order ${orderId} (${symbol}) - age: ${Math.round(orderAge / 1000 / 60)} minutes (max: ${MAX_ORDER_AGE_MS / 1000 / 60} minutes)`);
-                  // Mark as processed to prevent reprocessing
-                  processedFllOrders.add(orderId);
-                  return;
-                }
-              } else {
-                // If we can't parse the date, check lastUpdated from cache
-                const cachedOrder = ordersCache.get(orderId);
-                if (cachedOrder && cachedOrder.lastUpdated) {
-                  const orderAge = now - cachedOrder.lastUpdated;
-                  if (orderAge > MAX_ORDER_AGE_MS) {
-                    console.log(`⏭️ [FALLBACK] Skipping old filled order ${orderId} (${symbol}) - cache age: ${Math.round(orderAge / 1000 / 60)} minutes`);
-                    processedFllOrders.add(orderId);
-                    return;
-                  }
-                } else {
-                  // No timestamp available - skip to be safe (likely an old order)
-                  console.log(`⏭️ [FALLBACK] Skipping order ${orderId} (${symbol}) - no timestamp available (likely old order)`);
-                  processedFllOrders.add(orderId);
-                  return;
-                }
-              }
-              
               const normalizedSymbol = (symbol || '').toUpperCase();
               const leg = order.Legs?.[0];
               const quantity = Math.floor(Number(leg?.ExecQuantity || leg?.QuantityOrdered || 0)) || 0;
@@ -3724,8 +3682,7 @@ function connectOrdersWebSocket() {
               const buyPrice = filledPrice > 0 ? filledPrice : limitPrice;
               
               if (normalizedSymbol && quantity > 0 && buyPrice > 0) {
-                const orderAgeMinutes = orderDateTime ? Math.round((now - orderDateTime.getTime()) / 1000 / 60) : 'unknown';
-                console.log(`🔄 [FALLBACK] Detected untracked filled BUY order ${orderId} for ${normalizedSymbol} (age: ${orderAgeMinutes} min) - attempting stop-limit creation`);
+                console.log(`🔄 [FALLBACK] Detected untracked filled BUY order ${orderId} for ${normalizedSymbol} - attempting stop-limit creation`);
                 console.log(`🔄 [FALLBACK] Order details: qty=${quantity}, buyPrice=${buyPrice}, filledPrice=${filledPrice}, limitPrice=${limitPrice}`);
                 
                 // Check if stop-limit already exists
