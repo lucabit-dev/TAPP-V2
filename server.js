@@ -924,6 +924,21 @@ setInterval(async () => {
         }
       }
     }
+
+    // Positions WebSocket activity watchdog: force reconnect when no messages for ~5 min.
+    // If positions stream dies, stop-limit creation will abort because positionsCache never updates.
+    if (process.env.PNL_API_KEY && typeof connectPositionsWebSocket === 'function') {
+      const wsOpen = positionsWs && positionsWs.readyState === WebSocket.OPEN;
+      if (wsOpen) {
+        const lastActivity = lastPositionUpdateTime != null ? lastPositionUpdateTime : lastPositionsConnectedAt;
+        const idleMs = now - (lastActivity || 0);
+        const IDLE_RECONNECT_MS = 5 * 60 * 1000; // 5 minutes
+        if (idleMs >= IDLE_RECONNECT_MS) {
+          console.warn(`⚠️ [POSITIONS_WS] No messages for ${Math.round(idleMs / 1000)}s - forcing reconnect (positions cache stale)`);
+          connectPositionsWebSocket();
+        }
+      }
+    }
     
     if (cleanedRepository > 0 || restoredFromDb > 0 || cleanedRecentlySold > 0 || cleanedFilledStopLimits > 0 || cleanedProcessedFll > 0) {
       console.log(`🧹 [STOPLIMIT_REPO] Cleaned ${cleanedRepository} repository entries, restored ${restoredFromDb} from DB, ${cleanedRecentlySold} recently sold, ${cleanedFilledStopLimits} filled StopLimit, ${cleanedProcessedFll} processed FLL`);
@@ -3216,11 +3231,15 @@ function isActiveOrderStatus(status) {
 
 // Track last time we received an order update from websocket
 let lastOrderUpdateTime = null;
+let lastPositionUpdateTime = null;
 
 // Maintain WebSocket connection to positions to keep cache updated
 let positionsWs = null;
 let positionsWsReconnectTimer = null;
 let lastPositionsError = null;
+let lastPositionsConnectAttempt = 0;
+let positionsReconnectAttempts = 0;
+let lastPositionsConnectedAt = 0;
 
 // Maintain WebSocket connection to orders to keep cache updated
 let ordersWs = null;
@@ -3267,6 +3286,7 @@ function connectPositionsWebSocket() {
     positionsWs.on('open', async () => {
       console.log('✅ Positions WebSocket connected for stop-loss monitoring');
        lastPositionUpdateTime = Date.now();
+       lastPositionsConnectedAt = Date.now();
        positionsReconnectAttempts = 0;
        lastPositionsError = null;
       // Clear reconnect timer on successful connection
@@ -3400,21 +3420,16 @@ function connectPositionsWebSocket() {
       if (reason) {
         lastPositionsError = reason.toString();
       }
-      
-      // Only reconnect if it wasn't a clean close (code 1000)
-      if (code !== 1000) {
-        // Reconnect after delay (exponential backoff, max 30 seconds)
-        positionsReconnectAttempts = Math.min(positionsReconnectAttempts + 1, 6);
-        const delay = Math.min(30000, 1000 * Math.pow(2, Math.max(0, positionsReconnectAttempts - 1)));
-        console.log(`🔄 Scheduling positions WebSocket reconnection in ${delay}ms (attempt ${positionsReconnectAttempts})...`);
-        positionsWsReconnectTimer = setTimeout(() => {
-          console.log('🔄 Reconnecting positions WebSocket...');
-          connectPositionsWebSocket();
-        }, delay);
-      } else {
-        console.log('✅ Positions WebSocket closed cleanly, not reconnecting');
-        positionsReconnectAttempts = 0;
-      }
+
+      // Always reconnect: positions stream is required to create stop-limits safely
+      // Some providers close idle sockets with code 1000; we still need to restore the stream.
+      positionsReconnectAttempts = Math.min(positionsReconnectAttempts + 1, 6);
+      const delay = Math.min(30000, 1000 * Math.pow(2, Math.max(0, positionsReconnectAttempts - 1)));
+      console.log(`🔄 Scheduling positions WebSocket reconnection in ${delay}ms (attempt ${positionsReconnectAttempts})...`);
+      positionsWsReconnectTimer = setTimeout(() => {
+        console.log('🔄 Reconnecting positions WebSocket...');
+        connectPositionsWebSocket();
+      }, delay);
     });
     
   } catch (err) {
