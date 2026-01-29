@@ -909,6 +909,22 @@ setInterval(async () => {
       console.log(`🧹 [CLEANUP] Cleaned ${cleanedProcessedFll} old processed FLL order entries (kept ${processedFllOrders.size})`);
     }
     
+    // Orders WebSocket activity watchdog: if we have pending buys but no order updates for 10+ min, force reconnect.
+    // Handles silent drops / half-open connections after ~10 min idle (e.g. Railway/Vercel deploy).
+    if (process.env.PNL_API_KEY && typeof connectOrdersWebSocket === 'function') {
+      const wsOpen = ordersWs && ordersWs.readyState === WebSocket.OPEN;
+      const hasPending = pendingManualBuyOrders && pendingManualBuyOrders.size > 0;
+      if (wsOpen && hasPending) {
+        const lastActivity = lastOrderUpdateTime != null ? lastOrderUpdateTime : lastOrdersConnectedAt;
+        const idleMs = now - (lastActivity || 0);
+        const IDLE_RECONNECT_MS = 10 * 60 * 1000; // 10 minutes
+        if (idleMs >= IDLE_RECONNECT_MS) {
+          console.warn(`⚠️ [ORDERS_WS] No order updates for ${Math.round(idleMs / 1000)}s despite ${pendingManualBuyOrders.size} pending buy(s) - forcing reconnect`);
+          connectOrdersWebSocket();
+        }
+      }
+    }
+    
     if (cleanedRepository > 0 || restoredFromDb > 0 || cleanedRecentlySold > 0 || cleanedFilledStopLimits > 0 || cleanedProcessedFll > 0) {
       console.log(`🧹 [STOPLIMIT_REPO] Cleaned ${cleanedRepository} repository entries, restored ${restoredFromDb} from DB, ${cleanedRecentlySold} recently sold, ${cleanedFilledStopLimits} filled StopLimit, ${cleanedProcessedFll} processed FLL`);
     }
@@ -3440,6 +3456,7 @@ function connectOrdersWebSocket() {
         }
       }
       lastOrdersConnectedAt = Date.now();
+      lastOrderUpdateTime = null; // Reset so we don't use stale value from previous connection; watchdog uses this
       ordersReconnectWindowUntil = Date.now() + 30000; // 30s: during window do not create NEW stop-limits (only update existing); prevents creating for replayed/sold stocks
       console.log(`🔄 [RECONNECT] Orders WS: window until ${new Date(ordersReconnectWindowUntil).toISOString()} - no new stop-limits during window, only updates to existing`);
     });
@@ -3733,13 +3750,9 @@ function connectOrdersWebSocket() {
               return;
             }
             
-            // Reconnect window: do not create new stop-limits (only update existing); prevents creating for already-sold stocks
-            if (Date.now() < ordersReconnectWindowUntil) {
-              console.log(`⏭️ [DEBUG] Reconnect window: skipping new stop-limit for ${normalizedSymbol} (order ${orderId}) - no existing stop-limit`);
-              processedFllOrders.add(orderId);
-              pendingManualBuyOrders.delete(orderId);
-              return;
-            }
+            // CRITICAL: Do NOT apply reconnect-window skip to TRACKED orders (placed during this session).
+            // Reconnect window only skips UNTRACKED (fallback) FLLs to avoid creating stop-limits for replayed/sold stocks.
+            // Tracked orders must always get stop-limits created/updated regardless of reconnect window.
             
             // Don't remove from cache yet - let handleManualBuyFilled complete first
             // The order will be removed from cache after this block if status is terminal
@@ -3933,9 +3946,11 @@ function connectOrdersWebSocket() {
       // Don't reconnect here - let 'close' event handle it
     });
     
+    const ordersSocketRef = ordersWs;
     ordersWs.on('close', (code, reason) => {
       console.log(`🔌 Orders WebSocket closed (${code}): ${reason || 'No reason'}`);
-      ordersWs = null;
+      // Only clear global ref if this close is for the current socket (avoids wiping new connection when watchdog forces reconnect)
+      if (ordersWs === ordersSocketRef) ordersWs = null;
       if (reason) {
         lastOrdersError = reason.toString();
       }
