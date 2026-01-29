@@ -70,10 +70,10 @@ const PositionsSection: React.FC = () => {
   const reconnectTimerRef = useRef<number | null>(null);
   const connectionTimeoutRef = useRef<number | null>(null);
 
-  // Small helper to add a client-side timeout to actions (sell / sell all)
-  // This keeps the UI responsive even if the backend or broker is slow
+  // Timeout for sell/sell_all: 30s so broker API + retries can complete (avoids "timed out" on slow connections)
+  const SELL_REQUEST_TIMEOUT_MS = 30000;
   const fetchWithTimeout = useCallback(
-    (input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 10000) => {
+    (input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = SELL_REQUEST_TIMEOUT_MS) => {
       const controller = new AbortController();
       const id = window.setTimeout(() => controller.abort(), timeoutMs);
       return fetchWithAuth(input, { ...init, signal: controller.signal })
@@ -367,16 +367,20 @@ const PositionsSection: React.FC = () => {
     await Promise.resolve();
     
     try {
-      const response = await fetchWithTimeout(`${API_BASE_URL}/sell`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          symbol,
-          quantity,
-          order_type: 'Limit',
-          long_short: position.LongShort
-        })
-      });
+      const response = await fetchWithTimeout(
+        `${API_BASE_URL}/sell`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            symbol,
+            quantity,
+            order_type: 'Limit',
+            long_short: position.LongShort
+          })
+        },
+        SELL_REQUEST_TIMEOUT_MS
+      );
       
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}: ${response.statusText}` }));
@@ -477,10 +481,11 @@ const PositionsSection: React.FC = () => {
             return updated;
           }, 'Sending sell all command...');
           
-          const response = await fetchWithTimeout(`${API_BASE_URL}/sell_all`, {
-            method: 'POST',
-            headers: { 'Accept': '*/*' }
-          });
+          const response = await fetchWithTimeout(
+            `${API_BASE_URL}/sell_all`,
+            { method: 'POST', headers: { 'Accept': '*/*' } },
+            SELL_REQUEST_TIMEOUT_MS
+          );
           
           if (!response.ok) {
             const errorData = await response.json().catch(() => ({ 

@@ -98,10 +98,10 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
   const [tempQuantity, setTempQuantity] = useState<Record<string, string>>({});
   const [buyCooldown, setBuyCooldown] = useState<number>(0); // Cooldown in seconds
 
-  // Small helper to add a client-side timeout to actions (manual BUY)
-  // This keeps the UI responsive even if the backend or broker is slow
+  // Timeout for buy: allow 30s so broker API + retries can complete (avoids "timed out" on slow connections)
+  const BUY_REQUEST_TIMEOUT_MS = 30000;
   const fetchWithTimeout = useCallback(
-    (input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 10000) => {
+    (input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = BUY_REQUEST_TIMEOUT_MS) => {
       const controller = new AbortController();
       const id = window.setTimeout(() => controller.abort(), timeoutMs);
       return fetchWithAuth(input, { ...init, signal: controller.signal })
@@ -250,11 +250,15 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
     await Promise.resolve();
     
     try {
-      const resp = await fetchWithTimeout(`${API_BASE_URL}/buys/test`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol: cleanSymbol })
-      });
+      const resp = await fetchWithTimeout(
+        `${API_BASE_URL}/buys/test`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol: cleanSymbol })
+        },
+        BUY_REQUEST_TIMEOUT_MS
+      );
       
       if (!resp.ok) {
         // HTTP error (500, etc) - try to get error message

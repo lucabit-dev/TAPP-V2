@@ -48,10 +48,10 @@ const OrdersSection: React.FC = () => {
   const reconnectTimerRef = React.useRef<number | null>(null);
   const connectionTimeoutRef = React.useRef<number | null>(null);
 
-  // Small helper to add a client-side timeout to actions (cancel)
-  // This keeps the UI responsive even if the backend or broker is slow
+  // Timeout for cancel: 25s so broker API + retries can complete
+  const CANCEL_REQUEST_TIMEOUT_MS = 25000;
   const fetchWithTimeout = React.useCallback(
-    (input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 10000) => {
+    (input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = CANCEL_REQUEST_TIMEOUT_MS) => {
       const controller = new AbortController();
       const id = window.setTimeout(() => controller.abort(), timeoutMs);
       return fetchWithAuth(input, { ...init, signal: controller.signal })

@@ -3428,19 +3428,20 @@ function connectOrdersWebSocket() {
         clearTimeout(ordersWsReconnectTimer);
         ordersWsReconnectTimer = null;
       }
-      // Reconcile state from DB on reconnect so repository/caches reflect persisted stop-limits and we don't create duplicates
+      // Reconcile orders and stop-limit repo from DB; clear positions so we never use stale DB positions for creation (avoids stop-limits for already-sold stocks)
       if (cachePersistenceService) {
         try {
           const loaded = await cachePersistenceService.loadFromDatabase();
-          console.log(`🔄 [RECONNECT] Orders WS: reconciled state from DB - ${loaded.orders} orders, ${loaded.positions} positions, ${loaded.stopLimitRepository || 0} StopLimit repo entries`);
+          console.log(`🔄 [RECONNECT] Orders WS: reconciled from DB - ${loaded.orders} orders, ${loaded.stopLimitRepository || 0} StopLimit repo entries`);
+          positionsCache.clear();
+          console.log(`🔄 [RECONNECT] Orders WS: cleared positions cache - will repopulate from positions WebSocket only (no stale sold positions)`);
         } catch (e) {
           console.warn('⚠️ [RECONNECT] Orders WS: failed to reconcile from DB:', e.message);
         }
       }
-      // Reconnect window: only skip FLL for orders opened BEFORE this connection (true replays), not late-filling orders placed this session
       lastOrdersConnectedAt = Date.now();
-      ordersReconnectWindowUntil = Date.now() + 25000; // 25 seconds
-      console.log(`🔄 [RECONNECT] Orders WS: connected at ${new Date(lastOrdersConnectedAt).toISOString()}, window until ${new Date(ordersReconnectWindowUntil).toISOString()} - will skip FALLBACK FLL only when symbol already has active stop-limit`);
+      ordersReconnectWindowUntil = Date.now() + 30000; // 30s: during window do not create NEW stop-limits (only update existing); prevents creating for replayed/sold stocks
+      console.log(`🔄 [RECONNECT] Orders WS: window until ${new Date(ordersReconnectWindowUntil).toISOString()} - no new stop-limits during window, only updates to existing`);
     });
     
     ordersWs.on('message', async (data) => {
@@ -3732,6 +3733,14 @@ function connectOrdersWebSocket() {
               return;
             }
             
+            // Reconnect window: do not create new stop-limits (only update existing); prevents creating for already-sold stocks
+            if (Date.now() < ordersReconnectWindowUntil) {
+              console.log(`⏭️ [DEBUG] Reconnect window: skipping new stop-limit for ${normalizedSymbol} (order ${orderId}) - no existing stop-limit`);
+              processedFllOrders.add(orderId);
+              pendingManualBuyOrders.delete(orderId);
+              return;
+            }
+            
             // Don't remove from cache yet - let handleManualBuyFilled complete first
             // The order will be removed from cache after this block if status is terminal
             // Only call if not already in progress (prevent duplicate calls)
@@ -3762,14 +3771,27 @@ function connectOrdersWebSocket() {
               const leg = order.Legs?.[0];
               const quantity = Math.floor(Number(leg?.ExecQuantity || leg?.QuantityOrdered || 0)) || 0;
               
-              // Reconnect window: skip only when we already have an active stop-limit for this symbol (avoid duplicate). Never skip first-time creation (e.g. SATL/CATX that filled late).
+              // Reconnect window: do NOT create new stop-limits (only update existing). Prevents creating for already-sold stocks when replayed FLLs arrive.
               if (Date.now() < ordersReconnectWindowUntil) {
                 const existingForSymbol = await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
                 if (existingForSymbol) {
-                  console.log(`⏭️ [FALLBACK] Skipping replayed FLL buy order ${orderId} (${normalizedSymbol}) - already have active stop-limit ${existingForSymbol.orderId} (reconnect window)`);
+                  console.log(`⏭️ [FALLBACK] Reconnect window: updating existing stop-limit ${existingForSymbol.orderId} for ${normalizedSymbol} (rebuy)`);
+                  const exLeg = existingForSymbol.order?.Legs?.[0];
+                  const exQty = parseInt(exLeg?.QuantityRemaining || exLeg?.QuantityOrdered || '0', 10) || 0;
+                  const newTotal = exQty + quantity;
+                  if (newTotal > 0) {
+                    try {
+                      const res = await modifyOrderQuantity(existingForSymbol.orderId, newTotal);
+                      if (res.success) console.log(`✅ [FALLBACK] Updated ${normalizedSymbol} stop-limit to ${newTotal}`);
+                      else console.error(`❌ [FALLBACK] Update failed: ${res.error}`);
+                    } catch (e) { console.error(`❌ [FALLBACK] Update error:`, e.message); }
+                  }
                   processedFllOrders.add(orderId);
                   return;
                 }
+                console.log(`⏭️ [FALLBACK] Reconnect window: skipping new stop-limit for ${normalizedSymbol} (order ${orderId}) - no existing stop-limit; prevents creating for already-sold stocks`);
+                processedFllOrders.add(orderId);
+                return;
               }
               
               // Extract buy price from order
