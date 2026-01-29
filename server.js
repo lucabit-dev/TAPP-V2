@@ -3508,7 +3508,7 @@ function connectOrdersWebSocket() {
         // Handle order updates
         if (dataObj.OrderID) {
           const order = dataObj;
-          const orderId = order.OrderID;
+          const orderId = String(order.OrderID);
           const status = (order.Status || '').toUpperCase();
           const isFilled = (status === 'FLL' || status === 'FIL');
           const isBuy = (order.Legs?.[0]?.BuyOrSell || '').toUpperCase() === 'BUY';
