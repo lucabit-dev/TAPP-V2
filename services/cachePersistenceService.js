@@ -112,6 +112,72 @@ class CachePersistenceService {
   }
 
   /**
+   * Load orders and StopLimit repository only (no positions). Used on Orders WS reconnect
+   * so we reconcile orders/stoplimit from DB without clearing positionsCache (avoids
+   * "no position" window that breaks stop-limit creation after long uptime).
+   */
+  async loadOrdersAndStopLimitFromDatabase() {
+    if (!this.isDbAvailable()) {
+      console.warn('⚠️ CachePersistenceService: Database not available, skipping orders/stoplimit load');
+      return { orders: 0, stopLimitRepository: 0 };
+    }
+    try {
+      console.log('📥 CachePersistenceService: Loading orders and StopLimit repo from database (skipping positions)...');
+      let loadedOrders = 0;
+      const ordersFromDb = await OrderCache.find({}).lean();
+      for (const doc of ordersFromDb) {
+        try {
+          const orderData = { ...doc.orderData, lastUpdated: doc.orderData.lastUpdated || Date.now() };
+          this.ordersCache.set(doc.orderId, orderData);
+          loadedOrders++;
+        } catch (err) {
+          console.error(`⚠️ CachePersistenceService: Error loading order ${doc.orderId}:`, err.message);
+        }
+      }
+      let loadedStopLimitRepo = 0;
+      if (this.stopLimitOrderRepository) {
+        const stopLimitRepoFromDb = await StopLimitRepository.find({}).lean();
+        for (const doc of stopLimitRepoFromDb) {
+          try {
+            this.stopLimitOrderRepository.set(doc.symbol, {
+              orderId: doc.orderId,
+              order: doc.order || null,
+              openedDateTime: doc.openedDateTime,
+              status: doc.status
+            });
+            loadedStopLimitRepo++;
+          } catch (err) {
+            console.error(`⚠️ CachePersistenceService: Error loading StopLimit repo ${doc.symbol}:`, err.message);
+          }
+        }
+      }
+      console.log(`✅ CachePersistenceService: Loaded ${loadedOrders} orders and ${loadedStopLimitRepo} StopLimit repo entries (positions unchanged)`);
+      return { orders: loadedOrders, stopLimitRepository: loadedStopLimitRepo };
+    } catch (err) {
+      console.error('❌ CachePersistenceService: Error loading orders/stoplimit from database:', err);
+      return { orders: 0, stopLimitRepository: 0 };
+    }
+  }
+
+  /**
+   * Get position for symbol from DB (fallback when positionsCache missing after wait).
+   * Returns { ...positionData } if found and Quantity > 0, else null.
+   */
+  async getPositionForSymbol(symbol) {
+    if (!this.isDbAvailable() || !symbol) return null;
+    try {
+      const doc = await PositionCache.findOne({ symbol: String(symbol).toUpperCase() }).lean();
+      if (!doc?.positionData) return null;
+      const qty = parseFloat(doc.positionData.Quantity || 0);
+      if (qty <= 0) return null;
+      return { ...doc.positionData, lastUpdated: doc.positionData.lastUpdated || Date.now() };
+    } catch (err) {
+      console.warn(`⚠️ CachePersistenceService: getPositionForSymbol(${symbol}) error:`, err.message);
+      return null;
+    }
+  }
+
+  /**
    * Save a single order to database (debounced)
    */
   async scheduleOrderSave(orderId) {

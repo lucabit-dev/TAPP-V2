@@ -3444,13 +3444,13 @@ function connectOrdersWebSocket() {
         clearTimeout(ordersWsReconnectTimer);
         ordersWsReconnectTimer = null;
       }
-      // Reconcile orders and stop-limit repo from DB; clear positions so we never use stale DB positions for creation (avoids stop-limits for already-sold stocks)
+      // Reconcile orders and stop-limit repo from DB only; do NOT clear positionsCache.
+      // Clearing positions after long uptime caused "no position" window → stop-limits never created.
+      // We keep positionsCache (Positions WS data) and only refresh orders/stoplimit from DB.
       if (cachePersistenceService) {
         try {
-          const loaded = await cachePersistenceService.loadFromDatabase();
-          console.log(`🔄 [RECONNECT] Orders WS: reconciled from DB - ${loaded.orders} orders, ${loaded.stopLimitRepository || 0} StopLimit repo entries`);
-          positionsCache.clear();
-          console.log(`🔄 [RECONNECT] Orders WS: cleared positions cache - will repopulate from positions WebSocket only (no stale sold positions)`);
+          const loaded = await cachePersistenceService.loadOrdersAndStopLimitFromDatabase();
+          console.log(`🔄 [RECONNECT] Orders WS: reconciled orders/stoplimit from DB - ${loaded.orders} orders, ${loaded.stopLimitRepository || 0} StopLimit repo entries (positions cache kept)`);
         } catch (e) {
           console.warn('⚠️ [RECONNECT] Orders WS: failed to reconcile from DB:', e.message);
         }
@@ -3874,6 +3874,22 @@ function connectOrdersWebSocket() {
                   }
                 }
                 
+                if (!hasFallbackPosition) {
+                  // DB fallback: use persisted position when cache missing (e.g. after reconnect)
+                  if (cachePersistenceService) {
+                    try {
+                      const dbPosition = await cachePersistenceService.getPositionForSymbol(normalizedSymbol);
+                      if (dbPosition && parseFloat(dbPosition.Quantity || '0') > 0) {
+                        fallbackPositionCheck = dbPosition;
+                        hasFallbackPosition = true;
+                        positionsCache.set(normalizedSymbol, dbPosition);
+                        console.log(`✅ [FALLBACK] Using DB position fallback for ${normalizedSymbol} (qty ${dbPosition.Quantity})`);
+                      }
+                    } catch (e) {
+                      console.warn(`⚠️ [FALLBACK] getPositionForSymbol(${normalizedSymbol}) failed:`, e.message);
+                    }
+                  }
+                }
                 if (!hasFallbackPosition) {
                   console.warn(`⚠️ [FALLBACK] No position found for ${normalizedSymbol} after 5s - skipping (do not mark recently sold; may be timing)`);
                   processedFllOrders.add(orderId);
@@ -5499,13 +5515,36 @@ async function handleManualBuyFilled(orderId, order, pending) {
   }
   
   if (!hasPosition) {
-    console.warn(`⚠️ [DEBUG] handleManualBuyFilled: No position for ${normalizedSymbol} after 5s - aborting (may be sold or positions WS delayed)`);
-    stopLimitOrderRepository.delete(normalizedSymbol);
-    stopLimitCreationBySymbol.delete(normalizedSymbol);
-    // CRITICAL: Do NOT set recentlySoldSymbols here. We aborted due to timing (positions WS delayed),
-    // not because we sold. Marking recently sold would block future stop-limit creation for this symbol.
-    // Align with fallback: "do not mark recently sold; may be timing".
-    return;
+    // DB fallback: use persisted position when cache missing (e.g. after reconnect, positions WS delayed)
+    if (cachePersistenceService) {
+      try {
+        const dbPosition = await cachePersistenceService.getPositionForSymbol(normalizedSymbol);
+        if (dbPosition && parseFloat(dbPosition.Quantity || '0') > 0) {
+          positionCheck = dbPosition;
+          hasPosition = true;
+          positionsCache.set(normalizedSymbol, dbPosition);
+          console.log(`✅ [DEBUG] handleManualBuyFilled: Using DB position fallback for ${normalizedSymbol} (qty ${dbPosition.Quantity})`);
+        }
+      } catch (e) {
+        console.warn(`⚠️ [DEBUG] getPositionForSymbol(${normalizedSymbol}) failed:`, e.message);
+      }
+    }
+    if (!hasPosition) {
+      const retried = !!(pending && pending._noPositionRetry);
+      console.warn(`⚠️ [DEBUG] handleManualBuyFilled: No position for ${normalizedSymbol} after 5s${retried ? ' (retry)' : ''} - ${retried ? 'aborting' : 'scheduling retry in 5s'}`);
+      stopLimitOrderRepository.delete(normalizedSymbol);
+      stopLimitCreationBySymbol.delete(normalizedSymbol);
+      if (!retried) {
+        const retryPending = { ...pending, _noPositionRetry: true };
+        setTimeout(() => {
+          console.log(`🔄 [DEBUG] Retrying handleManualBuyFilled for ${normalizedSymbol} (order ${orderId}) after 5s`);
+          handleManualBuyFilled(orderId, order, retryPending).catch(err => {
+            console.error(`❌ [DEBUG] Retry handleManualBuyFilled for ${orderId} failed:`, err);
+          });
+        }, 5000);
+      }
+      return;
+    }
   }
   
   console.log(`🎯 [DEBUG] Extracted values:`, {
