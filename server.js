@@ -3212,9 +3212,10 @@ let ordersWsReconnectTimer = null;
 let lastOrdersConnectAttempt = 0;
 let ordersReconnectAttempts = 0;
 let lastOrdersError = null;
-// After orders WebSocket reconnects, skip creating stop-limits for "old" FLL buy orders (replayed snapshot)
-// to avoid duplicate stop-limits for symbols that already have one or were already sold.
+// After orders WebSocket reconnects, skip creating stop-limits only for FLL orders that were opened BEFORE we connected (replayed snapshot).
+// Do NOT skip orders that were placed during this session and filled late (e.g. SATL opened 12:20, filled 12:26).
 let ordersReconnectWindowUntil = 0;
+let lastOrdersConnectedAt = 0; // When orders WS last opened; orders opened before this are treated as replayed
 
 function connectPositionsWebSocket() {
   const apiKey = process.env.PNL_API_KEY;
@@ -3436,9 +3437,10 @@ function connectOrdersWebSocket() {
           console.warn('⚠️ [RECONNECT] Orders WS: failed to reconcile from DB:', e.message);
         }
       }
-      // Reconnect window: for a short period after connect, skip creating stop-limits for OLD FLL buy orders (replayed snapshot)
+      // Reconnect window: only skip FLL for orders opened BEFORE this connection (true replays), not late-filling orders placed this session
+      lastOrdersConnectedAt = Date.now();
       ordersReconnectWindowUntil = Date.now() + 25000; // 25 seconds
-      console.log(`🔄 [RECONNECT] Orders WS: reconnect window active until ${new Date(ordersReconnectWindowUntil).toISOString()} - will skip replayed (old) FLL buy orders`);
+      console.log(`🔄 [RECONNECT] Orders WS: connected at ${new Date(lastOrdersConnectedAt).toISOString()}, window until ${new Date(ordersReconnectWindowUntil).toISOString()} - will skip FALLBACK FLL only when symbol already has active stop-limit`);
     });
     
     ordersWs.on('message', async (data) => {
@@ -3760,11 +3762,11 @@ function connectOrdersWebSocket() {
               const leg = order.Legs?.[0];
               const quantity = Math.floor(Number(leg?.ExecQuantity || leg?.QuantityOrdered || 0)) || 0;
               
-              // Reconnect window: skip replayed (old) FLL buy orders to avoid duplicate stop-limits for already-handled symbols
-              if (Date.now() < ordersReconnectWindowUntil && order.OpenedDateTime) {
-                const openedMs = typeof order.OpenedDateTime === 'number' ? order.OpenedDateTime : (new Date(order.OpenedDateTime).getTime() || 0);
-                if (openedMs && Date.now() - openedMs > 120000) { // older than 2 minutes
-                  console.log(`⏭️ [FALLBACK] Skipping replayed FLL buy order ${orderId} (${normalizedSymbol}) - order opened ${Math.round((Date.now() - openedMs) / 60000)}m ago (reconnect window)`);
+              // Reconnect window: skip only when we already have an active stop-limit for this symbol (avoid duplicate). Never skip first-time creation (e.g. SATL/CATX that filled late).
+              if (Date.now() < ordersReconnectWindowUntil) {
+                const existingForSymbol = await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
+                if (existingForSymbol) {
+                  console.log(`⏭️ [FALLBACK] Skipping replayed FLL buy order ${orderId} (${normalizedSymbol}) - already have active stop-limit ${existingForSymbol.orderId} (reconnect window)`);
                   processedFllOrders.add(orderId);
                   return;
                 }
@@ -3820,24 +3822,25 @@ function connectOrdersWebSocket() {
                   }
                 }
                 
-                // Check if position exists
+                // Check if position exists (instant fills: FLL can arrive before positions WS updates cache)
                 let fallbackPositionCheck = positionsCache.get(normalizedSymbol);
                 let hasFallbackPosition = fallbackPositionCheck && parseFloat(fallbackPositionCheck.Quantity || '0') > 0;
                 
-                // Wait for position if not found immediately
                 if (!hasFallbackPosition) {
-                  console.log(`⏳ [FALLBACK] Position not found for ${normalizedSymbol}, waiting...`);
-                  for (let i = 0; i < 3; i++) {
+                  console.log(`⏳ [FALLBACK] Position not found for ${normalizedSymbol}, waiting for positions WS (instant-fill race)...`);
+                  for (let i = 0; i < 6; i++) {
                     await new Promise(resolve => setTimeout(resolve, 500));
                     fallbackPositionCheck = positionsCache.get(normalizedSymbol);
                     hasFallbackPosition = fallbackPositionCheck && parseFloat(fallbackPositionCheck.Quantity || '0') > 0;
-                    if (hasFallbackPosition) break;
+                    if (hasFallbackPosition) {
+                      console.log(`✅ [FALLBACK] Position found for ${normalizedSymbol} after ${(i + 1) * 500}ms`);
+                      break;
+                    }
                   }
                 }
                 
                 if (!hasFallbackPosition) {
-                  console.warn(`⚠️ [FALLBACK] No position found for ${normalizedSymbol} after waiting - skipping stop-limit creation (likely already sold)`);
-                  recentlySoldSymbols.set(normalizedSymbol, Date.now());
+                  console.warn(`⚠️ [FALLBACK] No position found for ${normalizedSymbol} after 3s - skipping (do not mark recently sold; may be timing)`);
                   processedFllOrders.add(orderId);
                   return;
                 }
@@ -5443,13 +5446,12 @@ async function handleManualBuyFilled(orderId, order, pending) {
   let positionCheck = positionsCache.get(normalizedSymbol);
   let hasPosition = positionCheck && parseFloat(positionCheck.Quantity || '0') > 0;
   
-  // If position not found immediately, wait for positions WebSocket to update (up to 1.5 seconds)
-  // This handles the race condition where buy order fills before position appears in cache
-  // REDUCED: Changed from 3 seconds (6 * 500ms) to 1.5 seconds (3 * 500ms) for faster StopLimit creation
+  // If position not found immediately, wait for positions WebSocket (instant fills: FLL can arrive before position update)
+  // Wait up to 3s so we don't skip stop-limit creation for instant fills like CATX
   if (!hasPosition) {
-    console.log(`⏳ [DEBUG] Position not found in cache for ${normalizedSymbol} immediately. Waiting for positions WebSocket update...`);
-    for (let i = 0; i < 3; i++) {
-      await new Promise(resolve => setTimeout(resolve, 500)); // Wait 500ms between checks
+    console.log(`⏳ [DEBUG] Position not found in cache for ${normalizedSymbol}. Waiting for positions WebSocket (up to 3s)...`);
+    for (let i = 0; i < 6; i++) {
+      await new Promise(resolve => setTimeout(resolve, 500));
       positionCheck = positionsCache.get(normalizedSymbol);
       hasPosition = positionCheck && parseFloat(positionCheck.Quantity || '0') > 0;
       if (hasPosition) {
@@ -5459,15 +5461,11 @@ async function handleManualBuyFilled(orderId, order, pending) {
     }
   }
   
-  // DEFENSIVE: If position still doesn't exist after waiting, it was likely sold
-  // Clean up any stale StopLimit tracking and abort
   if (!hasPosition) {
-    console.warn(`⚠️ [DEBUG] handleManualBuyFilled: No position found for ${normalizedSymbol} after waiting - position may have been sold. Cleaning up any stale StopLimit tracking...`);
-      // Clean up any stale tracking (repository pattern)
-      stopLimitOrderRepository.delete(normalizedSymbol);
-      stopLimitCreationBySymbol.delete(normalizedSymbol);
+    console.warn(`⚠️ [DEBUG] handleManualBuyFilled: No position for ${normalizedSymbol} after 3s - aborting (may be sold or positions WS delayed)`);
+    stopLimitOrderRepository.delete(normalizedSymbol);
+    stopLimitCreationBySymbol.delete(normalizedSymbol);
     recentlySoldSymbols.set(normalizedSymbol, Date.now());
-    console.log(`🧹 [DEBUG] Cleaned up stale StopLimit tracking for ${normalizedSymbol} (no position exists after wait), marked as recently sold`);
     return;
   }
   
