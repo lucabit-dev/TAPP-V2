@@ -178,30 +178,6 @@ class CachePersistenceService {
   }
 
   /**
-   * Get all positions from DB with Quantity > 0 (for stop-limit reconciliation when cache missing).
-   * Returns Map<symbol, positionData>.
-   */
-  async getAllPositionsFromDb() {
-    if (!this.isDbAvailable()) return new Map();
-    try {
-      const docs = await PositionCache.find({}).lean();
-      const map = new Map();
-      for (const doc of docs) {
-        if (!doc?.positionData) continue;
-        const qty = parseFloat(doc.positionData.Quantity || 0);
-        if (qty <= 0) continue;
-        const sym = (doc.symbol || '').toUpperCase();
-        if (!sym) continue;
-        map.set(sym, { ...doc.positionData, lastUpdated: doc.positionData.lastUpdated || Date.now() });
-      }
-      return map;
-    } catch (err) {
-      console.warn(`⚠️ CachePersistenceService: getAllPositionsFromDb error:`, err.message);
-      return new Map();
-    }
-  }
-
-  /**
    * Save a single order to database (debounced)
    */
   async scheduleOrderSave(orderId) {
