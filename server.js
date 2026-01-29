@@ -364,6 +364,32 @@ function getActiveStopLimitOrder(symbol) {
   return null;
 }
 
+// Async version: when order is missing from cache, try to restore from DB so stop-limits stay active after ~10+ min
+async function getActiveStopLimitOrderWithRecovery(symbol) {
+  const normalized = (symbol || '').toUpperCase();
+  let entry = getActiveStopLimitOrder(normalized);
+  if (entry) return entry;
+  if (!cachePersistenceService) return null;
+  try {
+    const dbEntry = await cachePersistenceService.checkDatabaseForActiveStopLimit(normalized);
+    if (!dbEntry || !dbEntry.orderId || !dbEntry.order) return null;
+    ordersCache.set(dbEntry.orderId, dbEntry.order);
+    if (!stopLimitOrderRepository.has(normalized)) {
+      stopLimitOrderRepository.set(normalized, {
+        orderId: dbEntry.orderId,
+        order: dbEntry.order,
+        openedDateTime: dbEntry.openedDateTime,
+        status: dbEntry.status
+      });
+      console.log(`🔄 [STOPLIMIT_REPO] Restored ${normalized} from DB (order ${dbEntry.orderId}) - keep active`);
+    }
+    return getActiveStopLimitOrder(normalized);
+  } catch (e) {
+    console.warn(`⚠️ [STOPLIMIT_REPO] Recovery from DB for ${normalized} failed:`, e.message);
+    return null;
+  }
+}
+
 // Track recently sold symbols to prevent StopLimit creation loops after manual sell
 const recentlySoldSymbols = new Map(); // Map<symbol, timestamp> - prevents creating StopLimit for recently sold stocks
 
@@ -790,15 +816,29 @@ function clearAllStockColorCache() {
 
 // Periodic cleanup of StopLimit repository to remove stale entries (clean repository pattern)
 // Runs every 2 minutes to keep repository in sync with actual order state
-setInterval(() => {
+setInterval(async () => {
   try {
     let cleanedRepository = 0;
+    let restoredFromDb = 0;
     
     // Clean up repository - remove entries where order is no longer active
     for (const [symbol, repoEntry] of stopLimitOrderRepository.entries()) {
-      const order = ordersCache.get(repoEntry.orderId);
+      let order = ordersCache.get(repoEntry.orderId);
       if (!order) {
-        // Order not in cache - remove from repository
+        // Order not in cache - try to restore from DB first (keeps stop-limits active after ~10+ min)
+        if (cachePersistenceService) {
+          try {
+            const dbEntry = await cachePersistenceService.checkDatabaseForActiveStopLimit(symbol);
+            if (dbEntry && dbEntry.orderId === repoEntry.orderId && dbEntry.order) {
+              ordersCache.set(repoEntry.orderId, dbEntry.order);
+              restoredFromDb++;
+              console.log(`🔄 [STOPLIMIT_REPO] Restored ${symbol} (order ${repoEntry.orderId}) from DB - keeping active`);
+              continue;
+            }
+          } catch (e) {
+            console.warn(`⚠️ [STOPLIMIT_REPO] DB check for ${symbol} failed:`, e.message);
+          }
+        }
         stopLimitOrderRepository.delete(symbol);
         cleanedRepository++;
         console.log(`🧹 [STOPLIMIT_REPO] Removed stale entry for ${symbol} (order ${repoEntry.orderId} not in cache)`);
@@ -869,8 +909,8 @@ setInterval(() => {
       console.log(`🧹 [CLEANUP] Cleaned ${cleanedProcessedFll} old processed FLL order entries (kept ${processedFllOrders.size})`);
     }
     
-    if (cleanedRepository > 0 || cleanedRecentlySold > 0 || cleanedFilledStopLimits > 0 || cleanedProcessedFll > 0) {
-      console.log(`🧹 [STOPLIMIT_REPO] Cleaned ${cleanedRepository} repository entries, ${cleanedRecentlySold} recently sold entries, ${cleanedFilledStopLimits} filled StopLimit entries, and ${cleanedProcessedFll} processed FLL entries`);
+    if (cleanedRepository > 0 || restoredFromDb > 0 || cleanedRecentlySold > 0 || cleanedFilledStopLimits > 0 || cleanedProcessedFll > 0) {
+      console.log(`🧹 [STOPLIMIT_REPO] Cleaned ${cleanedRepository} repository entries, restored ${restoredFromDb} from DB, ${cleanedRecentlySold} recently sold, ${cleanedFilledStopLimits} filled StopLimit, ${cleanedProcessedFll} processed FLL`);
     }
   } catch (err) {
     console.error(`❌ [STOPLIMIT_REPO] Error in StopLimit cleanup:`, err);
@@ -3544,9 +3584,8 @@ function connectOrdersWebSocket() {
             
             const normalizedSymbol = (symbol || '').toUpperCase();
             
-            // CRITICAL: Check if StopLimit already exists BEFORE marking as processed
-            // Check BOTH repository AND database to prevent creating duplicate StopLimit orders
-            const existingStopLimit = getActiveStopLimitOrder(normalizedSymbol);
+            // CRITICAL: Check if StopLimit already exists BEFORE marking as processed (recover from DB if missing from cache)
+            const existingStopLimit = await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
             if (existingStopLimit) {
               console.log(`✅ [DEBUG] StopLimit already exists for ${normalizedSymbol} (${existingStopLimit.orderId}). Re-buy: updating quantity (existing + new buy).`);
               // Mark as processed to prevent retry
@@ -3671,9 +3710,8 @@ function connectOrdersWebSocket() {
             console.log(`🚀 [DEBUG] Triggering StopLimit creation/modification for filled manual buy ${orderId} (${symbol})`);
             
             // Short delay + re-check for existing stop-limit (handles message ordering: ACK may arrive after FLL)
-            // So we don't create a duplicate when a rebuy FLL arrives before the first stop-limit ACK
             await new Promise(resolve => setTimeout(resolve, 800));
-            const delayedExisting = getActiveStopLimitOrder(normalizedSymbol) || (cachePersistenceService ? await cachePersistenceService.checkDatabaseForActiveStopLimit(normalizedSymbol) : null);
+            const delayedExisting = await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
             if (delayedExisting && delayedExisting.orderId) {
               const exLeg = delayedExisting.order?.Legs?.[0];
               const exQty = parseInt(exLeg?.QuantityRemaining || exLeg?.QuantityOrdered || '0', 10) || 0;
@@ -3741,8 +3779,8 @@ function connectOrdersWebSocket() {
                 console.log(`🔄 [FALLBACK] Detected untracked filled BUY order ${orderId} for ${normalizedSymbol} - attempting stop-limit creation`);
                 console.log(`🔄 [FALLBACK] Order details: qty=${quantity}, buyPrice=${buyPrice}, filledPrice=${filledPrice}, limitPrice=${limitPrice}`);
                 
-                // Check if stop-limit already exists - if so, REBUY: update quantity (don't just skip)
-                const existingStopLimit = getActiveStopLimitOrder(normalizedSymbol);
+                // Check if stop-limit already exists - if so, REBUY: update quantity (recover from DB if missing from cache)
+                const existingStopLimit = await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
                 if (existingStopLimit) {
                   const existingLeg = existingStopLimit.order?.Legs?.[0];
                   const existingQty = parseInt(existingLeg?.QuantityRemaining || existingLeg?.QuantityOrdered || '0', 10) || 0;
@@ -5154,6 +5192,9 @@ async function handleManualBuyFilled(orderId, order, pending) {
   
   const symbol = (pending.symbol || (order.Legs?.[0]?.Symbol || '')).toString().toUpperCase();
   const normalizedSymbol = symbol;
+  
+  // Restore stop-limit from DB if missing from cache (keeps stop-limits active after ~10+ min, helps rebuys find existing)
+  await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
   
   // TE/JBLU-SPECIFIC: Enhanced logging at start of function
   if (normalizedSymbol === 'TE' || normalizedSymbol === 'JBLU') {
