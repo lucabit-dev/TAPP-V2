@@ -5571,7 +5571,7 @@ async function handleManualBuyFilled(orderId, order, pending) {
   
   const symbol = (pending.symbol || (order.Legs?.[0]?.Symbol || '')).toString().toUpperCase();
   const normalizedSymbol = symbol;
-  const qty = Math.floor(Number(pending?.quantity || order.Legs?.[0]?.ExecQuantity ?? order.Legs?.[0]?.QuantityOrdered || 0)) || 0;
+  const qty = Math.floor(Number(pending?.quantity || (order.Legs?.[0]?.ExecQuantity ?? order.Legs?.[0]?.QuantityOrdered) || 0)) || 0;
   console.log(`📊 [STOPLIMIT_DEBUG] handleManualBuyFilled: orderId=${orderId} symbol=${normalizedSymbol} qty=${qty} → create or update StopLimit`);
   
   // Restore stop-limit from DB if missing from cache (keeps stop-limits active after ~10+ min, helps rebuys find existing)
