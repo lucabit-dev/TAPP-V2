@@ -5107,7 +5107,26 @@ async function fetchOrderById(orderId) {
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch {}
   // Some APIs return an array or a wrapper object; normalize to a single order object
-  const order = Array.isArray(data) ? data[0] : (data?.order || data);
+  let order = Array.isArray(data) ? data[0] : (data?.order || data);
+  if (order && typeof order === 'object') {
+    // Normalize so we always have OrderID and Status (Sections Bot may return order_id, status, or Filled instead of FLL)
+    order = { ...order };
+    const rawId = order.OrderID ?? order.order_id ?? order.orderId ?? orderIdStr;
+    if (rawId != null) order.OrderID = String(rawId);
+    const rawStatus = (order.Status ?? order.status ?? '').toString().toUpperCase();
+    order.Status = (rawStatus === 'FILLED' ? 'FLL' : rawStatus === 'FIL' ? 'FIL' : rawStatus);
+    // Normalize Legs for BuyOrSell/Symbol if API uses different casing
+    if (order.Legs && Array.isArray(order.Legs) && order.Legs[0]) {
+      const leg = order.Legs[0];
+      order.Legs[0] = {
+        ...leg,
+        BuyOrSell: leg.BuyOrSell ?? leg.buy_or_sell ?? leg.side ?? leg.BuyOrSell,
+        Symbol: (leg.Symbol ?? leg.symbol ?? '').toString().toUpperCase(),
+        ExecQuantity: leg.ExecQuantity ?? leg.exec_quantity ?? leg.QuantityFilled,
+        QuantityOrdered: leg.QuantityOrdered ?? leg.quantity_ordered ?? leg.Quantity ?? leg.quantity
+      };
+    }
+  }
   return { ok: resp.ok, order };
 }
 
@@ -5151,6 +5170,10 @@ function scheduleManualBuyStatusPoll(orderId, pending) {
           pendingManualBuyOrders.delete(orderIdStr);
           manualBuyStatusPollInProgress.delete(orderIdStr);
           return;
+        }
+        // Log status so we can see why FLL wasn't detected (e.g. status=ACK until fill)
+        if (attempt === 1 || attempt % 5 === 0 || attempt >= maxAttempts - 2) {
+          console.log(`📋 [POLL] orderId=${orderIdStr} attempt=${attempt} status=${status} isBuy=${isBuy} (waiting for FLL)`);
         }
       } else if (attempt === 1 || attempt % 10 === 0) {
         // Log when we get no order or missing OrderID (so we can see if Sections Bot API shape is wrong)
