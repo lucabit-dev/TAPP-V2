@@ -161,6 +161,17 @@ function hasTrackedBuyPendingForSymbol(symbol) {
   }
   return false;
 }
+
+// Get orderId and pending data for a symbol (for position-triggered FLL check).
+function getOrderIdAndPendingForSymbol(symbol) {
+  const normalized = (symbol || '').toUpperCase();
+  for (const [orderId, data] of pendingManualBuyOrders.entries()) {
+    if ((data?.symbol || '').toUpperCase() === normalized) {
+      return { orderId, pending: data };
+    }
+  }
+  return null;
+}
 const manualBuyStatusPollInProgress = new Set(); // Set<orderId> to avoid duplicate polls
 
 // StopLimit Order Repository - Single source of truth pattern from sections-buy-bot-main
@@ -3431,6 +3442,28 @@ function connectPositionsWebSocket() {
               if (ageMs > MAX_AGE_MS) {
                 pendingManualBuyBySymbol.delete(normalizedSymbol);
               } else {
+                // When we have a tracked buy (order_id), position update = fill likely happened. Re-check order status once so stop-limit runs in ~10s.
+                if (hasTrackedBuyPendingForSymbol(normalizedSymbol)) {
+                  const tracked = getOrderIdAndPendingForSymbol(normalizedSymbol);
+                  if (tracked) {
+                    fetchOrderById(tracked.orderId).then((result) => {
+                      const order = result?.order;
+                      if (!order || !order.OrderID) return;
+                      const status = (order.Status || '').toUpperCase();
+                      const isFilled = status === 'FLL' || status === 'FIL';
+                      const isBuy = (order.Legs?.[0]?.BuyOrSell || '').toUpperCase() === 'BUY';
+                      if (isFilled && isBuy) {
+                        pendingManualBuyOrders.delete(tracked.orderId);
+                        manualBuyStatusPollInProgress.delete(tracked.orderId);
+                        console.log(`📬 [FLL] Filled buy ${tracked.orderId} for ${normalizedSymbol} (position trigger) → StopLimit create/update`);
+                        handleManualBuyFilled(tracked.orderId, order, tracked.pending).catch(err => {
+                          console.error(`❌ [POSITIONS_FLL] handleManualBuyFilled for ${tracked.orderId}:`, err);
+                        });
+                      }
+                    }).catch(() => {});
+                  }
+                  return;
+                }
                 const lastAttempt = lastStopLimitAttemptBySymbol.get(normalizedSymbol) || 0;
                 const ATTEMPT_THROTTLE_MS = 20000; // 20s to prevent duplicate/rejected stoplimits
                 if (Date.now() - lastAttempt < ATTEMPT_THROTTLE_MS) {
@@ -3442,8 +3475,6 @@ function connectPositionsWebSocket() {
                 if (stopLimitCreationBySymbol.has(normalizedSymbol)) {
                   return;
                 }
-                // Only create from fallback when buy is NOT tracked by order_id. If we have a tracked buy, wait for FLL.
-                if (hasTrackedBuyPendingForSymbol(normalizedSymbol)) return;
                 try {
                   const positionQty = Math.floor(parseFloat(dataObj.Quantity || '0')) || 0;
                   if (positionQty > 0) {
@@ -4202,7 +4233,7 @@ if (process.env.PNL_API_KEY) {
 }
 
 // Proactive check: every 2s, for symbols in pendingManualBuyBySymbol, create stop-limit as soon as position appears in cache (covers delayed Positions WS or missing order_id)
-const PENDING_MANUAL_FALLBACK_INTERVAL_MS = 2000;
+const PENDING_MANUAL_FALLBACK_INTERVAL_MS = 1500;
 setInterval(async () => {
   if (pendingManualBuyBySymbol.size === 0) return;
   for (const [symbol, pending] of [...pendingManualBuyBySymbol.entries()]) {
@@ -5136,11 +5167,10 @@ function scheduleManualBuyStatusPoll(orderId, pending) {
   if (manualBuyStatusPollInProgress.has(orderIdStr)) return;
   manualBuyStatusPollInProgress.add(orderIdStr);
   const pendingSymbol = (pending?.symbol || '').toString().toUpperCase();
-  console.log(`📌 [POLL] Started status poll for orderId=${orderIdStr} symbol=${pendingSymbol} (will poll until FLL or ${40} attempts)`);
-
-  const maxAttempts = 40;
-  const firstPollMs = 150;
-  const intervalMs = 400;
+  const maxAttempts = 72;
+  const firstPollMs = 80;
+  const intervalMs = 250;
+  console.log(`📌 [POLL] Started status poll for orderId=${orderIdStr} symbol=${pendingSymbol} (will poll until FLL or ${maxAttempts} attempts, ~${Math.round((firstPollMs + (maxAttempts - 1) * intervalMs) / 1000)}s)`);
   let attempt = 0;
 
   const pollOnce = async () => {
@@ -5186,7 +5216,13 @@ function scheduleManualBuyStatusPoll(orderId, pending) {
       setTimeout(pollOnce, intervalMs);
     } else {
       manualBuyStatusPollInProgress.delete(orderIdStr);
-      console.warn(`⚠️ [POLL] Stopped polling ${orderIdStr} after ${maxAttempts} attempts (no FLL detected)`);
+      // Remove from tracked so 2s/position fallback can create stop-limit (position may already be in cache)
+      const pendingData = pendingManualBuyOrders.get(orderIdStr);
+      pendingManualBuyOrders.delete(orderIdStr);
+      console.warn(`⚠️ [POLL] Stopped polling ${orderIdStr} after ${maxAttempts} attempts (no FLL detected). Fallback will create StopLimit when position is in cache.`);
+      if (pendingData?.symbol) {
+        console.log(`📋 [POLL] ${pendingData.symbol} still in pendingManualBuyBySymbol → 2s/position fallback can create StopLimit`);
+      }
     }
   };
 
@@ -5848,15 +5884,17 @@ async function handleManualBuyFilled(orderId, order, pending) {
   let hasPosition = positionCheck && parseFloat(positionCheck.Quantity || '0') > 0;
   
   // If position not found immediately, wait for positions WebSocket (instant fills: FLL can arrive before position update)
-  // Wait up to 5s so we don't skip stop-limit creation for instant fills / after reconnect (positions WS delayed)
+  // Wait up to 15s so we catch positions that are 5–15s late (Positions WS often lags Orders WS)
+  const POSITION_WAIT_ITERATIONS = 30;
+  const POSITION_WAIT_MS = 500;
   if (!hasPosition) {
-    console.log(`⏳ [DEBUG] Position not found in cache for ${normalizedSymbol}. Waiting for positions WebSocket (up to 5s)...`);
-    for (let i = 0; i < 10; i++) {
-      await new Promise(resolve => setTimeout(resolve, 500));
+    console.log(`⏳ [DEBUG] Position not found in cache for ${normalizedSymbol}. Waiting for positions WebSocket (up to ${(POSITION_WAIT_ITERATIONS * POSITION_WAIT_MS) / 1000}s)...`);
+    for (let i = 0; i < POSITION_WAIT_ITERATIONS; i++) {
+      await new Promise(resolve => setTimeout(resolve, POSITION_WAIT_MS));
       positionCheck = positionsCache.get(normalizedSymbol);
       hasPosition = positionCheck && parseFloat(positionCheck.Quantity || '0') > 0;
       if (hasPosition) {
-        console.log(`✅ [DEBUG] Position found in cache for ${normalizedSymbol} after ${(i + 1) * 500}ms wait`);
+        console.log(`✅ [DEBUG] Position found in cache for ${normalizedSymbol} after ${(i + 1) * POSITION_WAIT_MS}ms wait`);
         break;
       }
     }
@@ -5878,14 +5916,16 @@ async function handleManualBuyFilled(orderId, order, pending) {
       }
     }
     if (!hasPosition) {
-      const retried = !!(pending && pending._noPositionRetry);
-      console.warn(`⚠️ [DEBUG] handleManualBuyFilled: No position for ${normalizedSymbol} after 5s${retried ? ' (retry)' : ''} - ${retried ? 'aborting' : 'scheduling retry in 5s'}`);
+      const retryCount = Math.max(0, parseInt(pending?._noPositionRetryCount, 10) || 0);
+      const maxRetries = 1;
+      const willRetry = retryCount < maxRetries;
+      console.warn(`⚠️ [DEBUG] handleManualBuyFilled: No position for ${normalizedSymbol} after ${(POSITION_WAIT_ITERATIONS * POSITION_WAIT_MS) / 1000}s${retryCount ? ` (retry ${retryCount}/${maxRetries})` : ''} - ${willRetry ? `scheduling retry in 5s` : 'aborting'}`);
       stopLimitOrderRepository.delete(normalizedSymbol);
       stopLimitCreationBySymbol.delete(normalizedSymbol);
-      if (!retried) {
-        const retryPending = { ...pending, _noPositionRetry: true };
+      if (willRetry) {
+        const retryPending = { ...pending, _noPositionRetryCount: retryCount + 1 };
         setTimeout(() => {
-          console.log(`🔄 [DEBUG] Retrying handleManualBuyFilled for ${normalizedSymbol} (order ${orderId}) after 5s`);
+          console.log(`🔄 [DEBUG] Retrying handleManualBuyFilled for ${normalizedSymbol} (order ${orderId}) after 5s (attempt ${retryCount + 2})`);
           handleManualBuyFilled(orderId, order, retryPending).catch(err => {
             console.error(`❌ [DEBUG] Retry handleManualBuyFilled for ${orderId} failed:`, err);
           });
