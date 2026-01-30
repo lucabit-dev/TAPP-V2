@@ -3813,171 +3813,133 @@ function connectOrdersWebSocket() {
             }
             
             const normalizedSymbol = (symbol || '').toUpperCase();
-            
-            // CRITICAL: Check if StopLimit already exists BEFORE marking as processed (recover from DB if missing from cache)
-            const existingStopLimit = await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
-            if (existingStopLimit) {
-              console.log(`✅ [DEBUG] StopLimit already exists for ${normalizedSymbol} (${existingStopLimit.orderId}). Re-buy: updating quantity (existing + new buy).`);
-              // Mark as processed to prevent retry
-              processedFllOrders.add(orderId);
-              pendingManualBuyOrders.delete(orderId);
-            // Re-buy: add new bought quantity to existing stop-limit quantity
-            const existingLeg = existingStopLimit.order?.Legs?.[0];
-            const existingStopLimitQty = parseInt(existingLeg?.QuantityRemaining || existingLeg?.QuantityOrdered || '0', 10) || 0;
-            const newBuyQty = Math.floor(Number(pending.quantity || 0)) || 0;
-            const newTotalQty = existingStopLimitQty + newBuyQty;
-            if (newTotalQty > 0) {
-              console.log(`📊 [REBUY] Updating StopLimit ${existingStopLimit.orderId} for ${normalizedSymbol}: ${existingStopLimitQty} + ${newBuyQty} = ${newTotalQty}`);
+            // CRITICAL: Mark as processed and remove from pending NOW so duplicate WS messages skip.
+            // Defer all async FLL→stoplimit work so this handler returns immediately and does not block other order updates.
+            processedFllOrders.add(orderId);
+            pendingManualBuyOrders.delete(orderId);
+            console.log(`✅ [DEBUG] Marked order ${orderId} (${symbol}) as processed for FLL - deferring stoplimit work (non-blocking)`);
+
+            setImmediate(async () => {
               try {
-                const result = await modifyOrderQuantity(existingStopLimit.orderId, newTotalQty);
-                if (result.success) {
-                  console.log(`✅ [REBUY] Successfully updated StopLimit ${existingStopLimit.orderId} for ${normalizedSymbol} to ${newTotalQty}`);
+                // CRITICAL: Check if StopLimit already exists (recover from DB if missing from cache)
+                const existingStopLimit = await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
+                if (existingStopLimit) {
+                  console.log(`✅ [DEBUG] StopLimit already exists for ${normalizedSymbol} (${existingStopLimit.orderId}). Re-buy: updating quantity (existing + new buy).`);
+                  const existingLeg = existingStopLimit.order?.Legs?.[0];
+                  const existingStopLimitQty = parseInt(existingLeg?.QuantityRemaining || existingLeg?.QuantityOrdered || '0', 10) || 0;
+                  const newBuyQty = Math.floor(Number(pending.quantity || 0)) || 0;
+                  const newTotalQty = existingStopLimitQty + newBuyQty;
+                  if (newTotalQty > 0) {
+                    console.log(`📊 [REBUY] Updating StopLimit ${existingStopLimit.orderId} for ${normalizedSymbol}: ${existingStopLimitQty} + ${newBuyQty} = ${newTotalQty}`);
+                    try {
+                      const result = await modifyOrderQuantity(existingStopLimit.orderId, newTotalQty);
+                      if (result.success) console.log(`✅ [REBUY] Successfully updated StopLimit ${existingStopLimit.orderId} for ${normalizedSymbol} to ${newTotalQty}`);
+                      else console.error(`❌ [REBUY] Failed to update StopLimit ${existingStopLimit.orderId} for ${normalizedSymbol}: ${result.error}`);
+                    } catch (err) {
+                      console.error(`❌ [REBUY] Error updating StopLimit quantity for ${normalizedSymbol}:`, err);
+                    }
+                  }
+                  return;
+                }
+
+                if (cachePersistenceService) {
+                  const dbCheck = await cachePersistenceService.checkDatabaseForActiveStopLimit(normalizedSymbol);
+                  if (dbCheck) {
+                    console.log(`✅ [DEBUG] Database check found active StopLimit ${dbCheck.orderId} for ${normalizedSymbol} (status: ${dbCheck.status}). Skipping creation.`);
+                    if (!stopLimitOrderRepository.has(normalizedSymbol)) {
+                      stopLimitOrderRepository.set(normalizedSymbol, {
+                        orderId: dbCheck.orderId,
+                        order: dbCheck.order,
+                        openedDateTime: dbCheck.openedDateTime,
+                        status: dbCheck.status
+                      });
+                      console.log(`✅ [STOPLIMIT_REPO] Registered StopLimit ${dbCheck.orderId} from database for ${normalizedSymbol}`);
+                    }
+                    const dbLeg = dbCheck.order?.Legs?.[0];
+                    const dbExistingQty = parseInt(dbLeg?.QuantityRemaining || dbLeg?.QuantityOrdered || '0', 10) || 0;
+                    const dbNewBuyQty = Math.floor(Number(pending.quantity || 0)) || 0;
+                    const dbNewTotalQty = dbExistingQty + dbNewBuyQty;
+                    if (dbNewTotalQty > 0) {
+                      console.log(`📊 [REBUY] Updating StopLimit ${dbCheck.orderId} for ${normalizedSymbol} (from DB): ${dbExistingQty} + ${dbNewBuyQty} = ${dbNewTotalQty}`);
+                      try {
+                        const result = await modifyOrderQuantity(dbCheck.orderId, dbNewTotalQty);
+                        if (result.success) console.log(`✅ [REBUY] Successfully updated StopLimit ${dbCheck.orderId} for ${normalizedSymbol} to ${dbNewTotalQty}`);
+                        else console.error(`❌ [REBUY] Failed to update StopLimit ${dbCheck.orderId} for ${normalizedSymbol}: ${result.error}`);
+                      } catch (err) {
+                        console.error(`❌ [REBUY] Error updating StopLimit quantity for ${normalizedSymbol}:`, err);
+                      }
+                    }
+                    return;
+                  }
+                }
+
+                const filledStopLimit = stopLimitFilledSymbols.get(normalizedSymbol);
+                if (filledStopLimit) {
+                  console.warn(`⚠️ [DEBUG] Symbol ${normalizedSymbol} had StopLimit filled previously (order ${filledStopLimit.orderId}). Skipping StopLimit creation to prevent loops.`);
+                  const position = positionsCache.get(normalizedSymbol);
+                  if (!position || parseFloat(position.Quantity || '0') <= 0) {
+                    stopLimitFilledSymbols.delete(normalizedSymbol);
+                    console.log(`🧹 [DEBUG] Position closed for ${normalizedSymbol} - removed from filled StopLimit tracking`);
+                  }
+                  return;
+                }
+
+                const existingRepoOrder = getActiveStopLimitOrder(normalizedSymbol);
+                if (existingRepoOrder) {
+                  console.log(`✅ [DEBUG] StopLimit already exists in repository for ${normalizedSymbol} (${existingRepoOrder.orderId}). Re-buy: updating quantity (existing + new buy).`);
+                  const repoLeg = existingRepoOrder.order?.Legs?.[0];
+                  const repoExistingQty = parseInt(repoLeg?.QuantityRemaining || repoLeg?.QuantityOrdered || '0', 10) || 0;
+                  const repoNewBuyQty = Math.floor(Number(pending.quantity || 0)) || 0;
+                  const repoNewTotalQty = repoExistingQty + repoNewBuyQty;
+                  if (repoNewTotalQty > 0) {
+                    console.log(`📊 [REBUY] Updating StopLimit ${existingRepoOrder.orderId} for ${normalizedSymbol}: ${repoExistingQty} + ${repoNewBuyQty} = ${repoNewTotalQty}`);
+                    try {
+                      const result = await modifyOrderQuantity(existingRepoOrder.orderId, repoNewTotalQty);
+                      if (result.success) console.log(`✅ [REBUY] Successfully updated StopLimit ${existingRepoOrder.orderId} for ${normalizedSymbol} to ${repoNewTotalQty}`);
+                      else console.error(`❌ [REBUY] Failed to update StopLimit ${existingRepoOrder.orderId} for ${normalizedSymbol}: ${result.error}`);
+                    } catch (err) {
+                      console.error(`❌ [REBUY] Error updating StopLimit quantity for ${normalizedSymbol}:`, err);
+                    }
+                  }
+                  return;
+                }
+
+                console.log(`📬 [FLL] Filled buy ${orderId} for ${symbol} (WS) → StopLimit create/update`);
+                console.log(`🚀 [DEBUG] Triggering StopLimit creation/modification for filled manual buy ${orderId} (${symbol})`);
+                await new Promise(resolve => setTimeout(resolve, 800));
+                const delayedExisting = await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
+                if (delayedExisting && delayedExisting.orderId) {
+                  const exLeg = delayedExisting.order?.Legs?.[0];
+                  const exQty = parseInt(exLeg?.QuantityRemaining || exLeg?.QuantityOrdered || '0', 10) || 0;
+                  const newQty = Math.floor(Number(pending.quantity || 0)) || 0;
+                  const totalQty = exQty + newQty;
+                  if (totalQty > 0) {
+                    console.log(`📊 [REBUY] After delay: found existing StopLimit for ${normalizedSymbol} (${delayedExisting.orderId}). Updating quantity ${exQty} + ${newQty} = ${totalQty}`);
+                    try {
+                      const result = await modifyOrderQuantity(delayedExisting.orderId, totalQty);
+                      if (result.success) console.log(`✅ [REBUY] Updated StopLimit ${delayedExisting.orderId} for ${normalizedSymbol} to ${totalQty}`);
+                      else console.error(`❌ [REBUY] Failed to update: ${result.error}`);
+                    } catch (err) {
+                      console.error(`❌ [REBUY] Error updating StopLimit for ${normalizedSymbol}:`, err);
+                    }
+                  }
+                  return;
+                }
+
+                if (!stopLimitCreationInProgress.has(orderId)) {
+                  handleManualBuyFilled(orderId, order, pending).catch(err => {
+                    console.error(`❌ [DEBUG] Error in handleManualBuyFilled for ${orderId}:`, err);
+                    console.error(`❌ [DEBUG] Stack:`, err.stack);
+                    processedFllOrders.delete(orderId);
+                  });
                 } else {
-                  console.error(`❌ [REBUY] Failed to update StopLimit ${existingStopLimit.orderId} for ${normalizedSymbol}: ${result.error}`);
+                  console.log(`⏸️ [DEBUG] StopLimit creation already in progress for ${orderId}, skipping WebSocket trigger`);
                 }
               } catch (err) {
-                console.error(`❌ [REBUY] Error updating StopLimit quantity for ${normalizedSymbol}:`, err);
-              }
-            }
-            return; // Don't process - StopLimit already exists
-            }
-            
-            // CRITICAL: Also check database directly (authoritative source of truth)
-            // This catches cases where repository might be empty but database has the order
-            if (cachePersistenceService) {
-              const dbCheck = await cachePersistenceService.checkDatabaseForActiveStopLimit(normalizedSymbol);
-              if (dbCheck) {
-                console.log(`✅ [DEBUG] Database check found active StopLimit ${dbCheck.orderId} for ${normalizedSymbol} (status: ${dbCheck.status}). Skipping creation.`);
-                
-                // Register in repository if not already there
-                if (!stopLimitOrderRepository.has(normalizedSymbol)) {
-                  stopLimitOrderRepository.set(normalizedSymbol, {
-                    orderId: dbCheck.orderId,
-                    order: dbCheck.order,
-                    openedDateTime: dbCheck.openedDateTime,
-                    status: dbCheck.status
-                  });
-                  console.log(`✅ [STOPLIMIT_REPO] Registered StopLimit ${dbCheck.orderId} from database for ${normalizedSymbol}`);
-                }
-                
-                // Mark as processed to prevent retry
-                processedFllOrders.add(orderId);
-                pendingManualBuyOrders.delete(orderId);
-                // Re-buy: add new bought quantity to existing stop-limit quantity
-                const dbLeg = dbCheck.order?.Legs?.[0];
-                const dbExistingQty = parseInt(dbLeg?.QuantityRemaining || dbLeg?.QuantityOrdered || '0', 10) || 0;
-                const dbNewBuyQty = Math.floor(Number(pending.quantity || 0)) || 0;
-                const dbNewTotalQty = dbExistingQty + dbNewBuyQty;
-                if (dbNewTotalQty > 0) {
-                  console.log(`📊 [REBUY] Updating StopLimit ${dbCheck.orderId} for ${normalizedSymbol} (from DB): ${dbExistingQty} + ${dbNewBuyQty} = ${dbNewTotalQty}`);
-                  try {
-                    const result = await modifyOrderQuantity(dbCheck.orderId, dbNewTotalQty);
-                    if (result.success) {
-                      console.log(`✅ [REBUY] Successfully updated StopLimit ${dbCheck.orderId} for ${normalizedSymbol} to ${dbNewTotalQty}`);
-                    } else {
-                      console.error(`❌ [REBUY] Failed to update StopLimit ${dbCheck.orderId} for ${normalizedSymbol}: ${result.error}`);
-                    }
-                  } catch (err) {
-                    console.error(`❌ [REBUY] Error updating StopLimit quantity for ${normalizedSymbol}:`, err);
-                  }
-                }
-                return; // Don't process - StopLimit already exists in database
-              }
-            }
-            
-            // CRITICAL: Mark as processed IMMEDIATELY to prevent duplicate processing
-            // Do this BEFORE any async operations
-            processedFllOrders.add(orderId);
-            console.log(`✅ [DEBUG] Marked order ${orderId} (${symbol}) as processed for FLL`);
-            
-            // CRITICAL: Remove from pendingManualBuyOrders FIRST to prevent duplicate processing
-            // This ensures that even if WebSocket sends multiple FLL updates, we only process once
-            pendingManualBuyOrders.delete(orderId);
-            console.log(`✅ [DEBUG] Removed ${orderId} from pendingManualBuyOrders. Remaining: ${pendingManualBuyOrders.size}`);
-            
-            // CRITICAL: Check if StopLimit was already filled for this symbol - prevent creating new one
-            const filledStopLimit = stopLimitFilledSymbols.get(normalizedSymbol);
-            if (filledStopLimit) {
-              console.warn(`⚠️ [DEBUG] Symbol ${normalizedSymbol} had StopLimit filled previously (order ${filledStopLimit.orderId}). Skipping StopLimit creation to prevent loops.`);
-              
-              // Check if position still exists - if not, remove from filled tracking
-              const position = positionsCache.get(normalizedSymbol);
-              if (!position || parseFloat(position.Quantity || '0') <= 0) {
-                stopLimitFilledSymbols.delete(normalizedSymbol);
-                console.log(`🧹 [DEBUG] Position closed for ${normalizedSymbol} - removed from filled StopLimit tracking`);
-              }
-              
-              return; // Don't call handleManualBuyFilled if StopLimit was already filled
-            }
-            
-            // CRITICAL: Check repository FIRST before processing to prevent duplicate creation
-            // If a StopLimit already exists in repository, just update quantity instead of creating new one
-            const existingRepoOrder = getActiveStopLimitOrder(normalizedSymbol);
-            if (existingRepoOrder) {
-              console.log(`✅ [DEBUG] StopLimit already exists in repository for ${normalizedSymbol} (${existingRepoOrder.orderId}). Re-buy: updating quantity (existing + new buy).`);
-              
-              // Re-buy: add new bought quantity to existing stop-limit quantity
-              const repoLeg = existingRepoOrder.order?.Legs?.[0];
-              const repoExistingQty = parseInt(repoLeg?.QuantityRemaining || repoLeg?.QuantityOrdered || '0', 10) || 0;
-              const repoNewBuyQty = Math.floor(Number(pending.quantity || 0)) || 0;
-              const repoNewTotalQty = repoExistingQty + repoNewBuyQty;
-              if (repoNewTotalQty > 0) {
-                console.log(`📊 [REBUY] Updating StopLimit ${existingRepoOrder.orderId} for ${normalizedSymbol}: ${repoExistingQty} + ${repoNewBuyQty} = ${repoNewTotalQty}`);
-                try {
-                  const result = await modifyOrderQuantity(existingRepoOrder.orderId, repoNewTotalQty);
-                  if (result.success) {
-                    console.log(`✅ [REBUY] Successfully updated StopLimit ${existingRepoOrder.orderId} for ${normalizedSymbol} to ${repoNewTotalQty}`);
-                  } else {
-                    console.error(`❌ [REBUY] Failed to update StopLimit ${existingRepoOrder.orderId} for ${normalizedSymbol}: ${result.error}`);
-                  }
-                } catch (err) {
-                  console.error(`❌ [REBUY] Error updating StopLimit quantity for ${normalizedSymbol}:`, err);
-                }
-              }
-              return; // Don't call handleManualBuyFilled if order already exists
-            }
-            
-            console.log(`📬 [FLL] Filled buy ${orderId} for ${symbol} (WS) → StopLimit create/update`);
-            console.log(`🚀 [DEBUG] Triggering StopLimit creation/modification for filled manual buy ${orderId} (${symbol})`);
-            
-            // Short delay + re-check for existing stop-limit (handles message ordering: ACK may arrive after FLL)
-            await new Promise(resolve => setTimeout(resolve, 800));
-            const delayedExisting = await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
-            if (delayedExisting && delayedExisting.orderId) {
-              const exLeg = delayedExisting.order?.Legs?.[0];
-              const exQty = parseInt(exLeg?.QuantityRemaining || exLeg?.QuantityOrdered || '0', 10) || 0;
-              const newQty = Math.floor(Number(pending.quantity || 0)) || 0;
-              const totalQty = exQty + newQty;
-              if (totalQty > 0) {
-                console.log(`📊 [REBUY] After delay: found existing StopLimit for ${normalizedSymbol} (${delayedExisting.orderId}). Updating quantity ${exQty} + ${newQty} = ${totalQty}`);
-                try {
-                  const result = await modifyOrderQuantity(delayedExisting.orderId, totalQty);
-                  if (result.success) console.log(`✅ [REBUY] Updated StopLimit ${delayedExisting.orderId} for ${normalizedSymbol} to ${totalQty}`);
-                  else console.error(`❌ [REBUY] Failed to update: ${result.error}`);
-                } catch (err) { console.error(`❌ [REBUY] Error updating StopLimit for ${normalizedSymbol}:`, err); }
-              }
-              processedFllOrders.add(orderId);
-              pendingManualBuyOrders.delete(orderId);
-              return;
-            }
-            
-            // CRITICAL: Do NOT apply reconnect-window skip to TRACKED orders (placed during this session).
-            // Reconnect window only skips UNTRACKED (fallback) FLLs to avoid creating stop-limits for replayed/sold stocks.
-            // Tracked orders must always get stop-limits created/updated regardless of reconnect window.
-            
-            // Don't remove from cache yet - let handleManualBuyFilled complete first
-            // The order will be removed from cache after this block if status is terminal
-            // Only call if not already in progress (prevent duplicate calls)
-            if (!stopLimitCreationInProgress.has(orderId)) {
-              handleManualBuyFilled(orderId, order, pending).catch(err => {
-                console.error(`❌ [DEBUG] Error in handleManualBuyFilled for ${orderId}:`, err);
-                console.error(`❌ [DEBUG] Stack:`, err.stack);
-                // On error, remove from processed set so it can be retried if needed
+                console.error(`❌ [FLL_DEFERRED] Error in deferred FLL→stoplimit for ${orderId} (${normalizedSymbol}):`, err);
                 processedFllOrders.delete(orderId);
-              });
-            } else {
-              console.log(`⏸️ [DEBUG] StopLimit creation already in progress for ${orderId}, skipping WebSocket trigger`);
-            }
+              }
+            });
           }
 
           // FALLBACK: Handle filled BUY orders that weren't tracked in pendingManualBuyOrders
@@ -5216,12 +5178,41 @@ function scheduleManualBuyStatusPoll(orderId, pending) {
       setTimeout(pollOnce, intervalMs);
     } else {
       manualBuyStatusPollInProgress.delete(orderIdStr);
-      // Remove from tracked so 2s/position fallback can create stop-limit (position may already be in cache)
       const pendingData = pendingManualBuyOrders.get(orderIdStr);
       pendingManualBuyOrders.delete(orderIdStr);
-      console.warn(`⚠️ [POLL] Stopped polling ${orderIdStr} after ${maxAttempts} attempts (no FLL detected). Fallback will create StopLimit when position is in cache.`);
+      console.warn(`⚠️ [POLL] Stopped polling ${orderIdStr} after ${maxAttempts} attempts (no FLL detected). Triggering immediate position-based StopLimit check.`);
       if (pendingData?.symbol) {
-        console.log(`📋 [POLL] ${pendingData.symbol} still in pendingManualBuyBySymbol → 2s/position fallback can create StopLimit`);
+        const sym = (pendingData.symbol || '').toString().toUpperCase();
+        const qty = Math.floor(Number(pendingData.quantity || 0)) || 0;
+        const buyPrice = parseFloat(pendingData.limitPrice || 0) || 0;
+        setImmediate(async () => {
+          try {
+            const position = positionsCache.get(sym);
+            const positionQty = position ? Math.floor(parseFloat(position.Quantity || '0')) || 0 : 0;
+            if (positionQty <= 0 || qty <= 0 || buyPrice <= 0) {
+              console.log(`📋 [POLL_FALLBACK] No position or invalid data for ${sym} (qty=${positionQty || qty}, buyPrice=${buyPrice}) - position fallback will create when position arrives`);
+              return;
+            }
+            const existing = await getActiveStopLimitOrderWithRecovery(sym);
+            if (existing && existing.orderId) {
+              console.log(`✅ [POLL_FALLBACK] StopLimit already exists for ${sym} (${existing.orderId}) - no action`);
+              return;
+            }
+            if (stopLimitCreationBySymbol.has(sym)) {
+              console.log(`⏸️ [POLL_FALLBACK] StopLimit creation already in progress for ${sym}`);
+              return;
+            }
+            stopLimitCreationBySymbol.add(sym);
+            try {
+              console.log(`🚀 [POLL_FALLBACK] Creating StopLimit for ${sym} from position (poll gave up; qty=${positionQty}, buyPrice=${buyPrice})`);
+              await createStopLimitSellOrder(sym, positionQty, buyPrice);
+            } finally {
+              stopLimitCreationBySymbol.delete(sym);
+            }
+          } catch (e) {
+            console.error(`❌ [POLL_FALLBACK] Error creating StopLimit for ${sym} after poll gave up:`, e.message);
+          }
+        });
       }
     }
   };
@@ -5884,8 +5875,8 @@ async function handleManualBuyFilled(orderId, order, pending) {
   let hasPosition = positionCheck && parseFloat(positionCheck.Quantity || '0') > 0;
   
   // If position not found immediately, wait for positions WebSocket (instant fills: FLL can arrive before position update)
-  // Wait up to 15s so we catch positions that are 5–15s late (Positions WS often lags Orders WS)
-  const POSITION_WAIT_ITERATIONS = 30;
+  // Wait up to 8s so we catch positions that are a few seconds late without blocking stoplimit creation too long
+  const POSITION_WAIT_ITERATIONS = 16;
   const POSITION_WAIT_MS = 500;
   if (!hasPosition) {
     console.log(`⏳ [DEBUG] Position not found in cache for ${normalizedSymbol}. Waiting for positions WebSocket (up to ${(POSITION_WAIT_ITERATIONS * POSITION_WAIT_MS) / 1000}s)...`);
