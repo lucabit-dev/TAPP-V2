@@ -150,6 +150,8 @@ const ordersCache = new Map(); // Map<OrderID, { OrderID, Symbol, Status, Legs, 
 
 // Pending manual BUY orders: track orderId → { symbol, quantity, limitPrice } for FLL→StopLimit logic
 const pendingManualBuyOrders = new Map();
+// Pending manual BUY candidates by symbol (fallback when orderId/FLL is missed)
+const pendingManualBuyBySymbol = new Map(); // Map<symbol, { quantity, limitPrice, createdAt }>
 
 // StopLimit Order Repository - Single source of truth pattern from sections-buy-bot-main
 // Maps symbol → { orderId, order, openedDateTime, status }
@@ -894,6 +896,7 @@ setInterval(async () => {
     // Clean up processed FLL orders - remove entries older than 1 hour
     // This prevents the set from growing indefinitely while keeping recent entries
     let cleanedProcessedFll = 0;
+    let cleanedPendingManualBySymbol = 0;
     const PROCESSED_FLL_MAX_AGE = 3600000; // 1 hour
     // Note: Set doesn't have timestamps, so we'll clean based on size
     // If set gets too large (> 1000 entries), clear old entries
@@ -907,6 +910,16 @@ setInterval(async () => {
       entriesArray.slice(-entriesToKeep).forEach(id => processedFllOrders.add(id));
       cleanedProcessedFll = oldSize - processedFllOrders.size;
       console.log(`🧹 [CLEANUP] Cleaned ${cleanedProcessedFll} old processed FLL order entries (kept ${processedFllOrders.size})`);
+    }
+
+    // Clean up stale manual buy candidates by symbol
+    const PENDING_MANUAL_BY_SYMBOL_MAX_AGE = 10 * 60 * 1000; // 10 minutes
+    for (const [symbol, data] of pendingManualBuyBySymbol.entries()) {
+      const age = now - (data?.createdAt || 0);
+      if (age > PENDING_MANUAL_BY_SYMBOL_MAX_AGE) {
+        pendingManualBuyBySymbol.delete(symbol);
+        cleanedPendingManualBySymbol++;
+      }
     }
     
     // Orders WebSocket activity watchdog: force reconnect when no messages (orders or heartbeats) for ~5 min.
@@ -940,8 +953,8 @@ setInterval(async () => {
       }
     }
     
-    if (cleanedRepository > 0 || restoredFromDb > 0 || cleanedRecentlySold > 0 || cleanedFilledStopLimits > 0 || cleanedProcessedFll > 0) {
-      console.log(`🧹 [STOPLIMIT_REPO] Cleaned ${cleanedRepository} repository entries, restored ${restoredFromDb} from DB, ${cleanedRecentlySold} recently sold, ${cleanedFilledStopLimits} filled StopLimit, ${cleanedProcessedFll} processed FLL`);
+    if (cleanedRepository > 0 || restoredFromDb > 0 || cleanedRecentlySold > 0 || cleanedFilledStopLimits > 0 || cleanedProcessedFll > 0 || cleanedPendingManualBySymbol > 0) {
+      console.log(`🧹 [STOPLIMIT_REPO] Cleaned ${cleanedRepository} repository entries, restored ${restoredFromDb} from DB, ${cleanedRecentlySold} recently sold, ${cleanedFilledStopLimits} filled StopLimit, ${cleanedProcessedFll} processed FLL, ${cleanedPendingManualBySymbol} stale manual-buy candidates`);
     }
   } catch (err) {
     console.error(`❌ [STOPLIMIT_REPO] Error in StopLimit cleanup:`, err);
@@ -3144,6 +3157,13 @@ async function sendBuyOrder(symbol, configId = null, groupKey = null) {
     }
     
     const isSuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
+    if (isSuccess) {
+      pendingManualBuyBySymbol.set(symbol, {
+        quantity,
+        limitPrice: currentPrice,
+        createdAt: Date.now()
+      });
+    }
     
     // Stop-loss orders are now handled by StopLimitService automatically
     let stopLossResult = null;
@@ -3313,7 +3333,7 @@ function connectPositionsWebSocket() {
       }, 90000); // Every 90s
     });
     
-    positionsWs.on('message', (data) => {
+    positionsWs.on('message', async (data) => {
       try {
         const messageStr = Buffer.isBuffer(data) ? data.toString('utf8') : data.toString();
         const dataObj = JSON.parse(messageStr);
@@ -3355,6 +3375,49 @@ function connectPositionsWebSocket() {
             
             // Check StopLimit tracker for P&L-based updates
             checkStopLimitTracker(normalizedSymbol, dataObj);
+
+            // Fallback: if a recent manual buy was placed but Orders WS missed FLL,
+            // create or update StopLimit based on the position update.
+            const pendingBySymbol = pendingManualBuyBySymbol.get(normalizedSymbol);
+            if (pendingBySymbol) {
+              const ageMs = Date.now() - (pendingBySymbol.createdAt || 0);
+              const MAX_AGE_MS = 10 * 60 * 1000; // 10 minutes
+              if (ageMs > MAX_AGE_MS) {
+                pendingManualBuyBySymbol.delete(normalizedSymbol);
+              } else {
+                try {
+                  const positionQty = Math.floor(parseFloat(dataObj.Quantity || '0')) || 0;
+                  if (positionQty > 0) {
+                    const existing = await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
+                    if (existing && existing.orderId) {
+                      const existingLeg = existing.order?.Legs?.[0];
+                      const existingQty = parseInt(existingLeg?.QuantityRemaining || existingLeg?.QuantityOrdered || '0', 10) || 0;
+                      if (positionQty > existingQty) {
+                        console.log(`🔄 [POSITIONS_FALLBACK] Updating StopLimit ${existing.orderId} for ${normalizedSymbol} to match position qty ${positionQty} (was ${existingQty})`);
+                        const result = await modifyOrderQuantity(existing.orderId, positionQty);
+                        if (result.success) {
+                          console.log(`✅ [POSITIONS_FALLBACK] Updated StopLimit ${existing.orderId} for ${normalizedSymbol} to ${positionQty}`);
+                        } else {
+                          console.error(`❌ [POSITIONS_FALLBACK] Failed to update StopLimit ${existing.orderId} for ${normalizedSymbol}: ${result.error}`);
+                        }
+                      }
+                    } else {
+                      const buyPrice = parseFloat(pendingBySymbol.limitPrice || dataObj.AveragePrice || 0) || 0;
+                      if (buyPrice > 0) {
+                        console.log(`🚀 [POSITIONS_FALLBACK] Creating StopLimit for ${normalizedSymbol} from position update (qty ${positionQty}, buyPrice ${buyPrice})`);
+                        await createStopLimitSellOrder(normalizedSymbol, positionQty, buyPrice);
+                      } else {
+                        console.warn(`⚠️ [POSITIONS_FALLBACK] Missing buy price for ${normalizedSymbol}; skipping stop-limit creation`);
+                      }
+                    }
+                  }
+                } catch (e) {
+                  console.error(`❌ [POSITIONS_FALLBACK] Error handling ${normalizedSymbol} position fallback:`, e.message);
+                } finally {
+                  pendingManualBuyBySymbol.delete(normalizedSymbol);
+                }
+              }
+            }
           }
         } else {
           // Position closed or quantity is 0, remove from cache
@@ -4284,6 +4347,13 @@ app.post('/api/buys/test', async (req, res) => {
     }
     
     const isBuySuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
+    if (isBuySuccess) {
+      pendingManualBuyBySymbol.set(symbol, {
+        quantity,
+        limitPrice: currentPrice,
+        createdAt: Date.now()
+      });
+    }
     
     // Stop-loss orders are now handled automatically by StopLimitService when positions are detected
     let stopLossResult = null;
@@ -7373,6 +7443,13 @@ app.get('/api/debug/manual-buys', requireAuth, (req, res) => {
       quantity: data.quantity,
       limitPrice: data.limitPrice
     }));
+    const pendingBySymbol = Array.from(pendingManualBuyBySymbol.entries()).map(([symbol, data]) => ({
+      symbol,
+      quantity: data.quantity,
+      limitPrice: data.limitPrice,
+      createdAt: data.createdAt,
+      ageMs: Date.now() - (data.createdAt || 0)
+    }));
 
     // Get recent orders from cache that might be related to manual buys
     const recentOrders = Array.from(ordersCache.entries())
@@ -7423,6 +7500,7 @@ app.get('/api/debug/manual-buys', requireAuth, (req, res) => {
       data: {
         pendingManualBuys: pending,
         pendingCount: pending.length,
+        pendingBySymbol,
         recentOrders: recentOrders,
         stopLimitSells: stopLimitSells,
         ordersCacheSize: ordersCache.size,
