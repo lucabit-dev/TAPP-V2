@@ -3415,6 +3415,7 @@ function connectPositionsWebSocket() {
                         }
                       }
                     } else {
+                      pendingManualBuyBySymbol.delete(normalizedSymbol);
                       stopLimitCreationBySymbol.add(normalizedSymbol);
                       lastStopLimitAttemptBySymbol.set(normalizedSymbol, Date.now());
                       const buyPrice = parseFloat(pendingBySymbol.limitPrice || dataObj.AveragePrice || 0) || 0;
@@ -3650,6 +3651,8 @@ function connectOrdersWebSocket() {
           const legSide = (order.Legs?.[0]?.BuyOrSell || '').toUpperCase();
           if ((orderType === 'STOPLIMIT' || orderType === 'STOP_LIMIT') && legSide === 'SELL') {
             registerStopLimitOrder(order);
+            const stopLimitSymbol = (order.Legs?.[0]?.Symbol || '').toUpperCase();
+            if (stopLimitSymbol) pendingManualBuyBySymbol.delete(stopLimitSymbol);
             
             // CRITICAL: Guard removal is now handled in registerStopLimitOrder with delay
             // This prevents race conditions where handleManualBuyFilled is still running
@@ -4153,7 +4156,7 @@ if (process.env.PNL_API_KEY) {
 const PENDING_MANUAL_FALLBACK_INTERVAL_MS = 2000;
 setInterval(async () => {
   if (pendingManualBuyBySymbol.size === 0) return;
-  for (const [symbol, pending] of pendingManualBuyBySymbol.entries()) {
+  for (const [symbol, pending] of [...pendingManualBuyBySymbol.entries()]) {
     const normalizedSymbol = (symbol || '').toUpperCase();
     const ageMs = Date.now() - (pending?.createdAt || 0);
     if (ageMs > 10 * 60 * 1000) {
@@ -4166,6 +4169,8 @@ setInterval(async () => {
     const pos = positionsCache.get(normalizedSymbol);
     const positionQty = pos ? Math.floor(parseFloat(pos.Quantity || '0')) || 0 : 0;
     if (positionQty <= 0) continue;
+    // Claim symbol so no other run creates a duplicate; only one attempt per symbol per cycle
+    pendingManualBuyBySymbol.delete(symbol);
     try {
       stopLimitCreationBySymbol.add(normalizedSymbol);
       lastStopLimitAttemptBySymbol.set(normalizedSymbol, Date.now());
@@ -4187,7 +4192,6 @@ setInterval(async () => {
       console.error(`❌ [PENDING_FALLBACK] Error for ${normalizedSymbol}:`, e.message);
     } finally {
       stopLimitCreationBySymbol.delete(normalizedSymbol);
-      pendingManualBuyBySymbol.delete(symbol);
     }
   }
 }, PENDING_MANUAL_FALLBACK_INTERVAL_MS);
@@ -6550,6 +6554,8 @@ async function handleManualBuyFilled(orderId, order, pending) {
       
       // CRITICAL: After creation, update repository with real orderId (sections-buy-bot-main pattern)
       if (result.success && result.orderId) {
+        // Stop any fallback from creating another StopLimit for this symbol
+        pendingManualBuyBySymbol.delete(normalizedSymbol);
         // Update repository with real orderId (replace temporary pending order)
         const repoEntry = stopLimitOrderRepository.get(normalizedSymbol);
         if (repoEntry && repoEntry.orderId === tempOrderId) {
@@ -6684,7 +6690,7 @@ async function handleManualBuyFilled(orderId, order, pending) {
           // Order exists - guard will be removed by registerStopLimitOrder when ACK'd
           console.log(`⏳ [DEBUG] Guard for ${normalizedSymbol} will be removed when order ${repoCheck.orderId} is ACK'd`);
         }
-      }, 5000); // Increased to 5 seconds to give more time for order to be registered
+      }, 20000); // 20s so fallbacks do not send duplicate StopLimit after a successful one
     }
   } finally {
     // Remove from in-progress set
