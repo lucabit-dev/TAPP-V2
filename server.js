@@ -152,6 +152,7 @@ const ordersCache = new Map(); // Map<OrderID, { OrderID, Symbol, Status, Legs, 
 const pendingManualBuyOrders = new Map();
 // Pending manual BUY candidates by symbol (fallback when orderId/FLL is missed)
 const pendingManualBuyBySymbol = new Map(); // Map<symbol, { quantity, limitPrice, createdAt }>
+const manualBuyStatusPollInProgress = new Set(); // Set<orderId> to avoid duplicate polls
 
 // StopLimit Order Repository - Single source of truth pattern from sections-buy-bot-main
 // Maps symbol → { orderId, order, openedDateTime, status }
@@ -3114,9 +3115,9 @@ async function sendBuyOrder(symbol, configId = null, groupKey = null) {
         },
         body: JSON.stringify(orderBody)
       }, {
-        maxRetries: 4,
-        timeout: 8000,
-        retryDelay: 500
+        maxRetries: 2,
+        timeout: 5000,
+        retryDelay: 400
       });
       
       notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
@@ -4158,8 +4159,9 @@ app.post('/api/buys/test', async (req, res) => {
     if (!symbol) {
       return res.status(400).json({ success: false, error: 'Missing symbol' });
     }
-    
-    console.log(`🛒 Manual buy signal for ${symbol}`);
+    const requestId = makeRequestId('BUY');
+    const startTs = Date.now();
+    console.log(`🛒 [${requestId}] Manual buy signal for ${symbol}`);
     
     // Get current stock price using Polygon service
     let currentPrice = null;
@@ -4239,9 +4241,9 @@ app.post('/api/buys/test', async (req, res) => {
         },
         body: JSON.stringify(orderBody)
       }, {
-        maxRetries: 4,
-        timeout: 8000,
-        retryDelay: 500
+        maxRetries: 2,
+        timeout: 5000,
+        retryDelay: 400
       });
       
       notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
@@ -4291,6 +4293,8 @@ app.post('/api/buys/test', async (req, res) => {
         console.log(`📌 [DEBUG] Tracking manual buy order ${oid} for ${symbol} (qty ${quantity}, limitPrice ${currentPrice})`);
         console.log(`📌 [DEBUG] Full response data:`, JSON.stringify(responseData, null, 2));
         console.log(`📌 [DEBUG] Total tracked manual buys: ${pendingManualBuyOrders.size}`);
+        // Poll order status to reduce WS latency (helps when FLL is delayed)
+        scheduleManualBuyStatusPoll(oid, { symbol, quantity, limitPrice: currentPrice });
         
         // NOTE: We do NOT create StopLimit here even if response shows FLL status
         // The API response status might be stale or incorrect. We wait for WebSocket
@@ -4489,9 +4493,9 @@ app.post('/api/sells/test', async (req, res) => {
         },
         body: JSON.stringify(orderBody)
       }, {
-        maxRetries: 4,
-        timeout: 8000,
-        retryDelay: 500
+        maxRetries: 2,
+        timeout: 5000,
+        retryDelay: 400
       });
       
       notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
@@ -4636,9 +4640,9 @@ app.get('/api/buys/test', async (req, res) => {
         },
         body: JSON.stringify(orderBody)
       }, {
-        maxRetries: 4,
-        timeout: 8000,
-        retryDelay: 500
+        maxRetries: 2,
+        timeout: 5000,
+        retryDelay: 400
       });
       
       notifyStatus = `${resp.status} ${resp.statusText || ''}`.trim();
@@ -4658,10 +4662,10 @@ app.get('/api/buys/test', async (req, res) => {
       }
       
       if (resp.ok) {
-        console.log(`✅ Buy order sent for ${symbol}: ${notifyStatus}`, responseData ? `Response: ${JSON.stringify(responseData)}` : '');
+        console.log(`✅ [${requestId}] Buy order sent for ${symbol}: ${notifyStatus}`, responseData ? `Response: ${JSON.stringify(responseData)}` : '');
       } else {
         errorMessage = extractErrorMessage(responseData, responseText, resp.status, resp.statusText);
-        console.error(`❌ Error buying ${symbol}:`, {
+        console.error(`❌ [${requestId}] Error buying ${symbol}:`, {
           status: notifyStatus,
           response: responseData,
           body: responseText,
@@ -4671,7 +4675,7 @@ app.get('/api/buys/test', async (req, res) => {
     } catch (err) {
       notifyStatus = `ERROR: ${err.message}`;
       errorMessage = err.message;
-      console.error(`❌ Network/Parse error buying ${symbol}:`, {
+      console.error(`❌ [${requestId}] Network/Parse error buying ${symbol}:`, {
         message: err.message,
         stack: err.stack
       });
@@ -4741,7 +4745,7 @@ app.get('/api/buys/test', async (req, res) => {
       });
     }
     
-    console.log(`✅ Manual buy logged for ${symbol} - Added to buy list`);
+    console.log(`✅ [${requestId}] Manual buy logged for ${symbol} - Added to buy list (${Date.now() - startTs}ms)`);
     
     return res.status(200).json({ 
       success: isSuccess, 
@@ -4965,6 +4969,80 @@ async function robustFetch(url, options = {}, retryConfig = {}) {
     json: async () => ({ error: lastError?.message || 'Network Error' }),
     text: async () => lastError?.message || 'Network Error'
   };
+}
+
+function makeRequestId(prefix) {
+  const rand = Math.random().toString(36).slice(2, 6);
+  return `${prefix}-${Date.now().toString(36)}-${rand}`;
+}
+
+// Fetch order details by ID (used to reduce FLL latency when WS is delayed)
+async function fetchOrderById(orderId) {
+  const orderIdStr = String(orderId || '').trim();
+  if (!orderIdStr) return { ok: false, order: null };
+  const resp = await robustFetch(`https://sections-bot.inbitme.com/order/${encodeURIComponent(orderIdStr)}`, {
+    method: 'GET',
+    headers: { 'Accept': 'application/json' }
+  }, {
+    maxRetries: 1,
+    timeout: 4000,
+    retryDelay: 400
+  });
+  const text = await resp.text().catch(() => '');
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch {}
+  // Some APIs return an array or a wrapper object; normalize to a single order object
+  const order = Array.isArray(data) ? data[0] : (data?.order || data);
+  return { ok: resp.ok, order };
+}
+
+function scheduleManualBuyStatusPoll(orderId, pending) {
+  const orderIdStr = String(orderId || '').trim();
+  if (!orderIdStr) return;
+  if (manualBuyStatusPollInProgress.has(orderIdStr)) return;
+  manualBuyStatusPollInProgress.add(orderIdStr);
+
+  const maxAttempts = 15;
+  const intervalMs = 1000;
+  let attempt = 0;
+
+  const pollOnce = async () => {
+    attempt += 1;
+    try {
+      const result = await fetchOrderById(orderIdStr);
+      const order = result?.order;
+      if (order && order.OrderID) {
+        ordersCache.set(orderIdStr, { ...order, lastUpdated: Date.now() });
+        if (cachePersistenceService) {
+          cachePersistenceService.scheduleOrderSave(orderIdStr);
+        }
+        const status = (order.Status || '').toUpperCase();
+        const isFilled = status === 'FLL' || status === 'FIL';
+        const isBuy = (order.Legs?.[0]?.BuyOrSell || '').toUpperCase() === 'BUY';
+        if (isFilled && isBuy) {
+          manualBuyStatusPollInProgress.delete(orderIdStr);
+          handleManualBuyFilled(orderIdStr, order, pending).catch(err => {
+            console.error(`❌ [POLL] Error in handleManualBuyFilled for ${orderIdStr}:`, err);
+          });
+          return;
+        }
+        if (['REJ', 'REJECTED', 'CAN', 'EXP'].includes(status)) {
+          pendingManualBuyOrders.delete(orderIdStr);
+          manualBuyStatusPollInProgress.delete(orderIdStr);
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn(`⚠️ [POLL] Error polling order ${orderIdStr}:`, e.message);
+    }
+    if (attempt < maxAttempts) {
+      setTimeout(pollOnce, intervalMs);
+    } else {
+      manualBuyStatusPollInProgress.delete(orderIdStr);
+    }
+  };
+
+  setTimeout(pollOnce, intervalMs);
 }
 
 // Find existing active SELL StopLimit order for a symbol. Returns { orderId, quantity, order } or null.
@@ -7573,12 +7651,14 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing or invalid quantity' });
     }
     
+    const requestId = makeRequestId('SELL');
+    const startTs = Date.now();
     // Determine side: for Long positions, SELL to close; for Short positions, BUY to close
     const isLong = longShort.toLowerCase() === 'long';
     const side = isLong ? 'SELL' : 'BUY';
     const action = isLong ? 'sell' : 'close (buy back)';
     
-    console.log(`💸 Manual ${action} signal for ${quantity} ${symbol} (${orderType}, ${side})`);
+    console.log(`💸 [${requestId}] Manual ${action} signal for ${quantity} ${symbol} (${orderType}, ${side})`);
     
     // CRITICAL: Ensure only one active sell order exists for this position
     // Cancel any existing sell orders (StopLimit or Limit) before placing the new one
@@ -7598,9 +7678,9 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
             method: 'DELETE',
             headers: { 'Accept': '*/*' }
           }, {
-            maxRetries: 2,
-            timeout: 6000,
-            retryDelay: 500
+            maxRetries: 1,
+            timeout: 3500,
+            retryDelay: 300
           });
           if (cancelResp.ok || cancelResp.status === 200 || cancelResp.status === 204 || cancelResp.status === 404) {
             console.log(`✅ StopLimit order ${stopLimitOrderId} cancelled successfully for ${normalizedSymbol}`);
@@ -7682,9 +7762,9 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
               'Accept': '*/*'
             }
           }, {
-            maxRetries: 2,
-            timeout: 6000,
-            retryDelay: 500
+            maxRetries: 1,
+            timeout: 3500,
+            retryDelay: 300
           });
           
           const statusCode = resp.status;
@@ -7748,9 +7828,9 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
                 method: 'DELETE',
                 headers: { 'Accept': '*/*' }
               }, {
-                maxRetries: 2,
-                timeout: 6000,
-                retryDelay: 500
+                maxRetries: 1,
+                timeout: 3500,
+                retryDelay: 300
               });
               if (cancelResp.ok || cancelResp.status === 200 || cancelResp.status === 204 || cancelResp.status === 404) {
                 console.log(`✅ Additional StopLimit order ${stopLimitId} cancelled successfully`);
@@ -8001,7 +8081,7 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
     let errorMessage = null;
     
     try {
-      console.log(`📤 Sending sell order to external API:`, JSON.stringify(orderBody, null, 2));
+      console.log(`📤 [${requestId}] Sending sell order to external API:`, JSON.stringify(orderBody, null, 2));
       
       const resp = await robustFetch('https://sections-bot.inbitme.com/order', {
         method: 'POST',
@@ -8035,10 +8115,10 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
       }
       
       if (resp.ok) {
-        console.log(`✅ Sell order sent for ${symbol}: ${notifyStatus}`, responseData ? `Response: ${JSON.stringify(responseData)}` : '');
+        console.log(`✅ [${requestId}] Sell order sent for ${symbol}: ${notifyStatus}`, responseData ? `Response: ${JSON.stringify(responseData)}` : '');
       } else {
         errorMessage = extractErrorMessage(responseData, responseText, resp.status, resp.statusText);
-        console.error(`❌ Error selling ${symbol}:`, {
+        console.error(`❌ [${requestId}] Error selling ${symbol}:`, {
           status: notifyStatus,
           response: responseData,
           body: responseText,
@@ -8048,7 +8128,7 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
     } catch (err) {
       notifyStatus = `ERROR: ${err.message}`;
       errorMessage = err.message;
-      console.error(`❌ Network/Parse error selling ${symbol}:`, {
+      console.error(`❌ [${requestId}] Network/Parse error selling ${symbol}:`, {
         message: err.message,
         stack: err.stack
       });
@@ -8068,6 +8148,7 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
     }
 
     // External API responded (even if error), return 200 with success flag
+    console.log(`✅ [${requestId}] Sell request completed in ${Date.now() - startTs}ms (${notifyStatus})`);
     return res.status(200).json({ 
       success: isSuccess, 
       error: !isSuccess ? (errorMessage || `Failed to sell ${symbol}`) : undefined,
