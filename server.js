@@ -413,6 +413,7 @@ const stopLimitTrackerProgress = new Map();
 // Track which buy orders have already triggered StopLimit creation (prevent duplicates)
 const stopLimitCreationInProgress = new Set(); // Set<orderId>
 const stopLimitCreationBySymbol = new Set(); // Set<symbol> - track symbols with StopLimit creation in progress
+const lastStopLimitAttemptBySymbol = new Map(); // Map<symbol, timestamp> - throttle duplicate attempts
 
 // Cache persistence service (initialized after DB connection)
 let cachePersistenceService = null;
@@ -3386,6 +3387,17 @@ function connectPositionsWebSocket() {
               if (ageMs > MAX_AGE_MS) {
                 pendingManualBuyBySymbol.delete(normalizedSymbol);
               } else {
+                const lastAttempt = lastStopLimitAttemptBySymbol.get(normalizedSymbol) || 0;
+                const ATTEMPT_THROTTLE_MS = 20000; // 20s to prevent duplicate/rejected stoplimits
+                if (Date.now() - lastAttempt < ATTEMPT_THROTTLE_MS) {
+                  return;
+                }
+                if (recentlySoldSymbols.has(normalizedSymbol)) {
+                  return;
+                }
+                if (stopLimitCreationBySymbol.has(normalizedSymbol)) {
+                  return;
+                }
                 try {
                   const positionQty = Math.floor(parseFloat(dataObj.Quantity || '0')) || 0;
                   if (positionQty > 0) {
@@ -3403,6 +3415,8 @@ function connectPositionsWebSocket() {
                         }
                       }
                     } else {
+                      stopLimitCreationBySymbol.add(normalizedSymbol);
+                      lastStopLimitAttemptBySymbol.set(normalizedSymbol, Date.now());
                       const buyPrice = parseFloat(pendingBySymbol.limitPrice || dataObj.AveragePrice || 0) || 0;
                       if (buyPrice > 0) {
                         console.log(`🚀 [POSITIONS_FALLBACK] Creating StopLimit for ${normalizedSymbol} from position update (qty ${positionQty}, buyPrice ${buyPrice})`);
@@ -3410,6 +3424,7 @@ function connectPositionsWebSocket() {
                       } else {
                         console.warn(`⚠️ [POSITIONS_FALLBACK] Missing buy price for ${normalizedSymbol}; skipping stop-limit creation`);
                       }
+                      stopLimitCreationBySymbol.delete(normalizedSymbol);
                     }
                   }
                 } catch (e) {
