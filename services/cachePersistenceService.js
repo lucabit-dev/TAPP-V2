@@ -624,6 +624,48 @@ class CachePersistenceService {
   }
 
   /**
+   * Clear order cache collection in MongoDB and in-memory orders cache.
+   * Used by Admin section.
+   */
+  async clearOrderCacheCollection() {
+    if (!this.isDbAvailable()) {
+      console.warn('⚠️ CachePersistenceService: Database not available, skipping order cache clear');
+      this.ordersCache.clear();
+      return { deleted: 0 };
+    }
+    try {
+      const result = await OrderCache.deleteMany({});
+      this.ordersCache.clear();
+      console.log(`✅ CachePersistenceService: Cleared order cache collection (${result.deletedCount} documents)`);
+      return { deleted: result.deletedCount };
+    } catch (err) {
+      console.error('❌ CachePersistenceService: Error clearing order cache collection:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * Clear position cache collection in MongoDB and in-memory positions cache.
+   * Used by Admin section.
+   */
+  async clearPositionCacheCollection() {
+    if (!this.isDbAvailable()) {
+      console.warn('⚠️ CachePersistenceService: Database not available, skipping position cache clear');
+      this.positionsCache.clear();
+      return { deleted: 0 };
+    }
+    try {
+      const result = await PositionCache.deleteMany({});
+      this.positionsCache.clear();
+      console.log(`✅ CachePersistenceService: Cleared position cache collection (${result.deletedCount} documents)`);
+      return { deleted: result.deletedCount };
+    } catch (err) {
+      console.error('❌ CachePersistenceService: Error clearing position cache collection:', err);
+      throw err;
+    }
+  }
+
+  /**
    * Get cache statistics
    */
   async getStats() {

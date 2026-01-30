@@ -152,6 +152,15 @@ const ordersCache = new Map(); // Map<OrderID, { OrderID, Symbol, Status, Legs, 
 const pendingManualBuyOrders = new Map();
 // Pending manual BUY candidates by symbol (fallback when orderId/FLL is missed)
 const pendingManualBuyBySymbol = new Map(); // Map<symbol, { quantity, limitPrice, createdAt }>
+
+// True if we have a tracked buy (order_id) for this symbol still waiting for FLL. Fallbacks must NOT create StopLimit in that case.
+function hasTrackedBuyPendingForSymbol(symbol) {
+  const normalized = (symbol || '').toUpperCase();
+  for (const [, data] of pendingManualBuyOrders.entries()) {
+    if ((data?.symbol || '').toUpperCase() === normalized) return true;
+  }
+  return false;
+}
 const manualBuyStatusPollInProgress = new Set(); // Set<orderId> to avoid duplicate polls
 
 // StopLimit Order Repository - Single source of truth pattern from sections-buy-bot-main
@@ -440,12 +449,44 @@ async function initializeCachePersistence() {
         res.status(500).json({ success: false, error: err.message });
       }
     });
+
   } catch (err) {
     console.error('❌ Failed to initialize cache persistence:', err);
     // Continue without persistence - cache will work in-memory only
     cachePersistenceService = null;
   }
 }
+
+// Admin: clear position/order cache collections (password-protected). Route always registered.
+const ADMIN_CACHE_PASSWORD = process.env.ADMIN_CACHE_PASSWORD || 'l1z4RdSb0T';
+app.post('/api/admin/clear-caches', async (req, res) => {
+  try {
+    const { password, clearPositions = true, clearOrders = true } = req.body || {};
+    if (password !== ADMIN_CACHE_PASSWORD) {
+      return res.status(401).json({ success: false, error: 'Invalid admin password' });
+    }
+    if (!cachePersistenceService) {
+      return res.status(503).json({ success: false, error: 'Cache persistence not initialized' });
+    }
+    let positionsDeleted = 0;
+    let ordersDeleted = 0;
+    if (clearPositions) {
+      const pos = await cachePersistenceService.clearPositionCacheCollection();
+      positionsDeleted = pos.deleted;
+    }
+    if (clearOrders) {
+      const ord = await cachePersistenceService.clearOrderCacheCollection();
+      ordersDeleted = ord.deleted;
+    }
+    res.json({
+      success: true,
+      data: { positionsDeleted, ordersDeleted }
+    });
+  } catch (err) {
+    console.error('❌ Admin clear-caches error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 // Helper function to normalize timestamp (keeps UTC, formatting is done on frontend)
 // This function is here for consistency but doesn't actually change the timestamp
@@ -3346,8 +3387,11 @@ function connectPositionsWebSocket() {
         if (dataObj.Heartbeat) {
           return;
         }
-        
-        // Handle position updates
+        // Log when message doesn't have PositionID/Symbol (so we can see if broker uses different format)
+        if (!dataObj.PositionID || !dataObj.Symbol) {
+          console.log(`📥 [POSITIONS_WS] Message ignored (missing PositionID or Symbol): keys=${typeof dataObj === 'object' && dataObj !== null ? Object.keys(dataObj).join(',') : 'non-object'}`);
+        }
+        // Handle position updates (require PositionID and Symbol so we can update cache)
         if (dataObj.PositionID && dataObj.Symbol) {
           const symbol = dataObj.Symbol.toUpperCase();
           const quantity = parseFloat(dataObj.Quantity || '0');
@@ -3363,7 +3407,7 @@ function connectPositionsWebSocket() {
             if (cachePersistenceService) {
               cachePersistenceService.schedulePositionSave(symbol);
             }
-            console.log(`📊 Position cache updated: ${symbol} (${quantity} shares)`);
+            console.log(`📊 [POSITIONS_CACHE] Position cache updated: ${symbol} (${quantity} shares)`);
             // Debug: Log if this is a new position after a sell (for buy-sell-buy scenario)
             console.log(`🔍 [DEBUG] Position exists in cache for ${symbol}: Quantity=${quantity}, AveragePrice=${dataObj.AveragePrice || 'N/A'}`);
             
@@ -3398,6 +3442,8 @@ function connectPositionsWebSocket() {
                 if (stopLimitCreationBySymbol.has(normalizedSymbol)) {
                   return;
                 }
+                // Only create from fallback when buy is NOT tracked by order_id. If we have a tracked buy, wait for FLL.
+                if (hasTrackedBuyPendingForSymbol(normalizedSymbol)) return;
                 try {
                   const positionQty = Math.floor(parseFloat(dataObj.Quantity || '0')) || 0;
                   if (positionQty > 0) {
@@ -3609,6 +3655,8 @@ function connectOrdersWebSocket() {
           const isBuy = (order.Legs?.[0]?.BuyOrSell || '').toUpperCase() === 'BUY';
           const pending = pendingManualBuyOrders.get(orderId);
           const symbol = order.Legs?.[0]?.Symbol || 'UNKNOWN';
+          // Log every order update so we can see if FLL for a buy ever arrived (e.g. 933090153 UWMC)
+          console.log(`📥 [ORDERS_WS] orderId=${orderId} symbol=${symbol} status=${status} isBuy=${isBuy} hasPending=${!!pending} isFilled=${isFilled}`);
 
           // Debug logging for tracked orders
           if (pending) {
@@ -3858,6 +3906,7 @@ function connectOrdersWebSocket() {
               return; // Don't call handleManualBuyFilled if order already exists
             }
             
+            console.log(`📬 [FLL] Filled buy ${orderId} for ${symbol} (WS) → StopLimit create/update`);
             console.log(`🚀 [DEBUG] Triggering StopLimit creation/modification for filled manual buy ${orderId} (${symbol})`);
             
             // Short delay + re-check for existing stop-limit (handles message ordering: ACK may arrive after FLL)
@@ -4166,6 +4215,8 @@ setInterval(async () => {
     const lastAttempt = lastStopLimitAttemptBySymbol.get(normalizedSymbol) || 0;
     if (Date.now() - lastAttempt < 15000) continue;
     if (recentlySoldSymbols.has(normalizedSymbol) || stopLimitCreationBySymbol.has(normalizedSymbol)) continue;
+    // Only create from fallback when buy is NOT tracked by order_id (no FLL path). If we have a tracked buy, wait for FLL.
+    if (hasTrackedBuyPendingForSymbol(normalizedSymbol)) continue;
     const pos = positionsCache.get(normalizedSymbol);
     const positionQty = pos ? Math.floor(parseFloat(pos.Quantity || '0')) || 0 : 0;
     if (positionQty <= 0) continue;
@@ -4346,11 +4397,13 @@ app.post('/api/buys/test', async (req, res) => {
     // If Sections Bot returned an order id, track it for status (ACK/DON/FLL/REJ) and FLL→StopLimit logic
     let orderIdFromApi = null;
     if (responseData && typeof responseData === 'object') {
-      orderIdFromApi = responseData.order_id ?? responseData.OrderID ?? responseData.orderId ?? null;
+      const data = responseData.data ?? responseData;
+      orderIdFromApi = data.order_id ?? data.OrderID ?? data.orderId ?? data.id
+        ?? responseData.order_id ?? responseData.OrderID ?? responseData.orderId ?? responseData.id ?? null;
       if (orderIdFromApi != null && (notifyStatus.startsWith('200') || notifyStatus.startsWith('201'))) {
         const oid = String(orderIdFromApi);
         pendingManualBuyOrders.set(oid, { symbol, quantity, limitPrice: currentPrice });
-        console.log(`📌 [DEBUG] Tracking manual buy order ${oid} for ${symbol} (qty ${quantity}, limitPrice ${currentPrice})`);
+        console.log(`📌 [TRACKING] Manual buy tracked: order_id=${oid} symbol=${symbol} qty=${quantity} limitPrice=${currentPrice} → StopLimit on FLL`);
         console.log(`📌 [DEBUG] Full response data:`, JSON.stringify(responseData, null, 2));
         console.log(`📌 [DEBUG] Total tracked manual buys: ${pendingManualBuyOrders.size}`);
         // Poll order status to reduce WS latency (helps when FLL is delayed)
@@ -4363,7 +4416,8 @@ app.post('/api/buys/test', async (req, res) => {
       } else {
         // Log why order wasn't tracked for debugging
         if (orderIdFromApi == null) {
-          console.warn(`⚠️ [DEBUG] Buy order sent for ${symbol} but no order_id in response. Response:`, JSON.stringify(responseData, null, 2));
+          const keys = responseData && typeof responseData === 'object' ? Object.keys(responseData) : [];
+          console.warn(`⚠️ [TRACKING] Buy order NOT tracked for ${symbol}: no order_id in response. Keys: ${keys.join(', ') || 'none'}. Response:`, JSON.stringify(responseData, null, 2));
           console.warn(`⚠️ [DEBUG] This order will NOT trigger automatic stop-limit creation. Fallback mechanism will attempt to create stop-limit when order fills via WebSocket.`);
         } else if (!notifyStatus.startsWith('200') && !notifyStatus.startsWith('201')) {
           console.warn(`⚠️ [DEBUG] Buy order sent for ${symbol} with order_id ${orderIdFromApi} but status is ${notifyStatus} (not 200/201). Response:`, JSON.stringify(responseData, null, 2));
@@ -4412,7 +4466,8 @@ app.post('/api/buys/test', async (req, res) => {
     
     const isBuySuccess = notifyStatus.startsWith('200') || notifyStatus.startsWith('201');
     if (isBuySuccess) {
-      pendingManualBuyBySymbol.set(symbol, {
+      const normalizedSymbolKey = (symbol || '').toString().toUpperCase();
+      pendingManualBuyBySymbol.set(normalizedSymbolKey, {
         quantity,
         limitPrice: currentPrice,
         createdAt: Date.now()
@@ -5061,6 +5116,8 @@ function scheduleManualBuyStatusPoll(orderId, pending) {
   if (!orderIdStr) return;
   if (manualBuyStatusPollInProgress.has(orderIdStr)) return;
   manualBuyStatusPollInProgress.add(orderIdStr);
+  const pendingSymbol = (pending?.symbol || '').toString().toUpperCase();
+  console.log(`📌 [POLL] Started status poll for orderId=${orderIdStr} symbol=${pendingSymbol} (will poll until FLL or ${40} attempts)`);
 
   const maxAttempts = 40;
   const firstPollMs = 150;
@@ -5081,6 +5138,8 @@ function scheduleManualBuyStatusPoll(orderId, pending) {
         const isFilled = status === 'FLL' || status === 'FIL';
         const isBuy = (order.Legs?.[0]?.BuyOrSell || '').toUpperCase() === 'BUY';
         if (isFilled && isBuy) {
+          const pollSymbol = (pending?.symbol || order.Legs?.[0]?.Symbol || '').toUpperCase();
+          console.log(`📬 [FLL] Filled buy ${orderIdStr} for ${pollSymbol} (poll) → triggering StopLimit create/update`);
           manualBuyStatusPollInProgress.delete(orderIdStr);
           pendingManualBuyOrders.delete(orderIdStr);
           handleManualBuyFilled(orderIdStr, order, pending).catch(err => {
@@ -5093,6 +5152,9 @@ function scheduleManualBuyStatusPoll(orderId, pending) {
           manualBuyStatusPollInProgress.delete(orderIdStr);
           return;
         }
+      } else if (attempt === 1 || attempt % 10 === 0) {
+        // Log when we get no order or missing OrderID (so we can see if Sections Bot API shape is wrong)
+        console.warn(`⚠️ [POLL] fetchOrderById(${orderIdStr}) attempt ${attempt}: no order or missing OrderID. ok=${result?.ok}`);
       }
     } catch (e) {
       console.warn(`⚠️ [POLL] Error polling order ${orderIdStr}:`, e.message);
@@ -5101,6 +5163,7 @@ function scheduleManualBuyStatusPoll(orderId, pending) {
       setTimeout(pollOnce, intervalMs);
     } else {
       manualBuyStatusPollInProgress.delete(orderIdStr);
+      console.warn(`⚠️ [POLL] Stopped polling ${orderIdStr} after ${maxAttempts} attempts (no FLL detected)`);
     }
   };
 
@@ -5508,6 +5571,8 @@ async function handleManualBuyFilled(orderId, order, pending) {
   
   const symbol = (pending.symbol || (order.Legs?.[0]?.Symbol || '')).toString().toUpperCase();
   const normalizedSymbol = symbol;
+  const qty = Math.floor(Number(pending?.quantity || order.Legs?.[0]?.ExecQuantity ?? order.Legs?.[0]?.QuantityOrdered || 0)) || 0;
+  console.log(`📊 [STOPLIMIT_DEBUG] handleManualBuyFilled: orderId=${orderId} symbol=${normalizedSymbol} qty=${qty} → create or update StopLimit`);
   
   // Restore stop-limit from DB if missing from cache (keeps stop-limits active after ~10+ min, helps rebuys find existing)
   await getActiveStopLimitOrderWithRecovery(normalizedSymbol);

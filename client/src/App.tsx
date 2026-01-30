@@ -22,6 +22,7 @@ const L2Section = lazy(() => import('./components/L2Section'));
 const ChartsSection = lazy(() => import('./components/ChartsSection'));
 const Login = lazy(() => import('./components/Login'));
 const StopLimitTrackerModal = lazy(() => import('./components/StopLimitTrackerModal'));
+const AdminSection = lazy(() => import('./components/AdminSection'));
 
 // Loading fallback component - Minimalistic design
 const LoadingFallback = () => (
@@ -124,7 +125,7 @@ function App() {
   const [newValidAlertsCount, setNewValidAlertsCount] = useState(0);
   const [conditionStats, setConditionStats] = useState<any>(null);
   const [showStats, setShowStats] = useState(false);
-  const [selectedTab, setSelectedTab] = useState<'all' | 'valid' | 'filtered' | 'dashboard' | 'config-float' | 'listas-float-raw' | 'manual' | 'manual-non-qualified' | 'buy-list' | 'positions' | 'orders' | 'l2' | 'charts'>('manual');
+  const [selectedTab, setSelectedTab] = useState<'all' | 'valid' | 'filtered' | 'dashboard' | 'config-float' | 'listas-float-raw' | 'manual' | 'manual-non-qualified' | 'buy-list' | 'positions' | 'orders' | 'l2' | 'charts' | 'admin'>('manual');
   const [alertsCollapsed, setAlertsCollapsed] = useState(true); // Start collapsed
   const [listsCollapsed, setListsCollapsed] = useState(false); // Start expanded by default for Lists
   const [manualCollapsed, setManualCollapsed] = useState(false); // Start expanded by default for Manual
@@ -713,6 +714,7 @@ function App() {
                     { key: 'orders', label: 'Orders', count: 0 },
                     { key: 'l2', label: 'L2', count: 0 },
                     { key: 'charts', label: 'Charts', count: 0 },
+                    { key: 'admin', label: 'Admin', count: 0 },
                   ].map(tab => (
                     <button
                       key={tab.key}
@@ -1129,7 +1131,8 @@ function App() {
           {selectedTab === 'orders' && <OrdersSection />}
           {selectedTab === 'l2' && <L2Section />}
           {selectedTab === 'charts' && <ChartsSection />}
-          {!['dashboard', 'config-float', 'listas-float-raw', 'buy-list', 'positions', 'orders', 'l2', 'charts', 'sold', 'manual', 'manual-non-qualified'].includes(selectedTab) && (
+          {selectedTab === 'admin' && <AdminSection />}
+          {!['dashboard', 'config-float', 'listas-float-raw', 'buy-list', 'positions', 'orders', 'l2', 'charts', 'admin', 'sold', 'manual', 'manual-non-qualified'].includes(selectedTab) && (
             <div className="h-full flex">
             {/* Main Alerts Content */}
             <div className="flex-1 flex flex-col">
