@@ -4147,9 +4147,50 @@ function describeReadyState(state) {
 if (process.env.PNL_API_KEY) {
   connectPositionsWebSocket();
   connectOrdersWebSocket();
-} else {
-  console.warn('⚠️ PNL_API_KEY not set, positions and orders monitoring disabled');
 }
+
+// Proactive check: every 2s, for symbols in pendingManualBuyBySymbol, create stop-limit as soon as position appears in cache (covers delayed Positions WS or missing order_id)
+const PENDING_MANUAL_FALLBACK_INTERVAL_MS = 2000;
+setInterval(async () => {
+  if (pendingManualBuyBySymbol.size === 0) return;
+  for (const [symbol, pending] of pendingManualBuyBySymbol.entries()) {
+    const normalizedSymbol = (symbol || '').toUpperCase();
+    const ageMs = Date.now() - (pending?.createdAt || 0);
+    if (ageMs > 10 * 60 * 1000) {
+      pendingManualBuyBySymbol.delete(symbol);
+      continue;
+    }
+    const lastAttempt = lastStopLimitAttemptBySymbol.get(normalizedSymbol) || 0;
+    if (Date.now() - lastAttempt < 15000) continue;
+    if (recentlySoldSymbols.has(normalizedSymbol) || stopLimitCreationBySymbol.has(normalizedSymbol)) continue;
+    const pos = positionsCache.get(normalizedSymbol);
+    const positionQty = pos ? Math.floor(parseFloat(pos.Quantity || '0')) || 0 : 0;
+    if (positionQty <= 0) continue;
+    try {
+      stopLimitCreationBySymbol.add(normalizedSymbol);
+      lastStopLimitAttemptBySymbol.set(normalizedSymbol, Date.now());
+      const existing = await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
+      if (existing && existing.orderId) {
+        const existingQty = parseInt(existing.order?.Legs?.[0]?.QuantityRemaining || existing.order?.Legs?.[0]?.QuantityOrdered || '0', 10) || 0;
+        if (positionQty > existingQty) {
+          const result = await modifyOrderQuantity(existing.orderId, positionQty);
+          if (result.success) console.log(`✅ [PENDING_FALLBACK] Updated StopLimit ${existing.orderId} for ${normalizedSymbol} to ${positionQty}`);
+        }
+      } else {
+        const buyPrice = parseFloat(pending.limitPrice || pos?.AveragePrice || 0) || 0;
+        if (buyPrice > 0) {
+          console.log(`🚀 [PENDING_FALLBACK] Creating StopLimit for ${normalizedSymbol} (qty ${positionQty}, buyPrice ${buyPrice})`);
+          await createStopLimitSellOrder(normalizedSymbol, positionQty, buyPrice);
+        }
+      }
+    } catch (e) {
+      console.error(`❌ [PENDING_FALLBACK] Error for ${normalizedSymbol}:`, e.message);
+    } finally {
+      stopLimitCreationBySymbol.delete(normalizedSymbol);
+      pendingManualBuyBySymbol.delete(symbol);
+    }
+  }
+}, PENDING_MANUAL_FALLBACK_INTERVAL_MS);
 
 // Check if a position exists for a symbol using the cache
 function checkPositionExists(symbol) {
@@ -5017,8 +5058,9 @@ function scheduleManualBuyStatusPoll(orderId, pending) {
   if (manualBuyStatusPollInProgress.has(orderIdStr)) return;
   manualBuyStatusPollInProgress.add(orderIdStr);
 
-  const maxAttempts = 15;
-  const intervalMs = 1000;
+  const maxAttempts = 40;
+  const firstPollMs = 150;
+  const intervalMs = 400;
   let attempt = 0;
 
   const pollOnce = async () => {
@@ -5036,6 +5078,7 @@ function scheduleManualBuyStatusPoll(orderId, pending) {
         const isBuy = (order.Legs?.[0]?.BuyOrSell || '').toUpperCase() === 'BUY';
         if (isFilled && isBuy) {
           manualBuyStatusPollInProgress.delete(orderIdStr);
+          pendingManualBuyOrders.delete(orderIdStr);
           handleManualBuyFilled(orderIdStr, order, pending).catch(err => {
             console.error(`❌ [POLL] Error in handleManualBuyFilled for ${orderIdStr}:`, err);
           });
@@ -5057,7 +5100,7 @@ function scheduleManualBuyStatusPoll(orderId, pending) {
     }
   };
 
-  setTimeout(pollOnce, intervalMs);
+  setTimeout(pollOnce, firstPollMs);
 }
 
 // Find existing active SELL StopLimit order for a symbol. Returns { orderId, quantity, order } or null.
