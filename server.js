@@ -3341,10 +3341,25 @@ function connectPositionsWebSocket() {
         if (dataObj.Heartbeat) {
           return;
         }
+
+        // Handle batch/snapshot format: { positions: [...] } or { Positions: [...] }
+        const batch = dataObj.positions ?? dataObj.Positions;
+        if (Array.isArray(batch)) {
+          for (const p of batch) {
+            const s = (p?.Symbol ?? p?.symbol ?? '').toString().toUpperCase();
+            const q = parseFloat(p?.Quantity || '0');
+            if (s && q > 0) {
+              positionsCache.set(s, { ...p, Symbol: s, lastUpdated: Date.now() });
+              if (cachePersistenceService) cachePersistenceService.schedulePositionSave(s);
+            }
+          }
+          return;
+        }
         
-        // Handle position updates
-        if (dataObj.PositionID && dataObj.Symbol) {
-          const symbol = dataObj.Symbol.toUpperCase();
+        // Handle single position update (support Symbol or symbol)
+        const rawSymbol = dataObj.Symbol ?? dataObj.symbol;
+        if (dataObj.PositionID && rawSymbol) {
+          const symbol = String(rawSymbol).toUpperCase();
           const quantity = parseFloat(dataObj.Quantity || '0');
           
           if (quantity > 0) {
@@ -3929,11 +3944,20 @@ function connectOrdersWebSocket() {
                 let hasFallbackPosition = fallbackPositionCheck && parseFloat(fallbackPositionCheck.Quantity || '0') > 0;
                 
                 if (!hasFallbackPosition) {
-                  console.log(`⏳ [FALLBACK] Position not found for ${normalizedSymbol}, waiting for positions WS (instant-fill race)...`);
-                  for (let i = 0; i < 10; i++) {
+                  console.log(`⏳ [FALLBACK] Position not found for ${normalizedSymbol}, waiting for positions WS (up to 10s)...`);
+                  for (let i = 0; i < 20; i++) {
                     await new Promise(resolve => setTimeout(resolve, 500));
                     fallbackPositionCheck = positionsCache.get(normalizedSymbol);
                     hasFallbackPosition = fallbackPositionCheck && parseFloat(fallbackPositionCheck.Quantity || '0') > 0;
+                    if (!hasFallbackPosition) {
+                      for (const [k, v] of positionsCache.entries()) {
+                        if (k.toUpperCase() === normalizedSymbol && parseFloat(v?.Quantity || '0') > 0) {
+                          fallbackPositionCheck = v;
+                          hasFallbackPosition = true;
+                          break;
+                        }
+                      }
+                    }
                     if (hasFallbackPosition) {
                       console.log(`✅ [FALLBACK] Position found for ${normalizedSymbol} after ${(i + 1) * 500}ms`);
                       break;
@@ -3958,7 +3982,7 @@ function connectOrdersWebSocket() {
                   }
                 }
                 if (!hasFallbackPosition) {
-                  console.warn(`⚠️ [FALLBACK] No position found for ${normalizedSymbol} after 5s - skipping (do not mark recently sold; may be timing)`);
+                  console.warn(`⚠️ [FALLBACK] No position found for ${normalizedSymbol} after 10s - skipping (do not mark recently sold; may be timing)`);
                   processedFllOrders.add(orderId);
                   return;
                 }
@@ -5584,13 +5608,23 @@ async function handleManualBuyFilled(orderId, order, pending) {
   let hasPosition = positionCheck && parseFloat(positionCheck.Quantity || '0') > 0;
   
   // If position not found immediately, wait for positions WebSocket (instant fills: FLL can arrive before position update)
-  // Wait up to 5s so we don't skip stop-limit creation for instant fills / after reconnect (positions WS delayed)
+  // Wait up to 10s so we don't skip stop-limit creation (positions WS can be delayed; user reports position exists in WS)
   if (!hasPosition) {
-    console.log(`⏳ [DEBUG] Position not found in cache for ${normalizedSymbol}. Waiting for positions WebSocket (up to 5s)...`);
-    for (let i = 0; i < 10; i++) {
+    console.log(`⏳ [DEBUG] Position not found in cache for ${normalizedSymbol}. Waiting for positions WebSocket (up to 10s)...`);
+    for (let i = 0; i < 20; i++) {
       await new Promise(resolve => setTimeout(resolve, 500));
       positionCheck = positionsCache.get(normalizedSymbol);
       hasPosition = positionCheck && parseFloat(positionCheck.Quantity || '0') > 0;
+      if (!hasPosition) {
+        // Fallback: iterate cache in case position stored under different key (e.g. batch format)
+        for (const [k, v] of positionsCache.entries()) {
+          if (k.toUpperCase() === normalizedSymbol && parseFloat(v?.Quantity || '0') > 0) {
+            positionCheck = v;
+            hasPosition = true;
+            break;
+          }
+        }
+      }
       if (hasPosition) {
         console.log(`✅ [DEBUG] Position found in cache for ${normalizedSymbol} after ${(i + 1) * 500}ms wait`);
         break;
@@ -5615,7 +5649,7 @@ async function handleManualBuyFilled(orderId, order, pending) {
     }
     if (!hasPosition) {
       const retried = !!(pending && pending._noPositionRetry);
-      console.warn(`⚠️ [DEBUG] handleManualBuyFilled: No position for ${normalizedSymbol} after 5s${retried ? ' (retry)' : ''} - ${retried ? 'aborting' : 'scheduling retry in 5s'}`);
+      console.warn(`⚠️ [DEBUG] handleManualBuyFilled: No position for ${normalizedSymbol} after 10s${retried ? ' (retry)' : ''} - ${retried ? 'aborting' : 'scheduling retry in 5s'}`);
       stopLimitOrderRepository.delete(normalizedSymbol);
       stopLimitCreationBySymbol.delete(normalizedSymbol);
       if (!retried) {

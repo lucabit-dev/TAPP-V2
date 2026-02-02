@@ -24,7 +24,7 @@ When an untracked order fills, FALLBACK handles it. But FALLBACK can skip if:
 |-----------|-----------------|
 | Reconnect window + no position after 2s | `⏭️ [FALLBACK] Reconnect window: skipping new stop-limit for X` |
 | Order type not LIMIT/LMT | `⏭️ [FALLBACK] Skipping filled BUY X - order type "Y" is not Limit` |
-| No position after 5s | `⚠️ [FALLBACK] No position found for X after 5s` |
+| No position after 10s | `⚠️ [FALLBACK] No position found for X after 10s` |
 | Invalid data (qty=0, price=0) | `⚠️ [FALLBACK] Invalid order data for X` |
 
 ### 3. **Tracked Path Early Returns**
@@ -36,7 +36,7 @@ When an order IS tracked, it can still skip StopLimit creation if:
 | StopLimit already exists (rebuy) | `✅ [DEBUG] StopLimit already exists for X` |
 | StopLimit was recently filled | `⚠️ [DEBUG] Symbol X had StopLimit filled previously` |
 | Symbol recently sold | `⚠️ [DEBUG] Symbol X was recently sold` |
-| No position after 5s | `⚠️ [DEBUG] handleManualBuyFilled: No position for X` |
+| No position after 10s | `⚠️ [DEBUG] handleManualBuyFilled: No position for X` |
 | Duplicate FLL (already processed) | `⏭️ [DEBUG] Order X already processed for FLL` |
 
 ---
@@ -109,7 +109,7 @@ or
 
 4. **Check reconnect window** – If Orders WebSocket reconnected in the last 30 seconds before the fill, FALLBACK may skip. Look for `ordersReconnectWindowUntil` in logs.
 
-5. **Check position timing** – FLL can arrive before Positions WebSocket updates. We wait up to 5s. If position still missing, we skip.
+5. **Check position timing** – FLL can arrive before Positions WebSocket updates. We wait up to 10s. If position still missing, we skip. If you see "no position after 10s" but the position exists in the Positions WebSocket (client sees it), the server's Positions WS may use a different message format – we now support batch format and lowercase `symbol`.
 
 ---
 
@@ -199,3 +199,19 @@ If you get **no logs at all** for a symbol when buying:
 - **`📥 [ORDERS] Order {id} | {SYMBOL} | {status} | BUY/SELL | tracked=true/false`** – Logged for every order received. If GCTS never appears here, the Orders WebSocket is not receiving GCTS orders.
 
 - **`🛒 Manual buy signal for GCTS`** – Logged when a buy request reaches the server. If this never appears, the buy request is not reaching TAPP (e.g. client error or wrong endpoint).
+
+---
+
+## "No Position After 5s" But Position Exists in Positions WebSocket (e.g. IOVA)
+
+**Symptom:** Logs say "No position for IOVA after 5s" (or 10s) but the position is visible in the Positions WebSocket (client sees it).
+
+**Possible causes:**
+1. **Message format** – PnL API may send positions with `symbol` (lowercase) or in a batch `{ positions: [...] }`. We now support both.
+2. **Timing** – FLL can arrive before the Positions WS has processed its snapshot. Wait time increased from 5s to 10s.
+3. **Separate connections** – The server has its own Positions WS connection (populates `positionsCache`). The client sees data from its proxy connection. Both connect to the same PnL API; if the server's connection is delayed or uses a different message format, the cache may be empty when we check.
+
+**Fixes applied:**
+- Positions WS handler: support `symbol` (lowercase) and batch format `{ positions: [...] }`
+- Position wait: 10s instead of 5s in both handleManualBuyFilled and FALLBACK
+- Fallback: when not found by key, iterate `positionsCache` for case-insensitive symbol match
