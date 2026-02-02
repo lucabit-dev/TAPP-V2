@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
+import { useAuth } from '../auth/AuthContext';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 
 const AdminSection: React.FC = () => {
+  const { fetchWithAuth } = useAuth();
   const [password, setPassword] = useState('');
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -19,7 +21,7 @@ const AdminSection: React.FC = () => {
     }
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE_URL}/admin/clear-caches`, {
+      const res = await fetchWithAuth(`${API_BASE_URL}/admin/clear-caches`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: password.trim(), clearPositions: false, clearOrders: false })
@@ -43,7 +45,7 @@ const AdminSection: React.FC = () => {
     setLastResult(null);
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE_URL}/admin/clear-caches`, {
+      const res = await fetchWithAuth(`${API_BASE_URL}/admin/clear-caches`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

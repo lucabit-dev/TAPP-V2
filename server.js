@@ -119,6 +119,41 @@ app.get('/api/protected/ping', requireDbReady, requireAuth, (req, res) => {
   res.json({ ok: true, user: req.user });
 });
 
+// Admin: clear MongoDB position/order caches (requires auth + admin password)
+app.post('/api/admin/clear-caches', requireDbReady, requireAuth, async (req, res) => {
+  try {
+    const { password, clearPositions, clearOrders } = req.body || {};
+    const adminPassword = (process.env.ADMIN_PASSWORD || '').trim();
+    if (!adminPassword) {
+      return res.status(503).json({ error: 'Admin password not configured (set ADMIN_PASSWORD in .env)' });
+    }
+    if (!password || String(password).trim() !== String(adminPassword).trim()) {
+      return res.status(401).json({ error: 'Invalid password' });
+    }
+    let positionsDeleted = 0;
+    let ordersDeleted = 0;
+    const { OrderCache, PositionCache, StopLimitRepository } = require('./models/cache.model');
+    if (clearPositions) {
+      const posResult = await PositionCache.deleteMany({});
+      positionsDeleted = posResult.deletedCount || 0;
+      positionsCache.clear();
+      stopLimitOrderRepository.clear();
+      await StopLimitRepository.deleteMany({});
+      if (cachePersistenceService) cachePersistenceService.pendingSaves.positions.clear();
+    }
+    if (clearOrders) {
+      const ordResult = await OrderCache.deleteMany({});
+      ordersDeleted = ordResult.deletedCount || 0;
+      ordersCache.clear();
+      if (cachePersistenceService) cachePersistenceService.pendingSaves.orders.clear();
+    }
+    return res.json({ success: true, data: { positionsDeleted, ordersDeleted } });
+  } catch (err) {
+    console.error('Admin clear-caches error:', err);
+    return res.status(500).json({ error: err.message || 'Failed to clear caches' });
+  }
+});
+
 // Initialize services
 const chartsWatcherService = new ChartsWatcherService();
 const toplistService = new ToplistService();
