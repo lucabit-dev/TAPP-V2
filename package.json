@@ -14,7 +14,8 @@
     "start-full-original": "concurrently \"npm start\" \"npm run dev-client\"",
     "kill-ports": "lsof -ti:3001,5173 | xargs kill -9 2>/dev/null || true",
     "vercel-build": "cd client && npm install && npm run build",
-    "check-env": "node scripts/check-env.js"
+    "check-env": "node scripts/check-env.js",
+    "test-buy-tracking": "node scripts/test-buy-tracking.js"
   },
   "dependencies": {
     "@dx-private/dxchart5-react-mock-providers": "file:../dxchart.lib/dxchart5-react-mock-providers",

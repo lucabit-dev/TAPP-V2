@@ -3806,15 +3806,15 @@ function connectOrdersWebSocket() {
 
           // FALLBACK: Handle filled BUY orders that weren't tracked in pendingManualBuyOrders
           // This catches cases where the API response didn't include order_id or had a different status code
-          // Only process if:
-          // 1. Order is filled (FLL/FIL)
-          // 2. Order is a BUY order
-          // 3. Order is NOT in pendingManualBuyOrders (wasn't tracked initially)
-          // 4. Order hasn't been processed yet
-          // 5. Order type is Limit (manual buys use Limit orders)
           if (isFilled && isBuy && !pending && !processedFllOrders.has(orderId)) {
-            const orderType = (order.OrderType || '').toUpperCase();
-            if (orderType === 'LIMIT' || orderType === 'LMT') {
+            console.log(`📥 [FALLBACK] Filled BUY ${orderId} (${symbol}) not in pendingManualBuyOrders - attempting stop-limit creation`);
+            const orderType = (order.OrderType || order.Legs?.[0]?.OrderType || '').toUpperCase();
+            // Accept LIMIT, LMT, or empty/unknown (broker may omit type for limit buys - treat as limit)
+            const isLimitOrder = orderType === 'LIMIT' || orderType === 'LMT' || !orderType;
+            if (!isLimitOrder) {
+              console.log(`⏭️ [FALLBACK] Skipping filled BUY ${orderId} (${symbol}) - order type "${orderType}" is not Limit`);
+            }
+            if (isLimitOrder) {
               const normalizedSymbol = (symbol || '').toUpperCase();
               const leg = order.Legs?.[0];
               const quantity = Math.floor(Number(leg?.ExecQuantity || leg?.QuantityOrdered || 0)) || 0;
@@ -4225,6 +4225,8 @@ app.post('/api/buys/test', async (req, res) => {
     let orderIdFromApi = null;
     if (responseData && typeof responseData === 'object') {
       orderIdFromApi = responseData.order_id ?? responseData.OrderID ?? responseData.orderId ?? null;
+      // DIAGNOSTIC: Log response structure to detect API format changes affecting tracking
+      console.log(`📋 [TRACKING] Sections Bot response keys: [${Object.keys(responseData).join(', ')}] | order_id: ${orderIdFromApi ?? 'MISSING'} | status: ${notifyStatus}`);
       // Track order for FLL→StopLimit: accept any 2xx (200, 201, 202) when order_id is present.
       // 202 Accepted can occur for async order acceptance - we must still track to avoid losing stop-limit creation.
       if (orderIdFromApi != null && notifyStatus.startsWith('2')) {
@@ -5295,13 +5297,15 @@ async function checkStopLimitTracker(symbol, position) {
 
 // When a tracked manual BUY order reaches FLL/FIL: create new StopLimit SELL or add to existing.
 async function handleManualBuyFilled(orderId, order, pending) {
+  const symbol = (pending?.symbol || (order.Legs?.[0]?.Symbol || '')).toString().toUpperCase();
+  console.log(`🔍 [DEBUG] handleManualBuyFilled started for ${symbol} (order ${orderId})`);
+  
   // Prevent duplicate calls for the same order
   if (stopLimitCreationInProgress.has(orderId)) {
     console.log(`⏸️ [DEBUG] StopLimit creation already in progress for order ${orderId}, skipping duplicate call`);
     return;
   }
   
-  const symbol = (pending.symbol || (order.Legs?.[0]?.Symbol || '')).toString().toUpperCase();
   const normalizedSymbol = symbol;
   
   // Restore stop-limit from DB if missing from cache (keeps stop-limits active after ~10+ min, helps rebuys find existing)
