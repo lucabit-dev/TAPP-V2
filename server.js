@@ -119,8 +119,8 @@ app.get('/api/protected/ping', requireDbReady, requireAuth, (req, res) => {
   res.json({ ok: true, user: req.user });
 });
 
-// Admin: clear MongoDB position/order caches (requires auth + admin password)
-app.post('/api/admin/clear-caches', requireDbReady, requireAuth, async (req, res) => {
+// Admin: clear MongoDB position/order caches (requires admin password only - no JWT needed for unlock)
+app.post('/api/admin/clear-caches', requireDbReady, async (req, res) => {
   try {
     const { password, clearPositions, clearOrders } = req.body || {};
     const adminPassword = (process.env.ADMIN_PASSWORD || '').trim();
