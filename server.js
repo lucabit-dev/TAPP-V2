@@ -3764,8 +3764,12 @@ function connectOrdersWebSocket() {
             
             console.log(`🚀 [DEBUG] Triggering StopLimit creation/modification for filled manual buy ${orderId} (${symbol})`);
             
-            // Brief delay + re-check for existing stop-limit (handles message ordering: ACK may arrive after FLL)
-            await new Promise(resolve => setTimeout(resolve, 350));
+            // Delay + re-check for existing stop-limit (handles message ordering: ACK may arrive after FLL)
+            // During reconnect window: longer delay (5s) so snapshot StopLimit ACKs arrive before we create (prevents REJ burst)
+            const inReconnectWindow = Date.now() < ordersReconnectWindowUntil;
+            const delayMs = inReconnectWindow ? 5000 : 350;
+            if (inReconnectWindow) console.log(`⏳ [RECONNECT] Waiting ${delayMs}ms for snapshot to complete before create check...`);
+            await new Promise(resolve => setTimeout(resolve, delayMs));
             const delayedExisting = await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
             if (delayedExisting && delayedExisting.orderId) {
               const exLeg = delayedExisting.order?.Legs?.[0];
@@ -3819,8 +3823,8 @@ function connectOrdersWebSocket() {
               const leg = order.Legs?.[0];
               const quantity = Math.floor(Number(leg?.ExecQuantity || leg?.QuantityOrdered || 0)) || 0;
               
-              // Reconnect window: do NOT create new stop-limits (only update existing) UNLESS we have a position.
-              // If we have a position, this is a real fill (not a replayed FLL from sold stock) - must create StopLimit.
+              // Reconnect window: NEVER create new stop-limits - only update existing.
+              // Snapshot/replay sends FLL before StopLimit ACKs; creating causes broker REJ "remaining on sell orders".
               if (Date.now() < ordersReconnectWindowUntil) {
                 const existingForSymbol = await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
                 if (existingForSymbol) {
@@ -3838,26 +3842,10 @@ function connectOrdersWebSocket() {
                   processedFllOrders.add(orderId);
                   return;
                 }
-                // Only skip if we have NO position after brief wait - replayed FLLs are for already-sold stocks.
-                // Real fills: position may arrive slightly after FLL (positions WS delay) - wait up to 2s.
-                let hasPosition = false;
-                for (let w = 0; w < 4; w++) {
-                  const pos = positionsCache.get(normalizedSymbol);
-                  if (pos && parseFloat(pos.Quantity || '0') > 0) { hasPosition = true; break; }
-                  if (cachePersistenceService) {
-                    try {
-                      const dbPos = await cachePersistenceService.getPositionForSymbol(normalizedSymbol);
-                      if (dbPos && parseFloat(dbPos.Quantity || '0') > 0) { hasPosition = true; break; }
-                    } catch (_) {}
-                  }
-                  if (w < 3) await new Promise(r => setTimeout(r, 500));
-                }
-                if (!hasPosition) {
-                  console.log(`⏭️ [FALLBACK] Reconnect window: skipping new stop-limit for ${normalizedSymbol} (order ${orderId}) - no position after 2s; prevents creating for already-sold stocks`);
-                  processedFllOrders.add(orderId);
-                  return;
-                }
-                console.log(`✅ [FALLBACK] Reconnect window: position exists for ${normalizedSymbol} - proceeding with stop-limit creation (real fill, not replay)`);
+                // No existing StopLimit - skip creation during reconnect (avoids burst of REJ for positions that already have stoplimit)
+                console.log(`⏭️ [FALLBACK] Reconnect window: skipping new stop-limit for ${normalizedSymbol} (order ${orderId}) - only updates allowed during 30s window`);
+                processedFllOrders.add(orderId);
+                return;
               }
               
               // Extract buy price from order
