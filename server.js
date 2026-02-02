@@ -976,15 +976,14 @@ setInterval(async () => {
       }
     }
     
-    // Orders WebSocket activity watchdog: force reconnect when no messages (orders or heartbeats) for ~5 min.
-    // Keeps stop-limit tracking alive on Railway (~5 min idle timeouts) and recovers from half-open connections.
-    // Run regardless of pending buys so we reconnect proactively before user buys.
+    // Orders WebSocket activity watchdog: force reconnect when no messages (orders, heartbeats, or pongs) for ~2.5 min.
+    // Keeps stop-limit tracking alive on Railway/proxies with idle timeouts; recovers from half-open connections.
     if (process.env.PNL_API_KEY && typeof connectOrdersWebSocket === 'function') {
       const wsOpen = ordersWs && ordersWs.readyState === WebSocket.OPEN;
       if (wsOpen) {
         const lastActivity = lastOrderUpdateTime != null ? lastOrderUpdateTime : lastOrdersConnectedAt;
         const idleMs = now - (lastActivity || 0);
-        const IDLE_RECONNECT_MS = 5 * 60 * 1000; // 5 minutes
+        const IDLE_RECONNECT_MS = 2.5 * 60 * 1000; // 2.5 minutes - reconnect sooner after inactivity
         if (idleMs >= IDLE_RECONNECT_MS) {
           console.warn(`⚠️ [ORDERS_WS] No messages for ${Math.round(idleMs / 1000)}s - forcing reconnect (keep stop-limit tracking alive)`);
           connectOrdersWebSocket();
@@ -992,14 +991,14 @@ setInterval(async () => {
       }
     }
 
-    // Positions WebSocket activity watchdog: force reconnect when no messages for ~5 min.
+    // Positions WebSocket activity watchdog: force reconnect when no messages for ~2.5 min.
     // If positions stream dies, stop-limit creation will abort because positionsCache never updates.
     if (process.env.PNL_API_KEY && typeof connectPositionsWebSocket === 'function') {
       const wsOpen = positionsWs && positionsWs.readyState === WebSocket.OPEN;
       if (wsOpen) {
         const lastActivity = lastPositionUpdateTime != null ? lastPositionUpdateTime : lastPositionsConnectedAt;
         const idleMs = now - (lastActivity || 0);
-        const IDLE_RECONNECT_MS = 5 * 60 * 1000; // 5 minutes
+        const IDLE_RECONNECT_MS = 2.5 * 60 * 1000; // 2.5 minutes - reconnect sooner after inactivity
         if (idleMs >= IDLE_RECONNECT_MS) {
           console.warn(`⚠️ [POSITIONS_WS] No messages for ${Math.round(idleMs / 1000)}s - forcing reconnect (positions cache stale)`);
           connectPositionsWebSocket();
@@ -1007,13 +1006,68 @@ setInterval(async () => {
       }
     }
     
-    if (cleanedRepository > 0 || restoredFromDb > 0 || cleanedRecentlySold > 0 || cleanedFilledStopLimits > 0 || cleanedProcessedFll > 0 || cleanedPendingManualBySymbol > 0) {
-      console.log(`🧹 [STOPLIMIT_REPO] Cleaned ${cleanedRepository} repository entries, restored ${restoredFromDb} from DB, ${cleanedRecentlySold} recently sold, ${cleanedFilledStopLimits} filled StopLimit, ${cleanedProcessedFll} processed FLL, ${cleanedPendingManualBySymbol} stale manual-buy candidates`);
+    // Position-based stop-limit recovery: catch positions that missed FLL/position updates due to WebSocket inactivity.
+    // When Orders WS is dead but Positions WS delivered the position, we may have missed the FLL. This recovers.
+    let recoveredStopLimits = 0;
+    if (cachePersistenceService && typeof createStopLimitSellOrder === 'function') {
+      for (const [symbol, posData] of positionsCache.entries()) {
+        const normalizedSymbol = (symbol || '').toUpperCase();
+        const positionQty = Math.floor(parseFloat(posData.Quantity || '0')) || 0;
+        if (positionQty <= 0) continue;
+        if (recentlySoldSymbols.has(normalizedSymbol)) continue;
+        if (stopLimitFilledSymbols.has(normalizedSymbol)) continue;
+        if (stopLimitCreationBySymbol.has(normalizedSymbol)) continue;
+        const lastAttempt = lastStopLimitAttemptBySymbol.get(normalizedSymbol) || 0;
+        if (Date.now() - lastAttempt < 20000) continue; // 20s throttle
+        try {
+          const existing = await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
+          if (existing && existing.orderId) continue;
+          const buyPrice = parseFloat(posData.AveragePrice || '0') || 0;
+          if (buyPrice <= 0) continue;
+          stopLimitCreationBySymbol.add(normalizedSymbol);
+          lastStopLimitAttemptBySymbol.set(normalizedSymbol, Date.now());
+          console.log(`🔄 [RECOVERY] Creating StopLimit for ${normalizedSymbol} (qty ${positionQty}, buyPrice ${buyPrice}) - missed due to WS inactivity`);
+          await createStopLimitSellOrder(normalizedSymbol, positionQty, buyPrice);
+          recoveredStopLimits++;
+        } catch (e) {
+          console.warn(`⚠️ [RECOVERY] Failed to create StopLimit for ${normalizedSymbol}:`, e.message);
+        } finally {
+          stopLimitCreationBySymbol.delete(normalizedSymbol);
+        }
+      }
+    }
+    
+    if (cleanedRepository > 0 || restoredFromDb > 0 || cleanedRecentlySold > 0 || cleanedFilledStopLimits > 0 || cleanedProcessedFll > 0 || cleanedPendingManualBySymbol > 0 || recoveredStopLimits > 0) {
+      console.log(`🧹 [STOPLIMIT_REPO] Cleaned ${cleanedRepository} repository entries, restored ${restoredFromDb} from DB, ${cleanedRecentlySold} recently sold, ${cleanedFilledStopLimits} filled StopLimit, ${cleanedProcessedFll} processed FLL, ${cleanedPendingManualBySymbol} stale manual-buy candidates, ${recoveredStopLimits} recovered stop-limits`);
     }
   } catch (err) {
     console.error(`❌ [STOPLIMIT_REPO] Error in StopLimit cleanup:`, err);
   }
 }, 120000); // Every 2 minutes
+
+// WebSocket idle watchdog: run every 60s to reconnect sooner when connections go stale.
+// Complements the 2-min cleanup; ensures we don't wait full 2 min after hitting idle threshold.
+if (process.env.PNL_API_KEY) {
+  setInterval(() => {
+    const now = Date.now();
+    if (typeof connectOrdersWebSocket === 'function' && ordersWs && ordersWs.readyState === WebSocket.OPEN) {
+      const lastActivity = lastOrderUpdateTime != null ? lastOrderUpdateTime : lastOrdersConnectedAt;
+      const idleMs = now - (lastActivity || 0);
+      if (idleMs >= 2.5 * 60 * 1000) {
+        console.warn(`⚠️ [ORDERS_WS] Idle ${Math.round(idleMs / 1000)}s - forcing reconnect`);
+        connectOrdersWebSocket();
+      }
+    }
+    if (typeof connectPositionsWebSocket === 'function' && positionsWs && positionsWs.readyState === WebSocket.OPEN) {
+      const lastActivity = lastPositionUpdateTime != null ? lastPositionUpdateTime : lastPositionsConnectedAt;
+      const idleMs = now - (lastActivity || 0);
+      if (idleMs >= 2.5 * 60 * 1000) {
+        console.warn(`⚠️ [POSITIONS_WS] Idle ${Math.round(idleMs / 1000)}s - forcing reconnect`);
+        connectPositionsWebSocket();
+      }
+    }
+  }, 60000); // Every 60 seconds
+}
 
 // Periodic cache cleanup to remove expired entries (less frequent)
 setInterval(() => {
@@ -3384,8 +3438,10 @@ function connectPositionsWebSocket() {
         if (positionsSocketForPing && positionsSocketForPing.readyState === WebSocket.OPEN) {
           try { positionsSocketForPing.ping(); } catch (_) {}
         }
-      }, 90000); // Every 90s
+      }, 60000); // Every 60s - keep connection alive, prevent idle timeouts
     });
+    // Pong response to our ping counts as activity - prevents false idle reconnect
+    positionsWs.on('pong', () => { lastPositionUpdateTime = Date.now(); });
     
     positionsWs.on('message', async (data) => {
       try {
@@ -3663,8 +3719,10 @@ function connectOrdersWebSocket() {
         if (ordersSocketForPing && ordersSocketForPing.readyState === WebSocket.OPEN) {
           try { ordersSocketForPing.ping(); } catch (_) {}
         }
-      }, 90000); // Every 90s
+      }, 60000); // Every 60s - keep connection alive, prevent idle timeouts
     });
+    // Pong response to our ping counts as activity - prevents false idle reconnect
+    ordersWs.on('pong', () => { lastOrderUpdateTime = Date.now(); });
     
     ordersWs.on('message', async (data) => {
       try {
