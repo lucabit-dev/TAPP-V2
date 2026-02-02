@@ -3729,8 +3729,8 @@ function connectOrdersWebSocket() {
             
             console.log(`🚀 [DEBUG] Triggering StopLimit creation/modification for filled manual buy ${orderId} (${symbol})`);
             
-            // Short delay + re-check for existing stop-limit (handles message ordering: ACK may arrive after FLL)
-            await new Promise(resolve => setTimeout(resolve, 800));
+            // Brief delay + re-check for existing stop-limit (handles message ordering: ACK may arrive after FLL)
+            await new Promise(resolve => setTimeout(resolve, 350));
             const delayedExisting = await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
             if (delayedExisting && delayedExisting.orderId) {
               const exLeg = delayedExisting.order?.Legs?.[0];
@@ -3784,7 +3784,8 @@ function connectOrdersWebSocket() {
               const leg = order.Legs?.[0];
               const quantity = Math.floor(Number(leg?.ExecQuantity || leg?.QuantityOrdered || 0)) || 0;
               
-              // Reconnect window: do NOT create new stop-limits (only update existing). Prevents creating for already-sold stocks when replayed FLLs arrive.
+              // Reconnect window: do NOT create new stop-limits (only update existing) UNLESS we have a position.
+              // If we have a position, this is a real fill (not a replayed FLL from sold stock) - must create StopLimit.
               if (Date.now() < ordersReconnectWindowUntil) {
                 const existingForSymbol = await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
                 if (existingForSymbol) {
@@ -3802,9 +3803,26 @@ function connectOrdersWebSocket() {
                   processedFllOrders.add(orderId);
                   return;
                 }
-                console.log(`⏭️ [FALLBACK] Reconnect window: skipping new stop-limit for ${normalizedSymbol} (order ${orderId}) - no existing stop-limit; prevents creating for already-sold stocks`);
-                processedFllOrders.add(orderId);
-                return;
+                // Only skip if we have NO position after brief wait - replayed FLLs are for already-sold stocks.
+                // Real fills: position may arrive slightly after FLL (positions WS delay) - wait up to 2s.
+                let hasPosition = false;
+                for (let w = 0; w < 4; w++) {
+                  const pos = positionsCache.get(normalizedSymbol);
+                  if (pos && parseFloat(pos.Quantity || '0') > 0) { hasPosition = true; break; }
+                  if (cachePersistenceService) {
+                    try {
+                      const dbPos = await cachePersistenceService.getPositionForSymbol(normalizedSymbol);
+                      if (dbPos && parseFloat(dbPos.Quantity || '0') > 0) { hasPosition = true; break; }
+                    } catch (_) {}
+                  }
+                  if (w < 3) await new Promise(r => setTimeout(r, 500));
+                }
+                if (!hasPosition) {
+                  console.log(`⏭️ [FALLBACK] Reconnect window: skipping new stop-limit for ${normalizedSymbol} (order ${orderId}) - no position after 2s; prevents creating for already-sold stocks`);
+                  processedFllOrders.add(orderId);
+                  return;
+                }
+                console.log(`✅ [FALLBACK] Reconnect window: position exists for ${normalizedSymbol} - proceeding with stop-limit creation (real fill, not replay)`);
               }
               
               // Extract buy price from order
@@ -4172,7 +4190,9 @@ app.post('/api/buys/test', async (req, res) => {
     let orderIdFromApi = null;
     if (responseData && typeof responseData === 'object') {
       orderIdFromApi = responseData.order_id ?? responseData.OrderID ?? responseData.orderId ?? null;
-      if (orderIdFromApi != null && (notifyStatus.startsWith('200') || notifyStatus.startsWith('201'))) {
+      // Track order for FLL→StopLimit: accept any 2xx (200, 201, 202) when order_id is present.
+      // 202 Accepted can occur for async order acceptance - we must still track to avoid losing stop-limit creation.
+      if (orderIdFromApi != null && notifyStatus.startsWith('2')) {
         const oid = String(orderIdFromApi);
         pendingManualBuyOrders.set(oid, { symbol, quantity, limitPrice: currentPrice });
         console.log(`📌 [DEBUG] Tracking manual buy order ${oid} for ${symbol} (qty ${quantity}, limitPrice ${currentPrice})`);
@@ -4188,8 +4208,8 @@ app.post('/api/buys/test', async (req, res) => {
         if (orderIdFromApi == null) {
           console.warn(`⚠️ [DEBUG] Buy order sent for ${symbol} but no order_id in response. Response:`, JSON.stringify(responseData, null, 2));
           console.warn(`⚠️ [DEBUG] This order will NOT trigger automatic stop-limit creation. Fallback mechanism will attempt to create stop-limit when order fills via WebSocket.`);
-        } else if (!notifyStatus.startsWith('200') && !notifyStatus.startsWith('201')) {
-          console.warn(`⚠️ [DEBUG] Buy order sent for ${symbol} with order_id ${orderIdFromApi} but status is ${notifyStatus} (not 200/201). Response:`, JSON.stringify(responseData, null, 2));
+        } else if (!notifyStatus.startsWith('2')) {
+          console.warn(`⚠️ [DEBUG] Buy order sent for ${symbol} with order_id ${orderIdFromApi} but status is ${notifyStatus} (not 2xx). Response:`, JSON.stringify(responseData, null, 2));
           console.warn(`⚠️ [DEBUG] This order will NOT trigger automatic stop-limit creation. Fallback mechanism will attempt to create stop-limit when order fills via WebSocket.`);
         }
       }
@@ -5356,7 +5376,8 @@ async function handleManualBuyFilled(orderId, order, pending) {
       } else {
         console.log(`✅ [DEBUG] Found order ${stuckGuardCheck.orderId} after wait. Updating quantity...`);
         const stuckQty = stuckGuardCheck.quantity || 0;
-        const stuckNewQty = stuckQty + quantity;
+        const guardBuyQty = Math.floor(Number(pending.quantity || (order.Legs?.[0]?.ExecQuantity ?? order.Legs?.[0]?.QuantityOrdered) || 0)) || 0;
+        const stuckNewQty = stuckQty + guardBuyQty;
         if (stuckNewQty > 0) {
           try {
             const result = await modifyOrderQuantity(stuckGuardCheck.orderId, stuckNewQty);
