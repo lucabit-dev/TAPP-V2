@@ -120,7 +120,28 @@ or
 - ✅ FALLBACK: Accept empty/unknown OrderType as Limit
 - ✅ Fixed `quantity` undefined bug in handleManualBuyFilled stuck-guard path
 - ✅ TRACKED path: 5s delay during reconnect window before create-check (lets StopLimit ACKs arrive first)
+- ✅ **Orders WS watchdog**: 2 min idle + pending buys → force reconnect (was 10 min; COTY FLL missed after ~6 min uptime)
+- ✅ **Proactive reconnect**: When adding a tracked buy, if Orders WS idle >2 min, reconnect immediately
 - ✅ Added diagnostic logging throughout the flow
+
+---
+
+## StopLimit Stops Working After Program Active Time (e.g. COTY)
+
+**Symptom:** Buy is sent, tracked, and fills – but no StopLimit is created. RR and TSLG work earlier in the session; COTY (or later buys) do not.
+
+**Root cause:** The Orders WebSocket connection can go **silent** (half-open) after ~5–6 minutes of uptime. Cloud platforms (Railway, Vercel, etc.) often have idle timeouts. The connection appears open but stops delivering FLL messages.
+
+**Evidence from logs (COTY):**
+- 17:32:16 – Container starts, Orders WS connects, snapshot processed
+- 17:33:56 – RR: buy sent → FLL received → StopLimit created ✓
+- 17:34:23 – TSLG: buy sent → FLL received → StopLimit created ✓
+- 17:38:23 – COTY: buy sent, tracked, manual buy logged ✓
+- **No FLL for COTY in logs** – Orders WS likely silent by then
+
+**Fixes applied:**
+1. **Watchdog timeout** reduced from 10 min to **2 min** when there are pending buys.
+2. **Proactive reconnect** when adding a tracked buy: if Orders WS has been idle >2 min, reconnect immediately so the new connection is ready before the fill.
 
 ---
 

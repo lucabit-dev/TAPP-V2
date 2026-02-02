@@ -959,15 +959,16 @@ setInterval(async () => {
       console.log(`🧹 [CLEANUP] Cleaned ${cleanedProcessedFll} old processed FLL order entries (kept ${processedFllOrders.size})`);
     }
     
-    // Orders WebSocket activity watchdog: if we have pending buys but no order updates for 10+ min, force reconnect.
-    // Handles silent drops / half-open connections after ~10 min idle (e.g. Railway/Vercel deploy).
+    // Orders WebSocket activity watchdog: if we have pending buys but no order updates, force reconnect.
+    // Handles silent drops / half-open connections (e.g. container idle timeout ~5–6 min, Railway/Vercel).
+    // Use 2 min when pending buys exist (aggressive) so we don't miss FLL; 10 min when idle.
     if (process.env.PNL_API_KEY && typeof connectOrdersWebSocket === 'function') {
       const wsOpen = ordersWs && ordersWs.readyState === WebSocket.OPEN;
       const hasPending = pendingManualBuyOrders && pendingManualBuyOrders.size > 0;
       if (wsOpen && hasPending) {
         const lastActivity = lastOrderUpdateTime != null ? lastOrderUpdateTime : lastOrdersConnectedAt;
         const idleMs = now - (lastActivity || 0);
-        const IDLE_RECONNECT_MS = 10 * 60 * 1000; // 10 minutes
+        const IDLE_RECONNECT_MS = 2 * 60 * 1000; // 2 min when pending buys (was 10 min - missed COTY FLL after ~6 min uptime)
         if (idleMs >= IDLE_RECONNECT_MS) {
           console.warn(`⚠️ [ORDERS_WS] No order updates for ${Math.round(idleMs / 1000)}s despite ${pendingManualBuyOrders.size} pending buy(s) - forcing reconnect`);
           connectOrdersWebSocket();
@@ -4248,6 +4249,16 @@ app.post('/api/buys/test', async (req, res) => {
         console.log(`📌 [DEBUG] Tracking manual buy order ${oid} for ${symbol} (qty ${quantity}, limitPrice ${currentPrice})`);
         console.log(`📌 [DEBUG] Full response data:`, JSON.stringify(responseData, null, 2));
         console.log(`📌 [DEBUG] Total tracked manual buys: ${pendingManualBuyOrders.size}`);
+
+        // Proactive reconnect: if Orders WS has been idle >2 min, reconnect now so we don't miss FLL (half-open/silent drop)
+        if (process.env.PNL_API_KEY && typeof connectOrdersWebSocket === 'function' && ordersWs?.readyState === WebSocket.OPEN) {
+          const lastActivity = lastOrderUpdateTime ?? lastOrdersConnectedAt ?? 0;
+          const idleMs = Date.now() - lastActivity;
+          if (idleMs > 2 * 60 * 1000) {
+            console.warn(`⚠️ [ORDERS_WS] Orders WS idle ${Math.round(idleMs / 1000)}s - reconnecting before waiting for ${symbol} FLL`);
+            connectOrdersWebSocket();
+          }
+        }
         
         // NOTE: We do NOT create StopLimit here even if response shows FLL status
         // The API response status might be stale or incorrect. We wait for WebSocket
