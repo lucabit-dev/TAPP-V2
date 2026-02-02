@@ -116,7 +116,65 @@ or
 ## Fixes Already Applied
 
 - ✅ Track orders with any 2xx status (not just 200/201)
-- ✅ FALLBACK: Don't skip during reconnect window if position exists (with 2s wait)
+- ✅ FALLBACK: During 30s reconnect window, **never create new StopLimits** – only update existing ones (prevents FUSE-style REJ burst)
 - ✅ FALLBACK: Accept empty/unknown OrderType as Limit
 - ✅ Fixed `quantity` undefined bug in handleManualBuyFilled stuck-guard path
+- ✅ TRACKED path: 5s delay during reconnect window before create-check (lets StopLimit ACKs arrive first)
 - ✅ Added diagnostic logging throughout the flow
+
+---
+
+## Symbols Not Being Analyzed/Tracked (e.g. GCTS)
+
+If a symbol like **GCTS** is not appearing in alerts, toplist, or getting StopLimit creation after buys:
+
+### 1. **Symbol must be in a ChartsWatcher source**
+
+- **Alerts**: ChartsWatcher alerts config `68d2f1d1e0373f708e67d801` – symbols must be in this config’s scan list to receive alerts.
+- **Toplist**: Symbols must be in one of the toplist configs (A–E or MANUAL `692117e2b7bb6ba7a6ae6f6c`) for momentum thresholds and group assignment.
+
+If GCTS is not in any of these ChartsWatcher configs, it will not be analyzed or tracked automatically.
+
+### 2. **Manual analysis**
+
+You can still analyze any symbol manually:
+
+```
+GET /api/analyze/GCTS
+```
+
+If the symbol is not in the toplist, `meetsMomentum` will be `false` because no group thresholds exist for it.
+
+### 3. **Add GCTS to MANUAL list**
+
+To have GCTS analyzed and tracked:
+
+1. Add GCTS to the MANUAL toplist (`692117e2b7bb6ba7a6ae6f6c`) in ChartsWatcher.
+2. Or add GCTS to the alerts config scan list so it receives alerts.
+
+### 4. **Buy tracking for GCTS**
+
+Buy tracking is symbol-agnostic. If GCTS buys are not getting StopLimits:
+
+- Check `📋 [TRACKING]` logs after placing a GCTS buy – if `order_id: MISSING`, the Sections Bot API format may have changed.
+- If you see `📥 [FALLBACK]` for GCTS, the order was untracked; follow the FALLBACK checklist above.
+
+---
+
+## Zero Logs for a Symbol (e.g. GCTS)
+
+If you get **no logs at all** for a symbol when buying:
+
+### Possible causes
+
+1. **Buy not placed through TAPP** – If you bought via the broker’s app or website instead of TAPP’s buy button, TAPP never receives the order. The Orders WebSocket only receives orders from the broker account connected to TAPP.
+
+2. **Orders WebSocket not receiving the order** – The broker sends order updates to TAPP via the Orders WebSocket. If that connection is down or uses a different account, no orders will appear.
+
+3. **Different message format** – Some broker messages may use a different structure (e.g. `order_id` instead of `OrderID`). These are now logged as `⚠️ [ORDERS] Order-like message without OrderID`.
+
+### New diagnostic logs
+
+- **`📥 [ORDERS] Order {id} | {SYMBOL} | {status} | BUY/SELL | tracked=true/false`** – Logged for every order received. If GCTS never appears here, the Orders WebSocket is not receiving GCTS orders.
+
+- **`🛒 Manual buy signal for GCTS`** – Logged when a buy request reaches the server. If this never appears, the buy request is not reaching TAPP (e.g. client error or wrong endpoint).

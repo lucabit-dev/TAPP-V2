@@ -16,6 +16,21 @@ const L2Service = require('./l2Service');
 const { ManualConfig, MANUAL_CONFIG_ID } = require('./models/manualConfig.model');
 const { MACD } = require('technicalindicators');
 
+// Log filter: only output buys and StopLimit tracking (suppress all other logs)
+(function installLogFilter() {
+  const isRelevant = (msg) => {
+    if (typeof msg !== 'string') return false;
+    const s = msg;
+    const buy = /Manual buy|Sending buy|Buy order sent|Autobuy|BUY TRIGGERED|INSTANT BUY|Manual sell|Manual sell executed|Tracking manual buy|sendBuyOrder|Stop-loss created|Manual buy logged|Sell order sent|pending buy|\[TRACKING\]/i;
+    const stoplimit = /\[STOPLIMIT_REPO\]|\[FALLBACK\]|\[REBUY\]|handleManualBuyFilled|StopLimit|stop-limit|stoplimit/i;
+    return buy.test(s) || stoplimit.test(s);
+  };
+  const origLog = console.log, origWarn = console.warn, origError = console.error;
+  console.log = (...args) => { if (isRelevant(args[0])) origLog.apply(console, args); };
+  console.warn = (...args) => { if (isRelevant(args[0])) origWarn.apply(console, args); };
+  console.error = (...args) => { if (isRelevant(args[0])) origError.apply(console, args); };
+})();
+
 const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3001;
@@ -3505,6 +3520,13 @@ function connectOrdersWebSocket() {
         if (dataObj.Heartbeat || dataObj.StreamStatus) {
           return;
         }
+
+        // Log order-like messages with alternate structure (diagnostic: broker may use order_id, etc.)
+        if (!dataObj.OrderID && dataObj.Legs?.length > 0) {
+          const altOrderId = dataObj.order_id ?? dataObj.orderId ?? dataObj.OrderID;
+          const altSymbol = (dataObj.Legs?.[0]?.Symbol || dataObj.Symbol || '').toUpperCase();
+          console.log(`⚠️ [ORDERS] Order-like message without OrderID: symbol=${altSymbol} altId=${altOrderId} keys=${Object.keys(dataObj).join(',')}`);
+        }
         
         // Handle order updates
         if (dataObj.OrderID) {
@@ -3514,7 +3536,10 @@ function connectOrdersWebSocket() {
           const isFilled = (status === 'FLL' || status === 'FIL');
           const isBuy = (order.Legs?.[0]?.BuyOrSell || '').toUpperCase() === 'BUY';
           const pending = pendingManualBuyOrders.get(orderId);
-          const symbol = order.Legs?.[0]?.Symbol || 'UNKNOWN';
+          const symbol = (order.Legs?.[0]?.Symbol || 'UNKNOWN').toUpperCase();
+
+          // CRITICAL: Log every incoming order (diagnostic for "zero logs" symbols like GCTS)
+          console.log(`📥 [ORDERS] Order ${orderId} | ${symbol} | ${status} | ${isBuy ? 'BUY' : 'SELL'} | tracked=${!!pending}`);
 
           // Debug logging for tracked orders
           if (pending) {
