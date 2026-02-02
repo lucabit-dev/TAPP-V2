@@ -215,3 +215,15 @@ If you get **no logs at all** for a symbol when buying:
 - Positions WS handler: support `symbol` (lowercase) and batch format `{ positions: [...] }`
 - Position wait: 10s instead of 5s in both handleManualBuyFilled and FALLBACK
 - Fallback: when not found by key, iterate `positionsCache` for case-insensitive symbol match
+- **Derive position from FLL**: When we receive a filled BUY order, immediately add/merge its quantity into `positionsCache` (handles MARA-style instant fills / adds-to-existing before Positions WS arrives)
+- **Positions WS: QuantityDelta**: Support incremental updates (`QuantityDelta`, `QuantityChange`, `Delta`) – add to existing position for add-to-position scenarios
+
+---
+
+## Instant Fills / Adds to Existing Position (e.g. MARA)
+
+**Symptom:** Stock like MARA is instantly filled (add to existing position), but position is "not found" and StopLimit creation is skipped.
+
+**Root cause:** FLL (filled) arrives from Orders WS before Positions WS has sent its update. The position exists at the broker but isn't in `positionsCache` yet.
+
+**Fix:** When we receive an FLL for a BUY, we **immediately add the order's quantity to positionsCache** (merge with existing if any). This ensures we have a position when we check, even if Positions WS is delayed. For adds-to-existing (MARA had 2 filled buys in the snapshot), each FLL adds its quantity – so we build up the correct total.

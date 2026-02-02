@@ -206,6 +206,25 @@ const pendingManualBuyOrders = new Map();
 // This is the authoritative source for active StopLimit orders
 const stopLimitOrderRepository = new Map(); // Map<symbol, { orderId, order, openedDateTime, status }>
 
+// Add/merge position from filled BUY order (instant fills: FLL can arrive before Positions WS)
+// Ensures we have position in cache for MARA-style adds-to-existing even when Positions WS is delayed
+function addPositionFromFilledBuy(symbol, quantity, orderData = {}) {
+  const normalized = (symbol || '').toUpperCase();
+  if (!normalized || quantity <= 0) return;
+  const existing = positionsCache.get(normalized);
+  const existingQty = existing ? parseFloat(existing.Quantity || '0') : 0;
+  const newTotal = existingQty + quantity;
+  const merged = {
+    ...existing,
+    ...orderData,
+    Symbol: normalized,
+    Quantity: String(newTotal),
+    lastUpdated: Date.now()
+  };
+  positionsCache.set(normalized, merged);
+  if (cachePersistenceService) cachePersistenceService.schedulePositionSave(normalized);
+}
+
 // Helper functions for StopLimit Order Repository (pattern from sections-buy-bot-main)
 function parseOrderDateTime(dateTimeStr) {
   if (!dateTimeStr) return null;
@@ -3347,26 +3366,47 @@ function connectPositionsWebSocket() {
         if (Array.isArray(batch)) {
           for (const p of batch) {
             const s = (p?.Symbol ?? p?.symbol ?? '').toString().toUpperCase();
-            const q = parseFloat(p?.Quantity || '0');
+            let q = parseFloat(p?.Quantity || '0');
+            const qDelta = parseFloat(p?.QuantityDelta ?? p?.QuantityChange ?? p?.Delta ?? '0');
+            if (qDelta !== 0 && q === 0) {
+              const existing = positionsCache.get(s);
+              q = (existing ? parseFloat(existing.Quantity || '0') : 0) + qDelta;
+            }
             if (s && q > 0) {
-              positionsCache.set(s, { ...p, Symbol: s, lastUpdated: Date.now() });
+              const existing = positionsCache.get(s);
+              positionsCache.set(s, { ...existing, ...p, Symbol: s, Quantity: String(q), lastUpdated: Date.now() });
               if (cachePersistenceService) cachePersistenceService.schedulePositionSave(s);
             }
           }
           return;
         }
         
-        // Handle single position update (support Symbol or symbol)
+        // Handle single position update (support Symbol or symbol, Quantity or QuantityDelta)
         const rawSymbol = dataObj.Symbol ?? dataObj.symbol;
-        if (dataObj.PositionID && rawSymbol) {
+        if ((dataObj.PositionID || rawSymbol) && rawSymbol) {
           const symbol = String(rawSymbol).toUpperCase();
-          const quantity = parseFloat(dataObj.Quantity || '0');
+          let quantity = parseFloat(dataObj.Quantity || '0');
+          const quantityDelta = parseFloat(dataObj.QuantityDelta ?? dataObj.QuantityChange ?? dataObj.Delta ?? '0');
+          // If QuantityDelta present, add to existing (handles incremental/add-to-position updates)
+          if (quantityDelta !== 0 && quantity === 0) {
+            const existing = positionsCache.get(symbol);
+            const existingQty = existing ? parseFloat(existing.Quantity || '0') : 0;
+            quantity = existingQty + quantityDelta;
+          } else if (quantityDelta !== 0 && quantity > 0) {
+            // Both present: treat Quantity as total, or add delta to existing
+            const existing = positionsCache.get(symbol);
+            const existingQty = existing ? parseFloat(existing.Quantity || '0') : 0;
+            quantity = Math.max(quantity, existingQty + quantityDelta);
+          }
           
           if (quantity > 0) {
-            // Update cache with position
+            // Update cache with position (merge with existing for AveragePrice etc.)
+            const existing = positionsCache.get(symbol);
             positionsCache.set(symbol, {
+              ...existing,
               ...dataObj,
               Symbol: symbol,
+              Quantity: String(quantity),
               lastUpdated: Date.now()
             });
             // Schedule save to database
@@ -3580,6 +3620,19 @@ function connectOrdersWebSocket() {
 
           // Update last order update time to track websocket activity
           lastOrderUpdateTime = Date.now();
+
+          // CRITICAL: Add position from filled BUY immediately (instant fills: FLL arrives before Positions WS)
+          // Handles MARA-style adds-to-existing: we derive position from order so StopLimit creation finds it
+          if (isFilled && isBuy) {
+            const leg = order.Legs?.[0];
+            const buyQty = Math.floor(Number(leg?.ExecQuantity || leg?.QuantityOrdered || 0)) || 0;
+            if (buyQty > 0) {
+              addPositionFromFilledBuy(symbol, buyQty, {
+                AveragePrice: order.FilledPrice || order.LimitPrice,
+                FilledPrice: order.FilledPrice
+              });
+            }
+          }
 
           // Update cache with order
           ordersCache.set(orderId, {
