@@ -65,6 +65,7 @@ const PositionsSection: React.FC = () => {
     message?: string;
     type?: 'danger' | 'warning' | 'info' | 'success';
   } | null>(null);
+  const [stopLimitProgress, setStopLimitProgress] = useState<Map<string, { currentStepIndex: number; lastPnl?: number; groupId?: string }>>(new Map());
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -281,6 +282,30 @@ const PositionsSection: React.FC = () => {
       disconnectWebSocket();
     };
   }, [connectWebSocket, disconnectWebSocket]);
+
+  // Fetch stop limit adjustment progress for Stage & Progress column
+  useEffect(() => {
+    if (!token || mergedPositions.length === 0) return;
+    const fetchProgress = async () => {
+      try {
+        const res = await fetchWithAuth(`${API_BASE_URL}/stoplimit-tracker/progress`);
+        const data = await res.json();
+        if (data.success && Array.isArray(data.data)) {
+          const map = new Map<string, { currentStepIndex: number; lastPnl?: number; groupId?: string }>();
+          data.data.forEach((p: { symbol: string; currentStepIndex?: number; lastPnl?: number; groupId?: string }) => {
+            const sym = (p.symbol || '').toUpperCase();
+            if (sym) map.set(sym, { currentStepIndex: p.currentStepIndex ?? -1, lastPnl: p.lastPnl, groupId: p.groupId });
+          });
+          setStopLimitProgress(map);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    fetchProgress();
+    const interval = setInterval(fetchProgress, 10000);
+    return () => clearInterval(interval);
+  }, [token, mergedPositions.length, fetchWithAuth]);
 
   const addNotification = useCallback((message: string, type: 'success' | 'error' | 'warning' | 'info' = 'info', duration?: number) => {
     const id = Date.now().toString() + Math.random().toString(36).substr(2, 9);
@@ -746,12 +771,11 @@ const PositionsSection: React.FC = () => {
           <div className="h-full flex flex-col">
             {/* Table Header */}
             <div className="bg-[#14130e] border-b border-[#2a2820] px-4 py-3 sticky top-0 z-10">
-              <div className="grid grid-cols-10 gap-4 text-xs font-medium opacity-60 uppercase tracking-wide">
+              <div className="grid grid-cols-9 gap-4 text-xs font-medium opacity-60 uppercase tracking-wide">
                 <div>Symbol</div>
                 <div className="text-right">Qty</div>
                 <div className="text-right">Avg Price</div>
                 <div className="text-right">Last</div>
-                <div className="text-right">Limit</div>
                 <div className="text-right">P&L</div>
                 <div className="text-right">Unrealized P&L</div>
                 <div className="text-center">Action</div>
@@ -778,7 +802,7 @@ const PositionsSection: React.FC = () => {
                         index % 2 === 0 ? 'bg-[#0f0e0a]' : 'bg-[#14130e]'
                       }`}
                     >
-                      <div className="grid grid-cols-10 gap-4 items-center text-sm">
+                      <div className="grid grid-cols-9 gap-4 items-center text-sm">
                         {/* Symbol */}
                         <div>
                           <div className="font-semibold text-[#eae9e9]">{position.Symbol}</div>
@@ -799,7 +823,7 @@ const PositionsSection: React.FC = () => {
                           <div className="text-[#eae9e9] font-mono text-xs">{formatPrice(position.Last)}</div>
                         </div>
 
-                        {/* P&L (Quantity) */}
+                        {/* P&L (per share) */}
                         <div className="text-right">
                           <div className={`font-semibold font-mono text-xs ${unrealizedPLQty >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
                             {formatPrice(position.UnrealizedProfitLossQty)}
@@ -833,6 +857,18 @@ const PositionsSection: React.FC = () => {
                               'Sell'
                             )}
                           </button>
+                        </div>
+
+                        {/* Stage & Progress - Stop limit adjustment step */}
+                        <div className="text-center">
+                          {(() => {
+                            const sym = (position.Symbol || '').toUpperCase();
+                            const prog = stopLimitProgress.get(sym);
+                            if (!prog) return <span className="text-xs opacity-50">—</span>;
+                            const step = prog.currentStepIndex;
+                            if (step < 0) return <span className="text-xs text-[#808080]">Initial</span>;
+                            return <span className="text-xs text-[#4ade80] font-medium">Step {step + 1}</span>;
+                          })()}
                         </div>
 
                         {/* Time */}
