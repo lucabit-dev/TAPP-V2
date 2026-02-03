@@ -8,7 +8,7 @@ echo "=============================="
 
 # Check if git is initialized
 if [ ! -d ".git" ]; then
-    echo "❌ Git repository not found. Please initialize git first:"
+    echo " Git repository not found. Please initialize git first:"
     echo "   git init"
     echo "   git add ."
     echo "   git commit -m 'Initial commit'"
