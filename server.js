@@ -4182,13 +4182,26 @@ function checkPositionExists(symbol) {
 
 // Stop-loss orders are now handled automatically by StopLimitService when positions are detected
 
-// Fast price for immediate buy/sell: positionsCache first (instant), then Polygon with short timeout
-async function getFastPriceForOrder(symbol) {
-  const pos = getPositionForSymbol(symbol);
-  if (pos) {
-    const p = parseFloat(pos.Last || pos.Bid || pos.AveragePrice || '0');
-    if (p > 0) return p;
+// Price from Chartswatcher toplist (Price/PriceNOOPTION column) - used for buy/sell orders
+function getPriceFromChartswatcherToplist(symbol) {
+  const normalized = (symbol || '').toUpperCase();
+  const toplistMap = toplistService.toplistByConfig || {};
+  for (const configId of Object.keys(toplistMap)) {
+    const rows = toplistMap[configId] || [];
+    for (const row of rows) {
+      const sym = row?.symbol || (Array.isArray(row?.columns) ? (row.columns.find(c => c.key === 'SymbolColumn')?.value) : null);
+      if ((sym || '').toUpperCase() !== normalized) continue;
+      const price = getManualColVal(row, ['PriceNOOPTION', 'Price']);
+      if (price > 0) return price;
+    }
   }
+  return null;
+}
+
+// Fast price for buy/sell: Chartswatcher toplist first, then Polygon. Never use positionsCache.
+async function getFastPriceForOrder(symbol) {
+  const fromToplist = getPriceFromChartswatcherToplist(symbol);
+  if (fromToplist > 0) return fromToplist;
   try {
     return await Promise.race([
       polygonService.getCurrentPrice(symbol),
@@ -4220,7 +4233,7 @@ app.post('/api/buys/test', async (req, res) => {
     
     console.log(`🛒 Manual buy signal for ${symbol}`);
     
-    // Fast path: positionsCache (instant) or Polygon with 2.5s timeout
+    // Price from Chartswatcher toplist or Polygon (never positionsCache)
     const currentPrice = await getFastPriceForOrder(symbol);
     if (!currentPrice || currentPrice <= 0) {
       return res.status(400).json({ success: false, error: `Could not determine current price for ${symbol}. Please try again.` });
@@ -4454,16 +4467,14 @@ app.post('/api/sells/test', async (req, res) => {
     
     console.log(`🛒 Manual sell signal for ${symbol}`);
     
-    // Fast path: use position from cache (instant) - we have quantity and price
+    // Quantity from position cache; price from Chartswatcher or Polygon (never positionsCache)
     const position = getPositionForSymbol(symbol);
     let quantity = position ? Math.floor(parseFloat(position.Quantity || '0')) : 0;
-    let currentPrice = position ? parseFloat(position.Last || position.Bid || position.AveragePrice || '0') : 0;
-    
-    if (quantity <= 0 || currentPrice <= 0) {
-      currentPrice = await getFastPriceForOrder(symbol);
-      if (!currentPrice || currentPrice <= 0) {
-        return res.status(400).json({ success: false, error: `Could not determine price for ${symbol}. Please try again.` });
-      }
+    const currentPrice = await getFastPriceForOrder(symbol);
+    if (!currentPrice || currentPrice <= 0) {
+      return res.status(400).json({ success: false, error: `Could not determine price for ${symbol}. Please try again.` });
+    }
+    if (quantity <= 0) {
       // No position in cache: use quantity by price range
       if (currentPrice > 0 && currentPrice <= 5) quantity = 2002;
       else if (currentPrice > 5 && currentPrice <= 10) quantity = 1001;
