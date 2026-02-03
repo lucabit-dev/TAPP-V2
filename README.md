@@ -1,4 +1,4 @@
-# Trading Alerts Tool 📈
+# Trading Alerts Tool
 
 A powerful Node.js + React application for processing real-time trading alerts with advanced technical indicators.
 
