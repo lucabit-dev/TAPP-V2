@@ -4,7 +4,7 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001
 
 interface AdjustmentStep {
   pnl: number;
-  stop: number;
+  stop?: number;
   stopOffset?: number;
 }
 
@@ -68,7 +68,7 @@ const StopLimitAdjustmentModal: React.FC<StopLimitAdjustmentModalProps> = ({ isO
   const addStep = (groupId: string) => {
     updateGroupSteps(groupId, [
       ...(groups.find(g => g.groupId === groupId)?.steps || []),
-      { pnl: 0, stopOffset: 0 }
+      { pnl: 0, stop: 0, stopOffset: 0 }
     ]);
   };
 
