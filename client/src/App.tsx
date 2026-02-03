@@ -22,6 +22,7 @@ const L2Section = lazy(() => import('./components/L2Section'));
 const ChartsSection = lazy(() => import('./components/ChartsSection'));
 const Login = lazy(() => import('./components/Login'));
 const StopLimitTrackerModal = lazy(() => import('./components/StopLimitTrackerModal'));
+const StopLimitAdjustmentModal = lazy(() => import('./components/StopLimitAdjustmentModal'));
 const AdminSection = lazy(() => import('./components/AdminSection'));
 
 // Loading fallback component - Minimalistic design
@@ -139,6 +140,7 @@ function App() {
   const [showStockInfoModal, setShowStockInfoModal] = useState(false);
   const [selectedStockInfo, setSelectedStockInfo] = useState<any>(null);
   const [showStopLimitTrackerModal, setShowStopLimitTrackerModal] = useState(false);
+  const [showStopLimitAdjustmentModal, setShowStopLimitAdjustmentModal] = useState(false);
   const [additionalFilters, setAdditionalFilters] = useState({
     vwapAboveEma200: false,
     vwapAboveEma18: false
@@ -147,14 +149,15 @@ function App() {
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
-  // Listen for custom event to open StopLimit Tracker modal
+  // Listen for custom events to open StopLimit modals
   useEffect(() => {
-    const handleOpenModal = () => {
-      setShowStopLimitTrackerModal(true);
-    };
-    window.addEventListener('openStopLimitTrackerModal', handleOpenModal);
+    const handleOpenTracker = () => setShowStopLimitTrackerModal(true);
+    const handleOpenAdjustment = () => setShowStopLimitAdjustmentModal(true);
+    window.addEventListener('openStopLimitTrackerModal', handleOpenTracker);
+    window.addEventListener('openStopLimitAdjustmentModal', handleOpenAdjustment);
     return () => {
-      window.removeEventListener('openStopLimitTrackerModal', handleOpenModal);
+      window.removeEventListener('openStopLimitTrackerModal', handleOpenTracker);
+      window.removeEventListener('openStopLimitAdjustmentModal', handleOpenAdjustment);
     };
   }, []);
 
@@ -1825,6 +1828,12 @@ function App() {
           <StopLimitTrackerModal
             isOpen={showStopLimitTrackerModal}
             onClose={() => setShowStopLimitTrackerModal(false)}
+          />
+        )}
+        {showStopLimitAdjustmentModal && (
+          <StopLimitAdjustmentModal
+            isOpen={showStopLimitAdjustmentModal}
+            onClose={() => setShowStopLimitAdjustmentModal(false)}
           />
         )}
       </Suspense>

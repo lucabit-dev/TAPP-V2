@@ -613,6 +613,18 @@ const PositionsSection: React.FC = () => {
               </svg>
               <span>StopLimit Tracker</span>
             </button>
+            <button
+              onClick={() => {
+                window.dispatchEvent(new CustomEvent('openStopLimitAdjustmentModal'));
+              }}
+              className="px-3 py-1.5 bg-[#2a2820] hover:bg-[#3a3830] text-[#eae9e9] text-xs rounded border border-[#404040] transition-colors flex items-center space-x-2"
+              title="Configure P&L-based stop limit adjustment steps"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+              </svg>
+              <span>Stop Limit Adjustment</span>
+            </button>
             <div className="px-3 py-1 bg-[#1a1915] border border-[#2a2820] rounded-md flex items-center space-x-2">
               <span className="text-[10px] text-[#808080] uppercase tracking-wider">Positions</span>
               <span className="text-xs font-mono font-bold text-[#eae9e9]">{mergedPositions.length}</span>

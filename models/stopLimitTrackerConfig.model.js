@@ -3,6 +3,9 @@ const mongoose = require('mongoose');
 const STOPLIMIT_TRACKER_CONFIG_ID = 'stoplimit_tracker_config_global';
 
 // Schema for a step in the tracker (P&L threshold → stop price)
+// pnl: target P&L per share - when reached, update stop limit
+// stop: legacy absolute stop price
+// stopOffset: offset from buy price (stop = buy + stopOffset) - preferred for profit locking
 const TrackerStepSchema = new mongoose.Schema({
   pnl: {
     type: Number,
@@ -11,8 +14,11 @@ const TrackerStepSchema = new mongoose.Schema({
   },
   stop: {
     type: Number,
-    required: true,
     default: 0
+  },
+  stopOffset: {
+    type: Number,
+    default: null
   }
 }, { _id: false });
 

@@ -5259,7 +5259,10 @@ async function checkStopLimitTracker(symbol, position) {
     // If we've reached a new step, update the StopLimit order
     if (newStepIndex > currentStepIndex && newStepIndex >= 0) {
       const newStep = matchingGroup.steps[newStepIndex];
-      const newStopPrice = parseFloat(newStep.stop || '0');
+      // stopOffset = difference from buy price (stop = buy + offset). stop = legacy absolute price.
+      const stopOffset = newStep.stopOffset !== undefined && newStep.stopOffset !== null ? parseFloat(newStep.stopOffset) : null;
+      const stopAbsolute = parseFloat(newStep.stop || '0');
+      const newStopPrice = stopOffset !== null ? (avgPrice + stopOffset) : (stopAbsolute > 0 ? stopAbsolute : 0);
       
       if (newStopPrice > 0) {
         // Use existing StopLimit from repository (already checked above)
@@ -6950,7 +6953,8 @@ app.post('/api/stoplimit-tracker/config', requireAuth, async (req, res) => {
       const enabled = group.enabled !== false;
       const steps = Array.isArray(group.steps) ? group.steps.map(step => ({
         pnl: parseFloat(step.pnl || '0'),
-        stop: parseFloat(step.stop || '0')
+        stop: parseFloat(step.stop || '0'),
+        stopOffset: step.stopOffset !== undefined && step.stopOffset !== null ? parseFloat(step.stopOffset) : undefined
       })) : [];
       
       stopLimitTrackerConfig.set(groupId, {
@@ -6990,7 +6994,8 @@ app.post('/api/stoplimit-tracker/config/group', requireAuth, async (req, res) =>
       enabled: enabled !== false,
       steps: Array.isArray(steps) ? steps.map(step => ({
         pnl: parseFloat(step.pnl || '0'),
-        stop: parseFloat(step.stop || '0')
+        stop: parseFloat(step.stop || '0'),
+        stopOffset: step.stopOffset !== undefined && step.stopOffset !== null ? parseFloat(step.stopOffset) : undefined
       })) : []
     };
     
@@ -7025,7 +7030,8 @@ app.put('/api/stoplimit-tracker/config/group/:groupId', requireAuth, async (req,
       enabled: enabled !== undefined ? enabled : existingGroup.enabled,
       steps: steps !== undefined ? (Array.isArray(steps) ? steps.map(step => ({
         pnl: parseFloat(step.pnl || '0'),
-        stop: parseFloat(step.stop || '0')
+        stop: parseFloat(step.stop || '0'),
+        stopOffset: step.stopOffset !== undefined && step.stopOffset !== null ? parseFloat(step.stopOffset) : undefined
       })) : existingGroup.steps) : existingGroup.steps
     };
     
@@ -8869,7 +8875,8 @@ async function loadStopLimitTrackerConfigFromDb() {
             enabled,
             steps: Array.isArray(group.steps) ? group.steps.map(step => ({
               pnl: parseFloat(step.pnl || '0'),
-              stop: parseFloat(step.stop || '0')
+              stop: parseFloat(step.stop || '0'),
+              stopOffset: step.stopOffset !== undefined && step.stopOffset !== null ? parseFloat(step.stopOffset) : undefined
             })) : []
           });
           
