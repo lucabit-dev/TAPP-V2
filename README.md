@@ -237,9 +237,24 @@ This is a private project. For questions or issues, contact the development team
 
 MIT License - See LICENSE file for details
 
-## Support
+## Deployment (Vercel + Railway)
 
-For deployment help, see [DEPLOYMENT.md](./DEPLOYMENT.md)
+### Automatic deploys not triggering?
+
+If pushes to GitHub don't trigger Vercel or Railway deploys:
+
+**1. GitHub Actions fallback (Vercel)**  
+A workflow in `.github/workflows/deploy-on-push.yml` triggers Vercel on push to `main`. Add this secret:
+- **GitHub** → Repo → Settings → Secrets and variables → Actions → New repository secret
+- Name: `VERCEL_DEPLOY_HOOK_URL`
+- Value: From **Vercel** → Project → Settings → Git → Deploy Hooks → Create Hook → copy URL
+
+**2. Reconnect integrations**
+- **Vercel**: Project → Settings → Git → Disconnect → Connect again
+- **Railway**: Project → Service → Settings → Source → Disconnect → Connect repository
+
+**3. Check GitHub webhooks**  
+Repo → Settings → Webhooks. Ensure Vercel and Railway webhooks exist and recent deliveries succeeded.
 
 ---
 
