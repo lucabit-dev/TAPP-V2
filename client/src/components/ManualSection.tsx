@@ -35,6 +35,7 @@ interface ScoredStock {
   };
   indicators: IndicatorData | null;
   meetsExtra: {
+    hist5mPos: boolean;
     macd1mPos: boolean;
     closeOverEma1m: boolean;
     ema18Above200_5m: boolean;
@@ -463,6 +464,7 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium">Symbol</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-right">Score</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-right">Price</th>
+                  <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-center">Hist 5m+</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-center">MACD 1m+</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-center">Close {'>'} EMA18</th>
                   <th className="p-3 border-b border-[#2a2820] text-[#808080] font-medium text-center">EMA 18 5m {'>'} EMA 200 5m</th>
@@ -489,6 +491,11 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                       <td className="p-3 text-right font-mono font-bold text-[#facc15]">{stock.score.toFixed(1)}</td>
                       <td className="p-3 text-right font-mono">${formatNumber(stock.price)}</td>
                       
+                      <td className="p-3 text-center">
+                        <span className={`px-2 py-0.5 rounded ${(stock.meetsExtra?.hist5mPos ?? false) ? 'bg-[#22c55e]/20 text-[#22c55e]' : 'bg-[#2a2820] text-[#808080]'}`} title="Display only, not a filter">
+                          {(stock.meetsExtra?.hist5mPos ?? false) ? 'YES' : 'NO'}
+                        </span>
+                      </td>
                       <td className="p-3 text-center">
                         <span className={`px-2 py-0.5 rounded ${stock.meetsExtra.macd1mPos ? 'bg-[#22c55e]/20 text-[#22c55e]' : 'bg-[#2a2820] text-[#808080]'}`}>
                           {stock.meetsExtra.macd1mPos ? 'YES' : 'NO'}

@@ -5334,6 +5334,13 @@ async function handleManualBuyFilled(orderId, order, pending) {
   
   const normalizedSymbol = symbol;
   
+  // CRITICAL: We're processing a BUY FLL - user just bought. Clear "StopLimit filled" tracking so we create a new one.
+  // Previous StopLimit was for the old position (now sold). This buy is a new position that needs its own StopLimit.
+  if (stopLimitFilledSymbols.has(normalizedSymbol)) {
+    stopLimitFilledSymbols.delete(normalizedSymbol);
+    console.log(`✅ [DEBUG] Buy FLL for ${normalizedSymbol} - cleared StopLimit filled tracking (new position needs new StopLimit)`);
+  }
+  
   // Restore stop-limit from DB if missing from cache (keeps stop-limits active after ~10+ min, helps rebuys find existing)
   await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
   
@@ -9075,9 +9082,8 @@ function computeManualList() {
     }
 
     const reasons = [];
-    if ((indicators.macd5m?.histogram ?? -1) <= 0) reasons.push("Hist 5m <= 0");
+    // Hist 5m is visual indicator only, not a filter condition
     if ((indicators.macd5m?.macd ?? -1) <= 0) reasons.push("MACD 5m <= 0");
-    // EMA18 5m > EMA200 5m is now a visual indicator only, not a filter condition
 
     if (reasons.length > 0) {
       nonQualified.push({ symbol, price, reasons, factors, rawRow: row });
@@ -9085,6 +9091,7 @@ function computeManualList() {
     }
 
     const meetsExtra = {
+      hist5mPos: (indicators.macd5m?.histogram ?? -1) > 0,
       macd1mPos: (indicators.macd1m?.macd ?? -1) > 0,
       closeOverEma1m: price > (indicators.ema1m18 ?? 999999),
       ema18Above200_5m: (indicators.ema5m18 ?? 0) > (indicators.ema5m200 ?? 999999)
@@ -9137,7 +9144,7 @@ function computeManualList() {
   analyzing.sort((a, b) => a.symbol.localeCompare(b.symbol));
 
   return {
-    qualified: qualified.slice(0, 10), // Top 10
+    qualified: qualified.slice(0, 20), // Top 20
     nonQualified,
     analyzing
   };
