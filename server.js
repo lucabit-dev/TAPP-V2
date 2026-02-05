@@ -1018,6 +1018,17 @@ setInterval(async () => {
   }
 }, 120000); // Every 2 minutes
 
+// Live P&L tracking: periodically re-check StopLimit tracker for positions with active StopLimits
+// Uses cached position data (updated by Positions WebSocket) so we catch P&L changes even if message format varies
+const STOPLIMIT_PNL_CHECK_MS = 5000; // 5 seconds
+setInterval(() => {
+  if (!positionsWs || positionsWs.readyState !== WebSocket.OPEN || stopLimitOrderRepository.size === 0) return;
+  for (const [symbol, _repoEntry] of stopLimitOrderRepository) {
+    const pos = positionsCache.get(symbol);
+    if (pos && parseFloat(pos.Quantity || '0') > 0) checkStopLimitTracker(symbol, pos);
+  }
+}, STOPLIMIT_PNL_CHECK_MS);
+
 // Periodic cache cleanup to remove expired entries (less frequent)
 setInterval(() => {
   const now = Date.now();
@@ -3411,6 +3422,11 @@ function connectPositionsWebSocket() {
             stopLimitFilledSymbols.delete(cachedSymbol);
             if (cachePersistenceService) cachePersistenceService.schedulePositionSave(cachedSymbol);
             console.log(`📊 [BATCH] Position sold: ${cachedSymbol} - cleared cache and Stage & Progress`);
+          }
+          // Live-track P&L: check StopLimit tracker for each position in batch (P&L updates come through here)
+          for (const s of symbolsInBatch) {
+            const pos = positionsCache.get(s);
+            if (pos && stopLimitOrderRepository.has(s)) checkStopLimitTracker(s, pos);
           }
           return;
         }
