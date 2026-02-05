@@ -994,6 +994,21 @@ setInterval(async () => {
         }
       }
     }
+
+    // Positions WebSocket activity watchdog: if we have StopLimits to update but no position updates, force reconnect.
+    // Stop Limit Adjustment depends on position updates to call checkStopLimitTracker. Silent connection = no updates.
+    if (process.env.PNL_API_KEY && typeof connectPositionsWebSocket === 'function') {
+      const posWsOpen = positionsWs && positionsWs.readyState === WebSocket.OPEN;
+      const hasStopLimits = stopLimitOrderRepository && stopLimitOrderRepository.size > 0;
+      if (posWsOpen && hasStopLimits && lastPositionUpdateTime != null) {
+        const idleMs = now - lastPositionUpdateTime;
+        const POSITIONS_IDLE_RECONNECT_MS = 3 * 60 * 1000; // 3 min - need P&L updates for Stop Limit Adjustment
+        if (idleMs >= POSITIONS_IDLE_RECONNECT_MS) {
+          console.warn(`⚠️ [POSITIONS_WS] No position updates for ${Math.round(idleMs / 1000)}s despite ${stopLimitOrderRepository.size} StopLimit(s) - forcing reconnect (Stop Limit Adjustment requires position updates)`);
+          connectPositionsWebSocket();
+        }
+      }
+    }
     
     if (cleanedRepository > 0 || restoredFromDb > 0 || cleanedRecentlySold > 0 || cleanedFilledStopLimits > 0 || cleanedProcessedFll > 0) {
       console.log(`🧹 [STOPLIMIT_REPO] Cleaned ${cleanedRepository} repository entries, restored ${restoredFromDb} from DB, ${cleanedRecentlySold} recently sold, ${cleanedFilledStopLimits} filled StopLimit, ${cleanedProcessedFll} processed FLL`);
@@ -3291,6 +3306,10 @@ let lastOrderUpdateTime = null;
 let positionsWs = null;
 let positionsWsReconnectTimer = null;
 let lastPositionsError = null;
+let lastPositionUpdateTime = null;
+let lastPositionsConnectedAt = null;
+let positionsReconnectAttempts = 0;
+let lastPositionsConnectAttempt = 0;
 
 // Maintain WebSocket connection to orders to keep cache updated
 let ordersWs = null;
@@ -3330,9 +3349,10 @@ function connectPositionsWebSocket() {
     
     positionsWs.on('open', async () => {
       console.log('✅ Positions WebSocket connected for stop-loss monitoring');
-       lastPositionUpdateTime = Date.now();
-       positionsReconnectAttempts = 0;
-       lastPositionsError = null;
+      lastPositionUpdateTime = Date.now();
+      lastPositionsConnectedAt = Date.now();
+      positionsReconnectAttempts = 0;
+      lastPositionsError = null;
       // Clear reconnect timer on successful connection
       if (positionsWsReconnectTimer) {
         clearTimeout(positionsWsReconnectTimer);

@@ -227,3 +227,23 @@ If you get **no logs at all** for a symbol when buying:
 **Root cause:** FLL (filled) arrives from Orders WS before Positions WS has sent its update. The position exists at the broker but isn't in `positionsCache` yet.
 
 **Fix:** When we receive an FLL for a BUY, we **immediately add the order's quantity to positionsCache** (merge with existing if any). This ensures we have a position when we check, even if Positions WS is delayed. For adds-to-existing (MARA had 2 filled buys in the snapshot), each FLL adds its quantity – so we build up the correct total.
+
+---
+
+## Stop Limit Adjustment Stops Working After Some Time
+
+**Symptom:** Stop Limit Adjustment (P&L-based step updates) works initially, then stops updating StopLimit orders after the app has been running for a while.
+
+**Root cause:** The Stop Limit Adjustment depends entirely on the **Positions WebSocket** (server → Sections Bot). Every time a position update arrives, the server calls `checkStopLimitTracker`, which compares P&L to your configured steps and updates the StopLimit when a new step is reached.
+
+If the Positions WebSocket connection goes **silent** (half-open), no position updates arrive → `checkStopLimitTracker` is never called → StopLimit orders are never updated.
+
+**Why connections go silent:**
+- **Cloud idle timeouts** – Railway, Vercel, and similar platforms often close idle connections after ~5–10 minutes.
+- **Load balancers** – May drop connections that have had no traffic for a while.
+- **Half-open state** – The TCP connection appears open (`readyState === OPEN`) but the broker/network has stopped delivering messages. No `close` or `error` event fires.
+
+**Unlike the Orders WebSocket**, the Positions WebSocket had **no idle watchdog**. The Orders WS reconnects after 2 min of no activity when there are pending buys. The Positions WS only reconnected on explicit `close` or `error` – so a silent connection would never recover.
+
+**Fix applied:**
+- **Positions WS watchdog**: When we have positions with active StopLimits and the Positions WS has received no updates for 3 minutes, force a reconnect. This mirrors the Orders WS watchdog and recovers from silent drops.
