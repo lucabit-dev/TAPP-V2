@@ -3864,19 +3864,11 @@ function connectOrdersWebSocket() {
             pendingManualBuyOrders.delete(orderId);
             console.log(`✅ [DEBUG] Removed ${orderId} from pendingManualBuyOrders. Remaining: ${pendingManualBuyOrders.size}`);
             
-            // CRITICAL: Check if StopLimit was already filled for this symbol - prevent creating new one
-            const filledStopLimit = stopLimitFilledSymbols.get(normalizedSymbol);
-            if (filledStopLimit) {
-              console.warn(`⚠️ [DEBUG] Symbol ${normalizedSymbol} had StopLimit filled previously (order ${filledStopLimit.orderId}). Skipping StopLimit creation to prevent loops.`);
-              
-              // Check if position still exists - if not, remove from filled tracking
-              const position = positionsCache.get(normalizedSymbol);
-              if (!position || parseFloat(position.Quantity || '0') <= 0) {
-                stopLimitFilledSymbols.delete(normalizedSymbol);
-                console.log(`🧹 [DEBUG] Position closed for ${normalizedSymbol} - removed from filled StopLimit tracking`);
-              }
-              
-              return; // Don't call handleManualBuyFilled if StopLimit was already filled
+            // CRITICAL: BUY FLL = user just bought. If StopLimit was filled for this symbol before, we're in a REBUY
+            // scenario (sold at 11:39:05, bought again at 11:39:30). Clear filled tracking so we create a new StopLimit.
+            if (stopLimitFilledSymbols.has(normalizedSymbol)) {
+              stopLimitFilledSymbols.delete(normalizedSymbol);
+              console.log(`✅ [DEBUG] BUY FLL for ${normalizedSymbol} - cleared StopLimit filled tracking (rebuy: new position needs new StopLimit)`);
             }
             
             // CRITICAL: Check repository FIRST before processing to prevent duplicate creation
