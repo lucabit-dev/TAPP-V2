@@ -3384,6 +3384,7 @@ function connectPositionsWebSocket() {
         // Handle batch/snapshot format: { positions: [...] } or { Positions: [...] }
         const batch = dataObj.positions ?? dataObj.Positions;
         if (Array.isArray(batch)) {
+          const symbolsInBatch = new Set();
           for (const p of batch) {
             const s = (p?.Symbol ?? p?.symbol ?? '').toString().toUpperCase();
             let q = parseFloat(p?.Quantity || '0');
@@ -3393,10 +3394,23 @@ function connectPositionsWebSocket() {
               q = (existing ? parseFloat(existing.Quantity || '0') : 0) + qDelta;
             }
             if (s && q > 0) {
+              symbolsInBatch.add(s);
               const existing = positionsCache.get(s);
               positionsCache.set(s, { ...existing, ...p, Symbol: s, Quantity: String(q), lastUpdated: Date.now() });
               if (cachePersistenceService) cachePersistenceService.schedulePositionSave(s);
             }
+          }
+          // Clear positions and Stage & Progress for symbols no longer in batch (sold)
+          const toRemove = [...positionsCache.keys()].filter(s => !symbolsInBatch.has(s));
+          for (const cachedSymbol of toRemove) {
+            positionsCache.delete(cachedSymbol);
+            stopLimitTrackerProgress.delete(cachedSymbol);
+            stopLimitOrderRepository.delete(cachedSymbol);
+            stopLimitCreationBySymbol.delete(cachedSymbol);
+            recentlySoldSymbols.set(cachedSymbol, Date.now());
+            stopLimitFilledSymbols.delete(cachedSymbol);
+            if (cachePersistenceService) cachePersistenceService.schedulePositionSave(cachedSymbol);
+            console.log(`📊 [BATCH] Position sold: ${cachedSymbol} - cleared cache and Stage & Progress`);
           }
           return;
         }
@@ -5239,7 +5253,11 @@ async function checkStopLimitTracker(symbol, position) {
   try {
     const normalizedSymbol = (symbol || '').toUpperCase();
     const avgPrice = parseFloat(position.AveragePrice || '0');
-    const currentPnl = parseFloat(position.UnrealizedProfitLoss || '0');
+    // Config steps are P&L per share; use UnrealizedProfitLossQty, fallback to total/quantity
+    const totalPnl = parseFloat(position.UnrealizedProfitLoss || '0');
+    const qty = parseFloat(position.Quantity || '0') || 1;
+    const pnlPerShare = parseFloat(position.UnrealizedProfitLossQty || '');
+    const currentPnl = !isNaN(pnlPerShare) ? pnlPerShare : (qty > 0 ? totalPnl / qty : 0);
     
     if (avgPrice <= 0 || !normalizedSymbol) return;
     

@@ -283,7 +283,14 @@ const PositionsSection: React.FC = () => {
     };
   }, [connectWebSocket, disconnectWebSocket]);
 
-  // Fetch stop limit adjustment progress for Stage & Progress column
+  // Clear Stage & Progress when no positions (all sold)
+  useEffect(() => {
+    if (mergedPositions.length === 0) setStopLimitProgress(new Map());
+  }, [mergedPositions.length]);
+
+  // Fetch stop limit adjustment progress for Stage & Progress column (only for current positions)
+  const positionsRef = useRef(mergedPositions);
+  positionsRef.current = mergedPositions;
   useEffect(() => {
     if (!token || mergedPositions.length === 0) return;
     const fetchProgress = async () => {
@@ -291,10 +298,11 @@ const PositionsSection: React.FC = () => {
         const res = await fetchWithAuth(`${API_BASE_URL}/stoplimit-tracker/progress`);
         const data = await res.json();
         if (data.success && Array.isArray(data.data)) {
+          const currentSymbols = new Set(positionsRef.current.map(p => (p.Symbol || '').toUpperCase()).filter(Boolean));
           const map = new Map<string, { currentStepIndex: number; lastPnl?: number; groupId?: string }>();
           data.data.forEach((p: { symbol: string; currentStepIndex?: number; lastPnl?: number; groupId?: string }) => {
             const sym = (p.symbol || '').toUpperCase();
-            if (sym) map.set(sym, { currentStepIndex: p.currentStepIndex ?? -1, lastPnl: p.lastPnl, groupId: p.groupId });
+            if (sym && currentSymbols.has(sym)) map.set(sym, { currentStepIndex: p.currentStepIndex ?? -1, lastPnl: p.lastPnl, groupId: p.groupId });
           });
           setStopLimitProgress(map);
         }
