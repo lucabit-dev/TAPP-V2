@@ -304,13 +304,17 @@ const PositionsSection: React.FC = () => {
   }, [mergedPositions.length]);
 
   // Fetch stop limit adjustment progress for Stage & Progress column (only for current positions)
+  // Pass symbols to server so it runs checkStopLimitTracker before returning (fixes "—" after long uptime)
+  // Re-fetch when WebSocket reconnects (isConnected) to sync after periodic refresh
   const positionsRef = useRef(mergedPositions);
   positionsRef.current = mergedPositions;
   useEffect(() => {
     if (!token || mergedPositions.length === 0) return;
     const fetchProgress = async () => {
       try {
-        const res = await fetchWithAuth(`${API_BASE_URL}/stoplimit-tracker/progress`);
+        const symbols = positionsRef.current.map(p => (p.Symbol || '').toUpperCase()).filter(Boolean);
+        const qs = symbols.length > 0 ? `?symbols=${encodeURIComponent(symbols.join(','))}` : '';
+        const res = await fetchWithAuth(`${API_BASE_URL}/stoplimit-tracker/progress${qs}`);
         const data = await res.json();
         if (data.success && Array.isArray(data.data)) {
           const currentSymbols = new Set(positionsRef.current.map(p => (p.Symbol || '').toUpperCase()).filter(Boolean));
@@ -328,7 +332,7 @@ const PositionsSection: React.FC = () => {
     fetchProgress();
     const interval = setInterval(fetchProgress, 10000);
     return () => clearInterval(interval);
-  }, [token, mergedPositions.length, fetchWithAuth]);
+  }, [token, mergedPositions.length, isConnected, fetchWithAuth]);
 
   const addNotification = useCallback((message: string, type: 'success' | 'error' | 'warning' | 'info' = 'info', duration?: number) => {
     const id = Date.now().toString() + Math.random().toString(36).substr(2, 9);

@@ -1039,13 +1039,14 @@ setInterval(() => {
 }, POSITIONS_WS_REFRESH_MS);
 
 // Live P&L tracking: periodically re-check StopLimit tracker for positions with active StopLimits
-// Uses cached position data (updated by Positions WebSocket) so we catch P&L changes even if message format varies
+// Iterate over positionsCache (like batch handler) so we never miss symbols after long uptime / stale connections
 const STOPLIMIT_PNL_CHECK_MS = 5000; // 5 seconds
 setInterval(() => {
-  if (!positionsWs || positionsWs.readyState !== WebSocket.OPEN || stopLimitOrderRepository.size === 0) return;
-  for (const [symbol, _repoEntry] of stopLimitOrderRepository) {
-    const pos = positionsCache.get(symbol);
-    if (pos && parseFloat(pos.Quantity || '0') > 0) checkStopLimitTracker(symbol, pos);
+  if (!positionsWs || positionsWs.readyState !== WebSocket.OPEN) return;
+  for (const [symbol, pos] of positionsCache) {
+    if (pos && parseFloat(pos.Quantity || '0') > 0 && stopLimitOrderRepository.has(symbol)) {
+      checkStopLimitTracker(symbol, pos);
+    }
   }
 }, STOPLIMIT_PNL_CHECK_MS);
 
@@ -7288,6 +7289,21 @@ app.delete('/api/stoplimit-tracker/config/group/:groupId', requireAuth, async (r
 
 app.get('/api/stoplimit-tracker/progress', requireAuth, async (req, res) => {
   try {
+    // Sync trigger: client can pass ?symbols=AAPL,PTON,EVGO to ensure we run checkStopLimitTracker
+    // for those symbols before returning (fixes "—" after long uptime when server cache goes stale)
+    const symbolsParam = req.query.symbols;
+    if (symbolsParam && typeof symbolsParam === 'string') {
+      const requestedSymbols = symbolsParam.split(',').map(s => (s || '').trim().toUpperCase()).filter(Boolean);
+      for (const symbol of requestedSymbols) {
+        const pos = positionsCache.get(symbol);
+        if (pos && parseFloat(pos.Quantity || '0') > 0 && stopLimitOrderRepository.has(symbol)) {
+          await checkStopLimitTracker(symbol, pos);
+        }
+      }
+      if (cachePersistenceService && requestedSymbols.length > 0) {
+        await cachePersistenceService.flushProgressSave();
+      }
+    }
     // Read from DB for multi-instance deployment (any instance returns latest progress)
     const progress = cachePersistenceService
       ? await cachePersistenceService.getProgressFromDatabase()

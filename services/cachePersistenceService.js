@@ -211,6 +211,17 @@ class CachePersistenceService {
   }
 
   /**
+   * Flush pending progress saves immediately (used when API needs fresh data before returning)
+   */
+  async flushProgressSave() {
+    if (this.saveTimeouts.progress) {
+      clearTimeout(this.saveTimeouts.progress);
+      this.saveTimeouts.progress = null;
+    }
+    await this.savePendingProgress();
+  }
+
+  /**
    * Get all StopLimit tracker progress from database (for multi-instance API)
    */
   async getProgressFromDatabase() {
