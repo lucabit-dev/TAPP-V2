@@ -223,7 +223,7 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
     }
   };
 
-  const handleBuyClick = useCallback(async (symbol: string | null | undefined, e?: React.MouseEvent) => {
+  const handleBuyClick = useCallback(async (symbol: string | null | undefined, price?: number, e?: React.MouseEvent) => {
     if (e) {
       e.preventDefault();
       e.stopPropagation();
@@ -251,12 +251,17 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
     await Promise.resolve();
     
     try {
+      const requestBody: { symbol: string; price?: number } = { symbol: cleanSymbol };
+      if (price !== undefined && price > 0) {
+        requestBody.price = price;
+      }
+      
       const resp = await fetchWithTimeout(
         `${API_BASE_URL}/buys/test`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ symbol: cleanSymbol })
+          body: JSON.stringify(requestBody)
         },
         BUY_REQUEST_TIMEOUT_MS
       );
@@ -561,7 +566,7 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
                               <button
                                 onClick={(e) => {
                                   if (!isDisabled) {
-                                    handleBuyClick(symbolVal, e);
+                                    handleBuyClick(symbolVal, stock.price, e);
                                   }
                                 }}
                                 disabled={isDisabled}

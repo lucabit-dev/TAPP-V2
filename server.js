@@ -4275,10 +4275,16 @@ app.post('/api/buys/test', async (req, res) => {
     
     console.log(`🛒 Manual buy signal for ${symbol}`);
     
-    // Price from Chartswatcher toplist or Polygon (never positionsCache)
-    const currentPrice = await getFastPriceForOrder(symbol);
-    if (!currentPrice || currentPrice <= 0) {
-      return res.status(400).json({ success: false, error: `Could not determine current price for ${symbol}. Please try again.` });
+    // Use provided price from client (table column) if available, otherwise fetch from Chartswatcher/Polygon
+    let currentPrice = parseFloat(req.body?.price);
+    if (!currentPrice || currentPrice <= 0 || isNaN(currentPrice)) {
+      // Price from Chartswatcher toplist or Polygon (never positionsCache)
+      currentPrice = await getFastPriceForOrder(symbol);
+      if (!currentPrice || currentPrice <= 0) {
+        return res.status(400).json({ success: false, error: `Could not determine current price for ${symbol}. Please try again.` });
+      }
+    } else {
+      console.log(`💰 Using provided price from table: $${currentPrice.toFixed(2)}`);
     }
     
     // Calculate quantity based on price ranges (using configured buy quantities)
@@ -5301,6 +5307,14 @@ async function checkStopLimitTracker(symbol, position) {
     const progress = stopLimitTrackerProgress.get(normalizedSymbol);
     const currentStepIndex = progress ? progress.currentStepIndex : -1;
     
+    // Debug logging for step comparison
+    console.log(`🔍 [STOPLIMIT_TRACKER] ${normalizedSymbol}: currentPnl=$${currentPnl.toFixed(4)}, currentStepIndex=${currentStepIndex}, steps=${matchingGroup.steps.length}`);
+    matchingGroup.steps.forEach((step, idx) => {
+      const stepPnl = parseFloat(step.pnl || '0');
+      const meets = currentPnl >= stepPnl;
+      console.log(`🔍 [STOPLIMIT_TRACKER]   Step ${idx + 1}: pnl=$${stepPnl.toFixed(4)}, meets=${meets} (${currentPnl.toFixed(4)} >= ${stepPnl.toFixed(4)})`);
+    });
+    
     // Find the highest step that the P&L has reached
     let newStepIndex = -1;
     for (let i = 0; i < matchingGroup.steps.length; i++) {
@@ -5313,6 +5327,8 @@ async function checkStopLimitTracker(symbol, position) {
       }
     }
     
+    console.log(`🔍 [STOPLIMIT_TRACKER] ${normalizedSymbol}: newStepIndex=${newStepIndex}, currentStepIndex=${currentStepIndex}, willUpdate=${newStepIndex > currentStepIndex && newStepIndex >= 0}`);
+    
     // If we've reached a new step, update the StopLimit order
     if (newStepIndex > currentStepIndex && newStepIndex >= 0) {
       const newStep = matchingGroup.steps[newStepIndex];
@@ -5320,6 +5336,8 @@ async function checkStopLimitTracker(symbol, position) {
       const stopOffset = newStep.stopOffset !== undefined && newStep.stopOffset !== null ? parseFloat(newStep.stopOffset) : null;
       const stopAbsolute = parseFloat(newStep.stop || '0');
       const newStopPrice = stopOffset !== null ? (avgPrice + stopOffset) : (stopAbsolute > 0 ? stopAbsolute : 0);
+      
+      console.log(`🔍 [STOPLIMIT_TRACKER] ${normalizedSymbol}: newStopPrice calculation: avgPrice=$${avgPrice.toFixed(2)}, stopOffset=${stopOffset !== null ? stopOffset.toFixed(2) : 'null'}, stopAbsolute=${stopAbsolute.toFixed(2)}, newStopPrice=$${newStopPrice.toFixed(2)}`);
       
       if (newStopPrice > 0) {
         // Use existing StopLimit from repository (already checked above)
