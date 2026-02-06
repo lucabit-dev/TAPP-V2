@@ -202,6 +202,21 @@ const OrdersSection: React.FC = () => {
     };
   }, [connectWebSocket, disconnectWebSocket]);
 
+  // Periodic refresh: reconnect every 5 min to keep data fresh (prevents stale/silent connections)
+  const REFRESH_INTERVAL_MS = 3 * 60 * 1000;
+  React.useEffect(() => {
+    const refreshTimer = window.setInterval(() => {
+      if (wsRef.current?.readyState === WebSocket.OPEN && token) {
+        console.log('🔄 [Orders] Refreshing WebSocket connection...');
+        wsRef.current.close(1000, 'Periodic refresh');
+        wsRef.current = null;
+        setIsConnected(false);
+        window.setTimeout(() => connectWebSocket(), 500);
+      }
+    }, REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(refreshTimer);
+  }, [connectWebSocket, token]);
+
   const ordersArray = Array.from(orders.values()).sort((a, b) => {
     // Sort newest first
     return new Date(b.OpenedDateTime).getTime() - new Date(a.OpenedDateTime).getTime();

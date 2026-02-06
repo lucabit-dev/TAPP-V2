@@ -208,17 +208,25 @@ const stopLimitOrderRepository = new Map(); // Map<symbol, { orderId, order, ope
 
 // Add/merge position from filled BUY order (instant fills: FLL can arrive before Positions WS)
 // Ensures we have position in cache for MARA-style adds-to-existing even when Positions WS is delayed
+// Computes blended average price when adding to existing position
 function addPositionFromFilledBuy(symbol, quantity, orderData = {}) {
   const normalized = (symbol || '').toUpperCase();
   if (!normalized || quantity <= 0) return;
   const existing = positionsCache.get(normalized);
   const existingQty = existing ? parseFloat(existing.Quantity || '0') : 0;
   const newTotal = existingQty + quantity;
+  const newPrice = parseFloat(orderData.AveragePrice || orderData.FilledPrice || '0') || 0;
+  let avgPrice = newPrice;
+  if (existingQty > 0 && newPrice > 0) {
+    const oldAvg = parseFloat(existing.AveragePrice || '0') || 0;
+    avgPrice = (oldAvg * existingQty + newPrice * quantity) / newTotal;
+  }
   const merged = {
     ...existing,
     ...orderData,
     Symbol: normalized,
     Quantity: String(newTotal),
+    AveragePrice: String(avgPrice),
     lastUpdated: Date.now()
   };
   positionsCache.set(normalized, merged);
@@ -1017,6 +1025,18 @@ setInterval(async () => {
     console.error(`❌ [STOPLIMIT_REPO] Error in StopLimit cleanup:`, err);
   }
 }, 120000); // Every 2 minutes
+
+// Proactive refresh: reconnect Positions WebSocket every 5 min to prevent stale/silent connections
+// Cloud platforms (Vercel, Railway) can drop WebSocket traffic silently; periodic refresh keeps data fresh
+const POSITIONS_WS_REFRESH_MS = 5 * 60 * 1000; // 5 minutes
+setInterval(() => {
+  if (process.env.PNL_API_KEY && typeof connectPositionsWebSocket === 'function') {
+    if (positionsWs && positionsWs.readyState === WebSocket.OPEN) {
+      console.log('🔄 [POSITIONS_WS] Periodic refresh: reconnecting to keep data fresh');
+      connectPositionsWebSocket();
+    }
+  }
+}, POSITIONS_WS_REFRESH_MS);
 
 // Live P&L tracking: periodically re-check StopLimit tracker for positions with active StopLimits
 // Uses cached position data (updated by Positions WebSocket) so we catch P&L changes even if message format varies
@@ -3795,12 +3815,19 @@ function connectOrdersWebSocket() {
             const existingStopLimitQty = parseInt(existingLeg?.QuantityRemaining || existingLeg?.QuantityOrdered || '0', 10) || 0;
             const newBuyQty = Math.floor(Number(pending.quantity || 0)) || 0;
             const newTotalQty = existingStopLimitQty + newBuyQty;
+            const newBuyPrice = parseFloat(order.FilledPrice || pending.limitPrice || order.LimitPrice || '0') || 0;
+            const pos = positionsCache.get(normalizedSymbol);
+            const existingPosAvg = pos ? parseFloat(pos.AveragePrice || '0') : 0;
+            const existingPosQty = pos ? parseFloat(pos.Quantity || '0') : 0;
             if (newTotalQty > 0) {
               console.log(`📊 [REBUY] Updating StopLimit ${existingStopLimit.orderId} for ${normalizedSymbol}: ${existingStopLimitQty} + ${newBuyQty} = ${newTotalQty}`);
               try {
                 const result = await modifyOrderQuantity(existingStopLimit.orderId, newTotalQty);
                 if (result.success) {
                   console.log(`✅ [REBUY] Successfully updated StopLimit ${existingStopLimit.orderId} for ${normalizedSymbol} to ${newTotalQty}`);
+                  if (newBuyPrice > 0) {
+                    await updateStopLimitForAddToPosition(normalizedSymbol, existingStopLimit.orderId, existingPosAvg, existingPosQty, newBuyPrice, newBuyQty);
+                  }
                 } else {
                   console.error(`❌ [REBUY] Failed to update StopLimit ${existingStopLimit.orderId} for ${normalizedSymbol}: ${result.error}`);
                 }
@@ -3837,12 +3864,19 @@ function connectOrdersWebSocket() {
                 const dbExistingQty = parseInt(dbLeg?.QuantityRemaining || dbLeg?.QuantityOrdered || '0', 10) || 0;
                 const dbNewBuyQty = Math.floor(Number(pending.quantity || 0)) || 0;
                 const dbNewTotalQty = dbExistingQty + dbNewBuyQty;
+                const dbNewBuyPrice = parseFloat(order.FilledPrice || pending.limitPrice || order.LimitPrice || '0') || 0;
+                const dbPos = positionsCache.get(normalizedSymbol);
+                const dbPosAvg = dbPos ? parseFloat(dbPos.AveragePrice || '0') : 0;
+                const dbPosQty = dbPos ? parseFloat(dbPos.Quantity || '0') : 0;
                 if (dbNewTotalQty > 0) {
                   console.log(`📊 [REBUY] Updating StopLimit ${dbCheck.orderId} for ${normalizedSymbol} (from DB): ${dbExistingQty} + ${dbNewBuyQty} = ${dbNewTotalQty}`);
                   try {
                     const result = await modifyOrderQuantity(dbCheck.orderId, dbNewTotalQty);
                     if (result.success) {
                       console.log(`✅ [REBUY] Successfully updated StopLimit ${dbCheck.orderId} for ${normalizedSymbol} to ${dbNewTotalQty}`);
+                      if (dbNewBuyPrice > 0) {
+                        await updateStopLimitForAddToPosition(normalizedSymbol, dbCheck.orderId, dbPosAvg, dbPosQty, dbNewBuyPrice, dbNewBuyQty);
+                      }
                     } else {
                       console.error(`❌ [REBUY] Failed to update StopLimit ${dbCheck.orderId} for ${normalizedSymbol}: ${result.error}`);
                     }
@@ -3882,12 +3916,19 @@ function connectOrdersWebSocket() {
               const repoExistingQty = parseInt(repoLeg?.QuantityRemaining || repoLeg?.QuantityOrdered || '0', 10) || 0;
               const repoNewBuyQty = Math.floor(Number(pending.quantity || 0)) || 0;
               const repoNewTotalQty = repoExistingQty + repoNewBuyQty;
+              const repoNewBuyPrice = parseFloat(order.FilledPrice || pending.limitPrice || order.LimitPrice || '0') || 0;
+              const repoPos = positionsCache.get(normalizedSymbol);
+              const repoPosAvg = repoPos ? parseFloat(repoPos.AveragePrice || '0') : 0;
+              const repoPosQty = repoPos ? parseFloat(repoPos.Quantity || '0') : 0;
               if (repoNewTotalQty > 0) {
                 console.log(`📊 [REBUY] Updating StopLimit ${existingRepoOrder.orderId} for ${normalizedSymbol}: ${repoExistingQty} + ${repoNewBuyQty} = ${repoNewTotalQty}`);
                 try {
                   const result = await modifyOrderQuantity(existingRepoOrder.orderId, repoNewTotalQty);
                   if (result.success) {
                     console.log(`✅ [REBUY] Successfully updated StopLimit ${existingRepoOrder.orderId} for ${normalizedSymbol} to ${repoNewTotalQty}`);
+                    if (repoNewBuyPrice > 0) {
+                      await updateStopLimitForAddToPosition(normalizedSymbol, existingRepoOrder.orderId, repoPosAvg, repoPosQty, repoNewBuyPrice, repoNewBuyQty);
+                    }
                   } else {
                     console.error(`❌ [REBUY] Failed to update StopLimit ${existingRepoOrder.orderId} for ${normalizedSymbol}: ${result.error}`);
                   }
@@ -3912,12 +3953,22 @@ function connectOrdersWebSocket() {
               const exQty = parseInt(exLeg?.QuantityRemaining || exLeg?.QuantityOrdered || '0', 10) || 0;
               const newQty = Math.floor(Number(pending.quantity || 0)) || 0;
               const totalQty = exQty + newQty;
+              const delayedNewPrice = parseFloat(order.FilledPrice || pending.limitPrice || order.LimitPrice || '0') || 0;
+              const delayedPos = positionsCache.get(normalizedSymbol);
+              const delayedPosAvg = delayedPos ? parseFloat(delayedPos.AveragePrice || '0') : 0;
+              const delayedPosQty = delayedPos ? parseFloat(delayedPos.Quantity || '0') : 0;
               if (totalQty > 0) {
                 console.log(`📊 [REBUY] After delay: found existing StopLimit for ${normalizedSymbol} (${delayedExisting.orderId}). Updating quantity ${exQty} + ${newQty} = ${totalQty}`);
                 try {
                   const result = await modifyOrderQuantity(delayedExisting.orderId, totalQty);
-                  if (result.success) console.log(`✅ [REBUY] Updated StopLimit ${delayedExisting.orderId} for ${normalizedSymbol} to ${totalQty}`);
-                  else console.error(`❌ [REBUY] Failed to update: ${result.error}`);
+                  if (result.success) {
+                    console.log(`✅ [REBUY] Updated StopLimit ${delayedExisting.orderId} for ${normalizedSymbol} to ${totalQty}`);
+                    if (delayedNewPrice > 0) {
+                      await updateStopLimitForAddToPosition(normalizedSymbol, delayedExisting.orderId, delayedPosAvg, delayedPosQty, delayedNewPrice, newQty);
+                    }
+                  } else {
+                    console.error(`❌ [REBUY] Failed to update: ${result.error}`);
+                  }
                 } catch (err) { console.error(`❌ [REBUY] Error updating StopLimit for ${normalizedSymbol}:`, err); }
               }
               processedFllOrders.add(orderId);
@@ -3968,11 +4019,21 @@ function connectOrdersWebSocket() {
                   const exLeg = existingForSymbol.order?.Legs?.[0];
                   const exQty = parseInt(exLeg?.QuantityRemaining || exLeg?.QuantityOrdered || '0', 10) || 0;
                   const newTotal = exQty + quantity;
+                  const fbBuyPrice = parseFloat(order.FilledPrice || order.LimitPrice || '0') || 0;
+                  const fbPos = positionsCache.get(normalizedSymbol);
+                  const fbPosAvg = fbPos ? parseFloat(fbPos.AveragePrice || '0') : 0;
+                  const fbPosQty = fbPos ? parseFloat(fbPos.Quantity || '0') : 0;
                   if (newTotal > 0) {
                     try {
                       const res = await modifyOrderQuantity(existingForSymbol.orderId, newTotal);
-                      if (res.success) console.log(`✅ [FALLBACK] Updated ${normalizedSymbol} stop-limit to ${newTotal}`);
-                      else console.error(`❌ [FALLBACK] Update failed: ${res.error}`);
+                      if (res.success) {
+                        console.log(`✅ [FALLBACK] Updated ${normalizedSymbol} stop-limit to ${newTotal}`);
+                        if (fbBuyPrice > 0) {
+                          await updateStopLimitForAddToPosition(normalizedSymbol, existingForSymbol.orderId, fbPosAvg, fbPosQty, fbBuyPrice, quantity);
+                        }
+                      } else {
+                        console.error(`❌ [FALLBACK] Update failed: ${res.error}`);
+                      }
                     } catch (e) { console.error(`❌ [FALLBACK] Update error:`, e.message); }
                   }
                   processedFllOrders.add(orderId);
@@ -4003,8 +4064,17 @@ function connectOrdersWebSocket() {
                   processedFllOrders.add(orderId);
                   try {
                     const result = await modifyOrderQuantity(existingStopLimit.orderId, newTotalQty);
-                    if (result.success) console.log(`✅ [FALLBACK] Updated StopLimit ${existingStopLimit.orderId} for ${normalizedSymbol} to ${newTotalQty}`);
-                    else console.error(`❌ [FALLBACK] Failed to update StopLimit ${existingStopLimit.orderId}: ${result.error}`);
+                    if (result.success) {
+                      console.log(`✅ [FALLBACK] Updated StopLimit ${existingStopLimit.orderId} for ${normalizedSymbol} to ${newTotalQty}`);
+                      if (buyPrice > 0) {
+                        const fb2Pos = positionsCache.get(normalizedSymbol);
+                        const fb2PosAvg = fb2Pos ? parseFloat(fb2Pos.AveragePrice || '0') : 0;
+                        const fb2PosQty = fb2Pos ? parseFloat(fb2Pos.Quantity || '0') : 0;
+                        await updateStopLimitForAddToPosition(normalizedSymbol, existingStopLimit.orderId, fb2PosAvg, fb2PosQty, buyPrice, quantity);
+                      }
+                    } else {
+                      console.error(`❌ [FALLBACK] Failed to update StopLimit ${existingStopLimit.orderId}: ${result.error}`);
+                    }
                   } catch (err) {
                     console.error(`❌ [FALLBACK] Error updating StopLimit quantity for ${normalizedSymbol}:`, err);
                   }
@@ -4025,8 +4095,17 @@ function connectOrdersWebSocket() {
                     }
                     try {
                       const result = await modifyOrderQuantity(dbCheck.orderId, dbNewTotalQty);
-                      if (result.success) console.log(`✅ [FALLBACK] Updated StopLimit ${dbCheck.orderId} for ${normalizedSymbol} to ${dbNewTotalQty}`);
-                      else console.error(`❌ [FALLBACK] Failed to update StopLimit ${dbCheck.orderId}: ${result.error}`);
+                      if (result.success) {
+                        console.log(`✅ [FALLBACK] Updated StopLimit ${dbCheck.orderId} for ${normalizedSymbol} to ${dbNewTotalQty}`);
+                        if (buyPrice > 0) {
+                          const fbDbPos = positionsCache.get(normalizedSymbol);
+                          const fbDbPosAvg = fbDbPos ? parseFloat(fbDbPos.AveragePrice || '0') : 0;
+                          const fbDbPosQty = fbDbPos ? parseFloat(fbDbPos.Quantity || '0') : 0;
+                          await updateStopLimitForAddToPosition(normalizedSymbol, dbCheck.orderId, fbDbPosAvg, fbDbPosQty, buyPrice, quantity);
+                        }
+                      } else {
+                        console.error(`❌ [FALLBACK] Failed to update StopLimit ${dbCheck.orderId}: ${result.error}`);
+                      }
                     } catch (err) {
                       console.error(`❌ [FALLBACK] Error updating StopLimit quantity for ${normalizedSymbol}:`, err);
                     }
@@ -5260,6 +5339,45 @@ async function modifyStopLimitPrice(orderId, stopPrice, limitPrice) {
   return { success: true, data };
 }
 
+// When adding to existing position: update StopLimit prices to new blended avg, reset to Initial step
+// newAvgPrice: use positionsCache (already blended by addPositionFromFilledBuy) or compute from (existingAvg, existingQty, newPrice, newQty)
+async function updateStopLimitForAddToPosition(symbol, orderId, existingAvg, existingQty, newPrice, newQty) {
+  const normalized = (symbol || '').toUpperCase();
+  const pos = positionsCache.get(normalized);
+  let newAvg = pos ? parseFloat(pos.AveragePrice || '0') : 0;
+  if (newAvg <= 0 && newPrice > 0) {
+    const oldQty = parseFloat(existingQty || '0') || 0;
+    const addQty = Math.floor(Number(newQty || 0)) || 0;
+    const addPrice = parseFloat(newPrice || '0') || 0;
+    const oldAvg = parseFloat(existingAvg || '0') || 0;
+    if (addQty > 0) newAvg = (oldAvg * oldQty + addPrice * addQty) / (oldQty + addQty);
+  }
+  if (newAvg <= 0) return { success: false };
+  let matchingGroup = null;
+  let matchingGroupId = null;
+  for (const [groupId, group] of stopLimitTrackerConfig.entries()) {
+    if (!group.enabled) continue;
+    if (newAvg >= group.minPrice && newAvg <= group.maxPrice && group.initialStopPrice != null) {
+      matchingGroup = group;
+      matchingGroupId = groupId;
+      break;
+    }
+  }
+  if (!matchingGroup) {
+    console.log(`⚠️ [ADD_TO_POSITION] No matching tracker group for ${normalized} (newAvg=$${newAvg.toFixed(2)})`);
+    return { success: false };
+  }
+  const newStopPrice = Math.max(0, newAvg + parseFloat(matchingGroup.initialStopPrice || '0'));
+  const newLimitPrice = Math.round((newStopPrice / 1.002) * 100) / 100;
+  console.log(`📊 [ADD_TO_POSITION] ${normalized}: newAvg=$${newAvg.toFixed(2)}, stop=$${newStopPrice.toFixed(2)}, limit=$${newLimitPrice.toFixed(2)}, reset to Initial`);
+  const result = await modifyStopLimitPrice(orderId, newStopPrice, newLimitPrice);
+  if (result.success) {
+    stopLimitTrackerProgress.set(normalized, { groupId: matchingGroupId, currentStepIndex: -1, lastPnl: 0, lastUpdate: Date.now() });
+    console.log(`✅ [ADD_TO_POSITION] StopLimit ${orderId} updated to Initial step for ${normalized}`);
+  }
+  return result;
+}
+
 // Check StopLimit tracker and update orders based on P&L (sections-buy-bot-main pattern)
 // CRITICAL: This function ONLY updates existing StopLimit orders, NEVER creates new ones
 // StopLimit orders are created by handleManualBuyFilled when buy orders fill
@@ -5300,6 +5418,11 @@ async function checkStopLimitTracker(symbol, position) {
     }
     
     if (!matchingGroup || !matchingGroup.steps || matchingGroup.steps.length === 0) {
+      // Ensure progress exists for display (Initial) even when outside price range - fixes MARA/RR showing "—"
+      if (existingStopLimit && !stopLimitTrackerProgress.has(normalizedSymbol)) {
+        stopLimitTrackerProgress.set(normalizedSymbol, { groupId: null, currentStepIndex: -1, lastPnl: currentPnl, lastUpdate: Date.now() });
+        console.log(`📊 [STOPLIMIT_TRACKER] ${normalizedSymbol}: No matching group (avg=$${avgPrice.toFixed(2)}), set progress to Initial for display`);
+      }
       return; // No matching group or no steps configured
     }
     
@@ -5307,27 +5430,19 @@ async function checkStopLimitTracker(symbol, position) {
     const progress = stopLimitTrackerProgress.get(normalizedSymbol);
     const currentStepIndex = progress ? progress.currentStepIndex : -1;
     
-    // Debug logging for step comparison
-    console.log(`🔍 [STOPLIMIT_TRACKER] ${normalizedSymbol}: currentPnl=$${currentPnl.toFixed(4)}, currentStepIndex=${currentStepIndex}, steps=${matchingGroup.steps.length}`);
-    matchingGroup.steps.forEach((step, idx) => {
-      const stepPnl = parseFloat(step.pnl || '0');
-      const meets = currentPnl >= stepPnl;
-      console.log(`🔍 [STOPLIMIT_TRACKER]   Step ${idx + 1}: pnl=$${stepPnl.toFixed(4)}, meets=${meets} (${currentPnl.toFixed(4)} >= ${stepPnl.toFixed(4)})`);
-    });
-    
-    // Find the highest step that the P&L has reached
+    // Find the highest step that the P&L has reached (use epsilon to avoid floating-point issues like 0.02 vs 0.0199999)
+    const PNL_EPSILON = 0.0001;
     let newStepIndex = -1;
     for (let i = 0; i < matchingGroup.steps.length; i++) {
       const step = matchingGroup.steps[i];
       const stepPnl = parseFloat(step.pnl || '0');
-      if (currentPnl >= stepPnl) {
+      const meets = currentPnl >= stepPnl - PNL_EPSILON;
+      if (meets) {
         newStepIndex = i;
       } else {
         break;
       }
     }
-    
-    console.log(`🔍 [STOPLIMIT_TRACKER] ${normalizedSymbol}: newStepIndex=${newStepIndex}, currentStepIndex=${currentStepIndex}, willUpdate=${newStepIndex > currentStepIndex && newStepIndex >= 0}`);
     
     // If we've reached a new step, update the StopLimit order
     if (newStepIndex > currentStepIndex && newStepIndex >= 0) {
@@ -5336,8 +5451,6 @@ async function checkStopLimitTracker(symbol, position) {
       const stopOffset = newStep.stopOffset !== undefined && newStep.stopOffset !== null ? parseFloat(newStep.stopOffset) : null;
       const stopAbsolute = parseFloat(newStep.stop || '0');
       const newStopPrice = stopOffset !== null ? (avgPrice + stopOffset) : (stopAbsolute > 0 ? stopAbsolute : 0);
-      
-      console.log(`🔍 [STOPLIMIT_TRACKER] ${normalizedSymbol}: newStopPrice calculation: avgPrice=$${avgPrice.toFixed(2)}, stopOffset=${stopOffset !== null ? stopOffset.toFixed(2) : 'null'}, stopAbsolute=${stopAbsolute.toFixed(2)}, newStopPrice=$${newStopPrice.toFixed(2)}`);
       
       if (newStopPrice > 0) {
         // Use existing StopLimit from repository (already checked above)
@@ -5444,12 +5557,19 @@ async function handleManualBuyFilled(orderId, order, pending) {
       const dbCheckExistingQty = parseInt(dbCheckLeg?.QuantityRemaining || dbCheckLeg?.QuantityOrdered || '0', 10) || 0;
       const dbCheckBuyQty = Math.floor(Number(pending.quantity || (order.Legs?.[0]?.ExecQuantity ?? order.Legs?.[0]?.QuantityOrdered) || 0)) || 0;
       const dbCheckNewTotalQty = dbCheckExistingQty + dbCheckBuyQty;
+      const dbCheckBuyPrice = parseFloat(pending.limitPrice || order.FilledPrice || order.LimitPrice || '0') || 0;
+      const dbCheckPos = positionsCache.get(normalizedSymbol);
+      const dbCheckPosAvg = dbCheckPos ? parseFloat(dbCheckPos.AveragePrice || '0') : 0;
+      const dbCheckPosQty = dbCheckPos ? parseFloat(dbCheckPos.Quantity || '0') : 0;
       if (dbCheckNewTotalQty > 0) {
         console.log(`📊 [REBUY] Updating StopLimit ${dbCheck.orderId} for ${normalizedSymbol} (from DB): ${dbCheckExistingQty} + ${dbCheckBuyQty} = ${dbCheckNewTotalQty}`);
         try {
           const result = await modifyOrderQuantity(dbCheck.orderId, dbCheckNewTotalQty);
           if (result.success) {
             console.log(`✅ [REBUY] Successfully updated StopLimit ${dbCheck.orderId} for ${normalizedSymbol} to ${dbCheckNewTotalQty}`);
+            if (dbCheckBuyPrice > 0) {
+              await updateStopLimitForAddToPosition(normalizedSymbol, dbCheck.orderId, dbCheckPosAvg, dbCheckPosQty, dbCheckBuyPrice, dbCheckBuyQty);
+            }
           } else {
             console.error(`❌ [REBUY] Failed to update StopLimit ${dbCheck.orderId} for ${normalizedSymbol}: ${result.error}`);
           }
@@ -5481,12 +5601,19 @@ async function handleManualBuyFilled(orderId, order, pending) {
         const guardExistingQty = parseInt(guardLeg?.QuantityRemaining || guardLeg?.QuantityOrdered || '0', 10) || 0;
         const guardBuyQty = Math.floor(Number(pending.quantity || (order.Legs?.[0]?.ExecQuantity ?? order.Legs?.[0]?.QuantityOrdered) || 0)) || 0;
         const guardNewTotalQty = guardExistingQty + guardBuyQty;
+        const guardBuyPrice = parseFloat(pending.limitPrice || order.FilledPrice || order.LimitPrice || '0') || 0;
+        const guardPos = positionsCache.get(normalizedSymbol);
+        const guardPosAvg = guardPos ? parseFloat(guardPos.AveragePrice || '0') : 0;
+        const guardPosQty = guardPos ? parseFloat(guardPos.Quantity || '0') : 0;
         if (guardNewTotalQty > 0) {
           console.log(`📊 [REBUY] Updating StopLimit ${existingRepoOrder.orderId} for ${normalizedSymbol}: ${guardExistingQty} + ${guardBuyQty} = ${guardNewTotalQty}`);
           try {
             const result = await modifyOrderQuantity(existingRepoOrder.orderId, guardNewTotalQty);
             if (result.success) {
               console.log(`✅ [REBUY] Successfully updated StopLimit ${existingRepoOrder.orderId} for ${normalizedSymbol} to ${guardNewTotalQty}`);
+              if (guardBuyPrice > 0) {
+                await updateStopLimitForAddToPosition(normalizedSymbol, existingRepoOrder.orderId, guardPosAvg, guardPosQty, guardBuyPrice, guardBuyQty);
+              }
             } else {
               console.error(`❌ [REBUY] Failed to update StopLimit ${existingRepoOrder.orderId} for ${normalizedSymbol}: ${result.error}`);
             }

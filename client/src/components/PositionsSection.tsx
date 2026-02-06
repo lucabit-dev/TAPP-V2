@@ -283,6 +283,21 @@ const PositionsSection: React.FC = () => {
     };
   }, [connectWebSocket, disconnectWebSocket]);
 
+  // Periodic refresh: reconnect every 5 min to keep data fresh (prevents stale/silent connections)
+  const REFRESH_INTERVAL_MS = 3 * 60 * 1000;
+  useEffect(() => {
+    const refreshTimer = window.setInterval(() => {
+      if (wsRef.current?.readyState === WebSocket.OPEN && token) {
+        console.log('🔄 [Positions] Refreshing WebSocket connection...');
+        wsRef.current.close(1000, 'Periodic refresh');
+        wsRef.current = null;
+        setIsConnected(false);
+        window.setTimeout(() => connectWebSocket(), 500);
+      }
+    }, REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(refreshTimer);
+  }, [connectWebSocket, token]);
+
   // Clear Stage & Progress when no positions (all sold)
   useEffect(() => {
     if (mergedPositions.length === 0) setStopLimitProgress(new Map());
