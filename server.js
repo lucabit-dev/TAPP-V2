@@ -495,11 +495,11 @@ let cachePersistenceService = null;
 async function initializeCachePersistence() {
   try {
     const CachePersistenceService = require('./services/cachePersistenceService');
-    cachePersistenceService = new CachePersistenceService(ordersCache, positionsCache, stopLimitOrderRepository);
+    cachePersistenceService = new CachePersistenceService(ordersCache, positionsCache, stopLimitOrderRepository, stopLimitTrackerProgress);
     
     // Load cache from database on startup
     const loaded = await cachePersistenceService.loadFromDatabase();
-    console.log(`✅ Cache persistence initialized: Loaded ${loaded.orders} orders, ${loaded.positions} positions, and ${loaded.stopLimitRepository || 0} StopLimit repository entries from database`);
+    console.log(`✅ Cache persistence initialized: Loaded ${loaded.orders} orders, ${loaded.positions} positions, ${loaded.stopLimitRepository || 0} StopLimit repo, ${loaded.progress || 0} progress entries from database`);
     
     // Start periodic saves
     cachePersistenceService.startPeriodicSave();
@@ -3436,6 +3436,7 @@ function connectPositionsWebSocket() {
           for (const cachedSymbol of toRemove) {
             positionsCache.delete(cachedSymbol);
             stopLimitTrackerProgress.delete(cachedSymbol);
+            if (cachePersistenceService) cachePersistenceService.scheduleProgressDelete(cachedSymbol);
             stopLimitOrderRepository.delete(cachedSymbol);
             stopLimitCreationBySymbol.delete(cachedSymbol);
             recentlySoldSymbols.set(cachedSymbol, Date.now());
@@ -3529,6 +3530,7 @@ function connectPositionsWebSocket() {
           
           // Clean up StopLimit tracker progress
           stopLimitTrackerProgress.delete(normalizedSymbol);
+          if (cachePersistenceService) cachePersistenceService.scheduleProgressDelete(normalizedSymbol);
           
           // Clean up filled StopLimit tracking (position closed, can create new StopLimit if rebought)
           stopLimitFilledSymbols.delete(normalizedSymbol);
@@ -5373,6 +5375,7 @@ async function updateStopLimitForAddToPosition(symbol, orderId, existingAvg, exi
   const result = await modifyStopLimitPrice(orderId, newStopPrice, newLimitPrice);
   if (result.success) {
     stopLimitTrackerProgress.set(normalized, { groupId: matchingGroupId, currentStepIndex: -1, lastPnl: 0, lastUpdate: Date.now() });
+    if (cachePersistenceService) cachePersistenceService.scheduleProgressSave(normalized);
     console.log(`✅ [ADD_TO_POSITION] StopLimit ${orderId} updated to Initial step for ${normalized}`);
   }
   return result;
@@ -5421,6 +5424,7 @@ async function checkStopLimitTracker(symbol, position) {
       // Ensure progress exists for display (Initial) even when outside price range - fixes MARA/RR showing "—"
       if (existingStopLimit && !stopLimitTrackerProgress.has(normalizedSymbol)) {
         stopLimitTrackerProgress.set(normalizedSymbol, { groupId: null, currentStepIndex: -1, lastPnl: currentPnl, lastUpdate: Date.now() });
+        if (cachePersistenceService) cachePersistenceService.scheduleProgressSave(normalizedSymbol);
         console.log(`📊 [STOPLIMIT_TRACKER] ${normalizedSymbol}: No matching group (avg=$${avgPrice.toFixed(2)}), set progress to Initial for display`);
       }
       return; // No matching group or no steps configured
@@ -5473,6 +5477,7 @@ async function checkStopLimitTracker(symbol, position) {
             lastPnl: currentPnl,
             lastUpdate: Date.now()
           });
+          if (cachePersistenceService) cachePersistenceService.scheduleProgressSave(normalizedSymbol);
           console.log(`✅ [STOPLIMIT_TRACKER] Successfully updated StopLimit for ${normalizedSymbol} to step ${newStepIndex + 1}`);
         } else {
           console.error(`❌ [STOPLIMIT_TRACKER] Failed to update StopLimit for ${normalizedSymbol}:`, result.error);
@@ -5484,6 +5489,7 @@ async function checkStopLimitTracker(symbol, position) {
     if (progress) {
       progress.lastPnl = currentPnl;
       progress.lastUpdate = Date.now();
+      if (cachePersistenceService) cachePersistenceService.scheduleProgressSave(normalizedSymbol);
     } else if (matchingGroup && existingStopLimit) {
       // Initialize progress if not exists (only if StopLimit exists)
       stopLimitTrackerProgress.set(normalizedSymbol, {
@@ -5492,6 +5498,7 @@ async function checkStopLimitTracker(symbol, position) {
         lastPnl: currentPnl,
         lastUpdate: Date.now()
       });
+      if (cachePersistenceService) cachePersistenceService.scheduleProgressSave(normalizedSymbol);
     }
   } catch (err) {
     console.error(`❌ [STOPLIMIT_TRACKER] Error checking tracker for ${symbol}:`, err);
@@ -7279,12 +7286,12 @@ app.delete('/api/stoplimit-tracker/config/group/:groupId', requireAuth, async (r
   }
 });
 
-app.get('/api/stoplimit-tracker/progress', requireAuth, (req, res) => {
+app.get('/api/stoplimit-tracker/progress', requireAuth, async (req, res) => {
   try {
-    const progress = Array.from(stopLimitTrackerProgress.entries()).map(([symbol, data]) => ({
-      symbol,
-      ...data
-    }));
+    // Read from DB for multi-instance deployment (any instance returns latest progress)
+    const progress = cachePersistenceService
+      ? await cachePersistenceService.getProgressFromDatabase()
+      : Array.from(stopLimitTrackerProgress.entries()).map(([symbol, data]) => ({ symbol, ...data }));
     res.json({ success: true, data: progress });
   } catch (e) {
     console.error('Error getting StopLimit tracker progress:', e);

@@ -1,29 +1,35 @@
-const { OrderCache, PositionCache, StopLimitRepository, CacheMetadata } = require('../models/cache.model');
+const { OrderCache, PositionCache, StopLimitRepository, StopLimitTrackerProgress, CacheMetadata } = require('../models/cache.model');
 const mongoose = require('mongoose');
 
 class CachePersistenceService {
-  constructor(ordersCache, positionsCache, stopLimitOrderRepository = null) {
+  constructor(ordersCache, positionsCache, stopLimitOrderRepository = null, stopLimitTrackerProgress = null) {
     this.ordersCache = ordersCache;
     this.positionsCache = positionsCache;
     this.stopLimitOrderRepository = stopLimitOrderRepository;
+    this.stopLimitTrackerProgress = stopLimitTrackerProgress;
     this.saveInterval = null;
     this.isSaving = false;
     this.pendingSaves = {
       orders: new Set(),
       positions: new Set(),
-      stopLimitRepository: new Set()
+      stopLimitRepository: new Set(),
+      progress: new Set(),
+      progressDeletes: new Set()
     };
     this.saveDebounceMs = 2000; // Save to DB 2 seconds after last change
+    this.progressSaveDebounceMs = 500; // Progress: 500ms for multi-instance freshness
     this.saveIntervalMs = 30000; // Also save every 30 seconds as backup
     this.lastSaveTime = {
       orders: 0,
       positions: 0,
-      stopLimitRepository: 0
+      stopLimitRepository: 0,
+      progress: 0
     };
     this.saveTimeouts = {
       orders: null,
       positions: null,
-      stopLimitRepository: null
+      stopLimitRepository: null,
+      progress: null
     };
   }
 
@@ -99,15 +105,128 @@ class CachePersistenceService {
         }
       }
 
-      console.log(`✅ CachePersistenceService: Loaded ${loadedOrders} orders, ${loadedPositions} positions, and ${loadedStopLimitRepo} StopLimit repository entries from database`);
+      // Load StopLimit tracker progress if available (for multi-instance)
+      let loadedProgress = 0;
+      if (this.stopLimitTrackerProgress) {
+        const progressFromDb = await StopLimitTrackerProgress.find({}).lean();
+        for (const doc of progressFromDb) {
+          try {
+            const symbol = (doc.symbol || '').toUpperCase();
+            if (symbol) {
+              this.stopLimitTrackerProgress.set(symbol, {
+                groupId: doc.groupId ?? null,
+                currentStepIndex: doc.currentStepIndex ?? -1,
+                lastPnl: doc.lastPnl ?? 0,
+                lastUpdate: doc.lastUpdate ?? Date.now()
+              });
+              loadedProgress++;
+            }
+          } catch (err) {
+            console.error(`⚠️ CachePersistenceService: Error loading progress for ${doc.symbol}:`, err.message);
+          }
+        }
+      }
+
+      console.log(`✅ CachePersistenceService: Loaded ${loadedOrders} orders, ${loadedPositions} positions, ${loadedStopLimitRepo} StopLimit repo, ${loadedProgress} progress entries from database`);
       
       // Update metadata
       await this.updateMetadata(loadedOrders, loadedPositions, loadedStopLimitRepo);
       
-      return { orders: loadedOrders, positions: loadedPositions, stopLimitRepository: loadedStopLimitRepo };
+      return { orders: loadedOrders, positions: loadedPositions, stopLimitRepository: loadedStopLimitRepo, progress: loadedProgress };
     } catch (err) {
       console.error('❌ CachePersistenceService: Error loading from database:', err);
-      return { orders: 0, positions: 0, stopLimitRepository: 0 };
+      return { orders: 0, positions: 0, stopLimitRepository: 0, progress: 0 };
+    }
+  }
+
+  /**
+   * Schedule progress save (debounced). Call when stopLimitTrackerProgress is updated.
+   */
+  scheduleProgressSave(symbol) {
+    if (!this.isDbAvailable() || !this.stopLimitTrackerProgress || !symbol) return;
+    this.pendingSaves.progress.add(String(symbol).toUpperCase());
+    if (this.saveTimeouts.progress) clearTimeout(this.saveTimeouts.progress);
+    this.saveTimeouts.progress = setTimeout(() => this.savePendingProgress(), this.progressSaveDebounceMs);
+  }
+
+  /**
+   * Schedule progress delete. Call when a symbol is removed from stopLimitTrackerProgress.
+   */
+  scheduleProgressDelete(symbol) {
+    if (!this.isDbAvailable() || !symbol) return;
+    const normalized = String(symbol).toUpperCase();
+    this.pendingSaves.progress.delete(normalized);
+    this.pendingSaves.progressDeletes.add(normalized);
+    if (this.saveTimeouts.progress) clearTimeout(this.saveTimeouts.progress);
+    this.saveTimeouts.progress = setTimeout(() => this.savePendingProgress(), this.progressSaveDebounceMs);
+  }
+
+  /**
+   * Save pending progress to database (upserts and deletes)
+   */
+  async savePendingProgress() {
+    if (!this.isDbAvailable() || (!this.pendingSaves.progress.size && !this.pendingSaves.progressDeletes.size)) return;
+    const toDelete = Array.from(this.pendingSaves.progressDeletes);
+    const toSave = Array.from(this.pendingSaves.progress);
+    this.pendingSaves.progressDeletes.clear();
+    this.pendingSaves.progress.clear();
+    this.saveTimeouts.progress = null;
+    try {
+      if (toDelete.length > 0) {
+        await StopLimitTrackerProgress.deleteMany({ symbol: { $in: toDelete } });
+      }
+      if (toSave.length > 0 && this.stopLimitTrackerProgress) {
+        const operations = [];
+        for (const symbol of toSave) {
+          const data = this.stopLimitTrackerProgress.get(symbol);
+          if (data) {
+            operations.push({
+              updateOne: {
+                filter: { symbol },
+                update: {
+                  $set: {
+                    groupId: data.groupId,
+                    currentStepIndex: data.currentStepIndex,
+                    lastPnl: data.lastPnl,
+                    lastUpdate: data.lastUpdate ?? Date.now()
+                  }
+                },
+                upsert: true
+              }
+            });
+          } else {
+            operations.push({ deleteOne: { filter: { symbol } } });
+          }
+        }
+        if (operations.length > 0) {
+          await StopLimitTrackerProgress.bulkWrite(operations, { ordered: false });
+        }
+      }
+      this.lastSaveTime.progress = Date.now();
+    } catch (err) {
+      console.error('❌ CachePersistenceService: Error saving progress to database:', err);
+      toDelete.forEach(s => this.pendingSaves.progressDeletes.add(s));
+      toSave.forEach(s => this.pendingSaves.progress.add(s));
+    }
+  }
+
+  /**
+   * Get all StopLimit tracker progress from database (for multi-instance API)
+   */
+  async getProgressFromDatabase() {
+    if (!this.isDbAvailable()) return [];
+    try {
+      const docs = await StopLimitTrackerProgress.find({}).lean();
+      return docs.map(doc => ({
+        symbol: doc.symbol,
+        groupId: doc.groupId ?? null,
+        currentStepIndex: doc.currentStepIndex ?? -1,
+        lastPnl: doc.lastPnl ?? 0,
+        lastUpdate: doc.lastUpdate ?? Date.now()
+      }));
+    } catch (err) {
+      console.error('❌ CachePersistenceService: Error reading progress from database:', err);
+      return [];
     }
   }
 
@@ -404,6 +523,30 @@ class CachePersistenceService {
         await this.saveStopLimitRepositoryToDatabase();
       }
 
+      // Save StopLimit tracker progress (full sync for multi-instance)
+      if (this.stopLimitTrackerProgress && this.stopLimitTrackerProgress.size > 0) {
+        const progressOps = [];
+        for (const [symbol, data] of this.stopLimitTrackerProgress.entries()) {
+          progressOps.push({
+            updateOne: {
+              filter: { symbol },
+              update: {
+                $set: {
+                  groupId: data.groupId,
+                  currentStepIndex: data.currentStepIndex,
+                  lastPnl: data.lastPnl,
+                  lastUpdate: data.lastUpdate ?? Date.now()
+                }
+              },
+              upsert: true
+            }
+          });
+        }
+        if (progressOps.length > 0) {
+          await StopLimitTrackerProgress.bulkWrite(progressOps, { ordered: false });
+        }
+      }
+
       // Update metadata
       const stopLimitRepoCount = this.stopLimitOrderRepository ? this.stopLimitOrderRepository.size : 0;
       await this.updateMetadata(this.ordersCache.size, this.positionsCache.size, stopLimitRepoCount);
@@ -620,6 +763,10 @@ class CachePersistenceService {
     if (this.saveTimeouts.positions) {
       clearTimeout(this.saveTimeouts.positions);
       this.saveTimeouts.positions = null;
+    }
+    if (this.saveTimeouts.progress) {
+      clearTimeout(this.saveTimeouts.progress);
+      this.saveTimeouts.progress = null;
     }
   }
 

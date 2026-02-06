@@ -39,6 +39,22 @@ const LoadingFallback = () => (
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 const WS_BASE_URL = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:3001';
 
+const VALID_TABS = ['all', 'valid', 'filtered', 'dashboard', 'config-float', 'listas-float-raw', 'manual', 'manual-non-qualified', 'buy-list', 'positions', 'orders', 'l2', 'charts', 'admin'] as const;
+type TabKey = (typeof VALID_TABS)[number];
+
+function getTabFromUrl(): TabKey {
+  const params = new URLSearchParams(window.location.search);
+  const tab = params.get('tab');
+  if (tab && VALID_TABS.includes(tab as TabKey)) return tab as TabKey;
+  return 'manual';
+}
+
+function setTabInUrl(tab: TabKey) {
+  const url = new URL(window.location.href);
+  url.searchParams.set('tab', tab);
+  window.history.replaceState({}, '', url.toString());
+}
+
 interface Alert {
   ticker: string;
   timestamp: string;
@@ -126,7 +142,25 @@ function App() {
   const [newValidAlertsCount, setNewValidAlertsCount] = useState(0);
   const [conditionStats, setConditionStats] = useState<any>(null);
   const [showStats, setShowStats] = useState(false);
-  const [selectedTab, setSelectedTab] = useState<'all' | 'valid' | 'filtered' | 'dashboard' | 'config-float' | 'listas-float-raw' | 'manual' | 'manual-non-qualified' | 'buy-list' | 'positions' | 'orders' | 'l2' | 'charts' | 'admin'>('manual');
+  const [selectedTab, setSelectedTab] = useState<TabKey>(getTabFromUrl);
+
+  const selectTab = useCallback((tab: TabKey) => {
+    setSelectedTab(tab);
+    setTabInUrl(tab);
+  }, []);
+
+  // Sync URL with current tab on mount and when URL changes (e.g. browser back/forward)
+  useEffect(() => {
+    setTabInUrl(selectedTab);
+  }, []);
+  useEffect(() => {
+    const handlePopState = () => {
+      const tab = getTabFromUrl();
+      setSelectedTab(tab);
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
   const [alertsCollapsed, setAlertsCollapsed] = useState(true); // Start collapsed
   const [listsCollapsed, setListsCollapsed] = useState(false); // Start expanded by default for Lists
   const [manualCollapsed, setManualCollapsed] = useState(false); // Start expanded by default for Manual
@@ -638,7 +672,7 @@ function App() {
                   ].map(tab => (
                     <button
                       key={tab.key}
-                      onClick={() => setSelectedTab(tab.key as any)}
+                      onClick={() => selectTab(tab.key as TabKey)}
                       className={`relative px-4 py-2 text-sm font-medium transition-all duration-200 ${
                         selectedTab === tab.key
                           ? 'text-[#eae9e9]'
@@ -678,7 +712,7 @@ function App() {
                   ].map(tab => (
                     <button
                       key={tab.key}
-                      onClick={() => setSelectedTab(tab.key as any)}
+                      onClick={() => selectTab(tab.key as TabKey)}
                       className={`relative px-4 py-2 text-sm font-medium transition-all duration-200 ${
                         selectedTab === tab.key
                           ? 'text-[#eae9e9]'
@@ -721,7 +755,7 @@ function App() {
                   ].map(tab => (
                     <button
                       key={tab.key}
-                      onClick={() => setSelectedTab(tab.key as any)}
+                      onClick={() => selectTab(tab.key as TabKey)}
                       className={`relative px-4 py-2 text-sm font-medium transition-all duration-200 ${
                         selectedTab === tab.key
                           ? 'text-[#eae9e9]'

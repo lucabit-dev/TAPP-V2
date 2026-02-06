@@ -84,6 +84,39 @@ const StopLimitRepositorySchema = new mongoose.Schema(
   }
 );
 
+// Schema for StopLimit tracker progress (shared across instances for multi-instance deployment)
+const StopLimitTrackerProgressSchema = new mongoose.Schema(
+  {
+    symbol: {
+      type: String,
+      required: true,
+      unique: true,
+      index: true,
+      uppercase: true
+    },
+    groupId: {
+      type: String,
+      default: null
+    },
+    currentStepIndex: {
+      type: Number,
+      required: true,
+      default: -1
+    },
+    lastPnl: {
+      type: Number,
+      default: 0
+    },
+    lastUpdate: {
+      type: Number,
+      default: () => Date.now()
+    }
+  },
+  {
+    timestamps: true
+  }
+);
+
 // Schema for cache metadata (to track last sync, etc.)
 const CacheMetadataSchema = new mongoose.Schema(
   {
@@ -126,11 +159,13 @@ const CacheMetadataSchema = new mongoose.Schema(
 const OrderCache = mongoose.models.OrderCache || mongoose.model('OrderCache', OrderCacheSchema);
 const PositionCache = mongoose.models.PositionCache || mongoose.model('PositionCache', PositionCacheSchema);
 const StopLimitRepository = mongoose.models.StopLimitRepository || mongoose.model('StopLimitRepository', StopLimitRepositorySchema);
+const StopLimitTrackerProgress = mongoose.models.StopLimitTrackerProgress || mongoose.model('StopLimitTrackerProgress', StopLimitTrackerProgressSchema);
 const CacheMetadata = mongoose.models.CacheMetadata || mongoose.model('CacheMetadata', CacheMetadataSchema);
 
 module.exports = {
   OrderCache,
   PositionCache,
   StopLimitRepository,
+  StopLimitTrackerProgress,
   CacheMetadata
 };
