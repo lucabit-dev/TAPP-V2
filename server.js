@@ -5389,10 +5389,18 @@ async function checkStopLimitTracker(symbol, position) {
   try {
     const normalizedSymbol = (symbol || '').toUpperCase();
     const avgPrice = parseFloat(position.AveragePrice || '0');
-    // Config steps are P&L per share; use UnrealizedProfitLossQty, fallback to total/quantity
-    const totalPnl = parseFloat(position.UnrealizedProfitLoss || '0');
     const qty = parseFloat(position.Quantity || '0') || 1;
-    const pnlPerShare = parseFloat(position.UnrealizedProfitLossQty || '');
+    // Config steps are P&L per share; try multiple keys (broker may use different casing)
+    const totalPnl = parseFloat(position.UnrealizedProfitLoss || position.unrealizedProfitLoss || '0');
+    const pnlPerShareRaw = position.UnrealizedProfitLossQty ?? position.unrealizedProfitLossQty;
+    let pnlPerShare = parseFloat(pnlPerShareRaw || '');
+    if (isNaN(pnlPerShare) && avgPrice > 0) {
+      // Fallback: compute from Last or MarkToMarketPrice - AveragePrice (for long positions)
+      const lastPrice = parseFloat(position.Last || position.MarkToMarketPrice || position.last || position.markToMarketPrice || '0');
+      if (!isNaN(lastPrice) && lastPrice > 0) {
+        pnlPerShare = lastPrice - avgPrice;
+      }
+    }
     const currentPnl = !isNaN(pnlPerShare) ? pnlPerShare : (qty > 0 ? totalPnl / qty : 0);
     
     if (avgPrice <= 0 || !normalizedSymbol) return;
@@ -5455,8 +5463,13 @@ async function checkStopLimitTracker(symbol, position) {
       // stopOffset = difference from buy price (stop = buy + offset). stop = legacy absolute price.
       const stopOffset = newStep.stopOffset !== undefined && newStep.stopOffset !== null ? parseFloat(newStep.stopOffset) : null;
       const stopAbsolute = parseFloat(newStep.stop || '0');
-      const newStopPrice = stopOffset !== null ? (avgPrice + stopOffset) : (stopAbsolute > 0 ? stopAbsolute : 0);
-      
+      let newStopPrice = stopOffset !== null ? (avgPrice + stopOffset) : (stopAbsolute > 0 ? stopAbsolute : 0);
+      if (newStopPrice <= 0 && matchingGroup?.initialStopPrice != null) {
+        newStopPrice = avgPrice + parseFloat(matchingGroup.initialStopPrice);
+      }
+      if (newStopPrice <= 0) {
+        console.warn(`⚠️ [STOPLIMIT_TRACKER] ${normalizedSymbol} reached step ${newStepIndex + 1} but step has no stopOffset/stop - configure step in Stop Limit Adjustment`);
+      }
       if (newStopPrice > 0) {
         // Use existing StopLimit from repository (already checked above)
         const stopLimitOrderId = existingStopLimit.orderId;
@@ -5471,7 +5484,6 @@ async function checkStopLimitTracker(symbol, position) {
         const result = await modifyStopLimitPrice(stopLimitOrderId, newStopPrice, roundedLimitPrice);
         
         if (result.success) {
-          // Update progress
           stopLimitTrackerProgress.set(normalizedSymbol, {
             groupId: matchingGroupId,
             currentStepIndex: newStepIndex,
@@ -5483,6 +5495,15 @@ async function checkStopLimitTracker(symbol, position) {
         } else {
           console.error(`❌ [STOPLIMIT_TRACKER] Failed to update StopLimit for ${normalizedSymbol}:`, result.error);
         }
+      } else {
+        // Still update progress for display (P&L threshold met) even if StopLimit couldn't be updated
+        stopLimitTrackerProgress.set(normalizedSymbol, {
+          groupId: matchingGroupId,
+          currentStepIndex: newStepIndex,
+          lastPnl: currentPnl,
+          lastUpdate: Date.now()
+        });
+        if (cachePersistenceService) cachePersistenceService.scheduleProgressSave(normalizedSymbol);
       }
     }
     
