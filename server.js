@@ -137,7 +137,7 @@ app.get('/api/protected/ping', requireDbReady, requireAuth, (req, res) => {
 // Admin: clear MongoDB position/order caches (requires admin password only - no JWT needed for unlock)
 app.post('/api/admin/clear-caches', requireDbReady, async (req, res) => {
   try {
-    const { password, clearPositions, clearOrders } = req.body || {};
+    const { password, clearPositions, clearOrders, clearProgress } = req.body || {};
     const adminPassword = (process.env.ADMIN_PASSWORD || '').trim();
     if (!adminPassword) {
       return res.status(503).json({ error: 'Admin password not configured (set ADMIN_PASSWORD in .env)' });
@@ -147,7 +147,8 @@ app.post('/api/admin/clear-caches', requireDbReady, async (req, res) => {
     }
     let positionsDeleted = 0;
     let ordersDeleted = 0;
-    const { OrderCache, PositionCache, StopLimitRepository } = require('./models/cache.model');
+    let progressDeleted = 0;
+    const { OrderCache, PositionCache, StopLimitRepository, StopLimitTrackerProgress } = require('./models/cache.model');
     if (clearPositions) {
       const posResult = await PositionCache.deleteMany({});
       positionsDeleted = posResult.deletedCount || 0;
@@ -162,7 +163,17 @@ app.post('/api/admin/clear-caches', requireDbReady, async (req, res) => {
       ordersCache.clear();
       if (cachePersistenceService) cachePersistenceService.pendingSaves.orders.clear();
     }
-    return res.json({ success: true, data: { positionsDeleted, ordersDeleted } });
+    if (clearProgress) {
+      const progressResult = await StopLimitTrackerProgress.deleteMany({});
+      progressDeleted = progressResult.deletedCount || 0;
+      stopLimitTrackerProgress.clear();
+      if (cachePersistenceService) {
+        cachePersistenceService.pendingSaves.progress.clear();
+        cachePersistenceService.pendingSaves.progressDeletes.clear();
+      }
+      console.log(`🗑️ [ADMIN] Cleared ${progressDeleted} StopLimit tracker progress entries`);
+    }
+    return res.json({ success: true, data: { positionsDeleted, ordersDeleted, progressDeleted } });
   } catch (err) {
     console.error('Admin clear-caches error:', err);
     return res.status(500).json({ error: err.message || 'Failed to clear caches' });

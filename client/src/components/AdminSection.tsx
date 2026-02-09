@@ -9,7 +9,7 @@ const AdminSection: React.FC = () => {
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [lastResult, setLastResult] = useState<{ positionsDeleted: number; ordersDeleted: number } | null>(null);
+  const [lastResult, setLastResult] = useState<{ positionsDeleted: number; ordersDeleted: number; progressDeleted?: number } | null>(null);
 
   const handleUnlock = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -40,7 +40,7 @@ const AdminSection: React.FC = () => {
     }
   };
 
-  const handleClearCaches = async (clearPositions: boolean, clearOrders: boolean) => {
+  const handleClearCaches = async (clearPositions: boolean, clearOrders: boolean, clearProgress: boolean = false) => {
     setError(null);
     setLastResult(null);
     setLoading(true);
@@ -51,7 +51,8 @@ const AdminSection: React.FC = () => {
         body: JSON.stringify({
           password: password.trim(),
           clearPositions,
-          clearOrders
+          clearOrders,
+          clearProgress
         })
       });
       const data = await res.json();
@@ -59,7 +60,7 @@ const AdminSection: React.FC = () => {
         setError(data.error || 'Failed to clear caches');
         return;
       }
-      setLastResult(data.data || { positionsDeleted: 0, ordersDeleted: 0 });
+      setLastResult(data.data || { positionsDeleted: 0, ordersDeleted: 0, progressDeleted: 0 });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Request failed');
     } finally {
@@ -79,7 +80,7 @@ const AdminSection: React.FC = () => {
       <div className="max-w-lg mx-auto w-full space-y-6">
         <div className="border border-[#2a2820] rounded-lg bg-[#0f0e0a] p-6">
           <h2 className="text-lg font-semibold text-[#eae9e9] mb-1 uppercase tracking-wider">Admin</h2>
-          <p className="text-xs text-[#969696] mb-6">Clear MongoDB position and order cache collections.</p>
+          <p className="text-xs text-[#969696] mb-6">Clear MongoDB position, order, and StopLimit tracker progress cache collections.</p>
 
           {!isUnlocked ? (
             <form onSubmit={handleUnlock} className="space-y-4">
@@ -132,7 +133,8 @@ const AdminSection: React.FC = () => {
               )}
               {lastResult && (
                 <div className="text-sm text-[#4ec9b0] bg-[#0d3a2e]/30 border border-[#22c55e]/30 rounded-lg p-3">
-                  Cleared: {lastResult.positionsDeleted} position(s), {lastResult.ordersDeleted} order(s).
+                  Cleared: {lastResult.positionsDeleted} position(s), {lastResult.ordersDeleted} order(s)
+                  {lastResult.progressDeleted !== undefined && `, ${lastResult.progressDeleted} progress entry/entries`}.
                 </div>
               )}
               <div className="grid grid-cols-1 gap-3">
@@ -151,6 +153,14 @@ const AdminSection: React.FC = () => {
                   className="py-3 px-4 bg-[#2a2820] border border-[#3e3e42] text-[#eae9e9] rounded-lg font-medium hover:border-[#22c55e]/50 hover:bg-[#22c55e]/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   Clear orders cache (MongoDB)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleClearCaches(false, false, true)}
+                  disabled={loading}
+                  className="py-3 px-4 bg-[#2a2820] border border-[#3e3e42] text-[#eae9e9] rounded-lg font-medium hover:border-[#22c55e]/50 hover:bg-[#22c55e]/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  Clear StopLimit tracker progress (MongoDB)
                 </button>
                 <button
                   type="button"
