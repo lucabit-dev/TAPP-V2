@@ -386,7 +386,10 @@ function registerStopLimitOrder(msg) {
       // This prevents loops when StopLimit is filled but position still exists
       if (isStopLimitFilled(msg)) {
         stopLimitFilledSymbols.set(symbol, { orderId, timestamp: Date.now() });
-        console.log(`🏷️ [STOPLIMIT_REPO] Marked ${symbol} as having filled StopLimit (order ${orderId}) - will prevent new creation`);
+        // Clear Stage & Progress when StopLimit fills (position is being sold)
+        stopLimitTrackerProgress.delete(symbol);
+        if (cachePersistenceService) cachePersistenceService.scheduleProgressDelete(symbol);
+        console.log(`🏷️ [STOPLIMIT_REPO] Marked ${symbol} as having filled StopLimit (order ${orderId}) - cleared Stage & Progress`);
       }
       
       console.log(`🗑️ [STOPLIMIT_REPO] Removed StopLimit order for ${symbol}: ${orderId} (status: ${status})`);
@@ -1040,13 +1043,67 @@ setInterval(() => {
 
 // Live P&L tracking: periodically re-check StopLimit tracker for positions with active StopLimits
 // Iterate over positionsCache (like batch handler) so we never miss symbols after long uptime / stale connections
+// CRITICAL: Run even if WebSocket is down - use cached positions to keep StopLimit Adjustment working
 const STOPLIMIT_PNL_CHECK_MS = 5000; // 5 seconds
-setInterval(() => {
-  if (!positionsWs || positionsWs.readyState !== WebSocket.OPEN) return;
+let lastPeriodicCheckTime = Date.now();
+let lastPeriodicCheckLog = 0;
+setInterval(async () => {
+  const now = Date.now();
+  const wsSilent = !lastPositionUpdateTime || (now - lastPositionUpdateTime) > 5 * 60 * 1000; // 5 min silence
+  let checkedCount = 0;
+  let dbFallbackCount = 0;
+  
+  // Primary: Check all positions in cache that have StopLimits (even if WebSocket is temporarily down)
   for (const [symbol, pos] of positionsCache) {
     if (pos && parseFloat(pos.Quantity || '0') > 0 && stopLimitOrderRepository.has(symbol)) {
       checkStopLimitTracker(symbol, pos);
+      checkedCount++;
     }
+  }
+  
+  // Secondary: Check StopLimit repository for symbols with StopLimits that might not be in cache
+  // This catches cases where cache is stale but StopLimits exist
+  if (stopLimitOrderRepository.size > 0) {
+    for (const [symbol, _repoEntry] of stopLimitOrderRepository) {
+      const cachedPos = positionsCache.get(symbol);
+      if (cachedPos && parseFloat(cachedPos.Quantity || '0') > 0) {
+        // Already checked above, skip
+        continue;
+      }
+      
+      // Position not in cache - try to get from DB (fallback for stale cache or WebSocket down)
+      if (cachePersistenceService) {
+        const dbPos = await cachePersistenceService.getPositionForSymbol(symbol);
+        if (dbPos && parseFloat(dbPos.Quantity || '0') > 0) {
+          // Update cache with DB position for future checks
+          positionsCache.set(symbol, { ...dbPos, lastUpdated: Date.now() });
+          checkStopLimitTracker(symbol, dbPos);
+          dbFallbackCount++;
+        }
+      }
+    }
+  }
+  
+  // Log periodically (every 60s) to track that checks are running
+  if (now - lastPeriodicCheckLog > 60000) {
+    const wsStatus = positionsWs ? (positionsWs.readyState === WebSocket.OPEN ? 'OPEN' : `CLOSED(${positionsWs.readyState})`) : 'NULL';
+    const lastUpdateAgo = lastPositionUpdateTime ? Math.round((now - lastPositionUpdateTime) / 1000) : 'never';
+    console.log(`📊 [STOPLIMIT_TRACKER] Periodic check: ${checkedCount} from cache, ${dbFallbackCount} from DB, WS: ${wsStatus}, last update: ${lastUpdateAgo}s ago`);
+    lastPeriodicCheckLog = now;
+  }
+  
+  // If WebSocket has been silent for 5+ minutes, refresh positions from DB every 30 seconds
+  if (wsSilent && cachePersistenceService && stopLimitOrderRepository.size > 0 && (now - lastPeriodicCheckTime) > 30000) {
+    console.warn(`⚠️ [STOPLIMIT_TRACKER] Positions WS silent for ${Math.round((now - lastPositionUpdateTime) / 1000)}s - refreshing positions from DB`);
+    try {
+      const loaded = await cachePersistenceService.loadFromDatabase();
+      if (loaded.positions > 0) {
+        console.log(`✅ [STOPLIMIT_TRACKER] Refreshed ${loaded.positions} positions from DB`);
+      }
+    } catch (err) {
+      console.error(`❌ [STOPLIMIT_TRACKER] Error refreshing positions from DB:`, err.message);
+    }
+    lastPeriodicCheckTime = now;
   }
 }, STOPLIMIT_PNL_CHECK_MS);
 
@@ -7316,8 +7373,19 @@ app.get('/api/stoplimit-tracker/progress', requireAuth, async (req, res) => {
     if (symbolsParam && typeof symbolsParam === 'string') {
       const requestedSymbols = symbolsParam.split(',').map(s => (s || '').trim().toUpperCase()).filter(Boolean);
       for (const symbol of requestedSymbols) {
-        const pos = positionsCache.get(symbol);
-        if (pos && parseFloat(pos.Quantity || '0') > 0 && stopLimitOrderRepository.has(symbol)) {
+        if (!stopLimitOrderRepository.has(symbol)) continue;
+        
+        let pos = positionsCache.get(symbol);
+        // Fallback to DB if not in cache (handles stale cache after long uptime)
+        if ((!pos || parseFloat(pos.Quantity || '0') <= 0) && cachePersistenceService) {
+          pos = await cachePersistenceService.getPositionForSymbol(symbol);
+          if (pos) {
+            // Update cache with DB position for future checks
+            positionsCache.set(symbol, { ...pos, lastUpdated: Date.now() });
+          }
+        }
+        
+        if (pos && parseFloat(pos.Quantity || '0') > 0) {
           await checkStopLimitTracker(symbol, pos);
         }
       }
@@ -8174,6 +8242,11 @@ app.post('/api/sell', requireDbReady, requireAuth, async (req, res) => {
         console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (after creation)`);
       }
       
+      // CRITICAL: Clear Stage & Progress when position is manually sold
+      stopLimitTrackerProgress.delete(normalizedSymbol);
+      if (cachePersistenceService) cachePersistenceService.scheduleProgressDelete(normalizedSymbol);
+      console.log(`📊 [MANUAL_SELL] Cleared Stage & Progress for ${normalizedSymbol}`);
+      
       // CRITICAL: Clean up any cancelled/filled StopLimit orders in cache for this symbol
       // This prevents finding stale orders when rebuying
       for (const [orderId, cachedOrder] of ordersCache.entries()) {
@@ -8450,6 +8523,15 @@ app.post('/api/sell_all', requireDbReady, requireAuth, async (req, res) => {
             }
           }
         }
+      }
+      
+      // Clear Stage & Progress for all positions when Sell All executes
+      for (const symbol of allTrackedSymbols) {
+        stopLimitTrackerProgress.delete(symbol);
+        if (cachePersistenceService) cachePersistenceService.scheduleProgressDelete(symbol);
+      }
+      if (allTrackedSymbols.size > 0) {
+        console.log(`📊 [SELL_ALL] Cleared Stage & Progress for ${allTrackedSymbols.size} position(s)`);
       }
     }
     
