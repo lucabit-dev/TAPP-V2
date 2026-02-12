@@ -1019,16 +1019,21 @@ setInterval(async () => {
 
     // Positions WebSocket activity watchdog: if we have StopLimits to update but no position updates, force reconnect.
     // Stop Limit Adjustment depends on position updates to call checkStopLimitTracker. Silent connection = no updates.
+    // CRITICAL: More aggressive reconnect (2 min) when StopLimits exist to ensure P&L tracking works
     if (process.env.PNL_API_KEY && typeof connectPositionsWebSocket === 'function') {
       const posWsOpen = positionsWs && positionsWs.readyState === WebSocket.OPEN;
       const hasStopLimits = stopLimitOrderRepository && stopLimitOrderRepository.size > 0;
       if (posWsOpen && hasStopLimits && lastPositionUpdateTime != null) {
         const idleMs = now - lastPositionUpdateTime;
-        const POSITIONS_IDLE_RECONNECT_MS = 3 * 60 * 1000; // 3 min - need P&L updates for Stop Limit Adjustment
+        const POSITIONS_IDLE_RECONNECT_MS = 2 * 60 * 1000; // 2 min (reduced from 3 min) - need P&L updates for Stop Limit Adjustment
         if (idleMs >= POSITIONS_IDLE_RECONNECT_MS) {
           console.warn(`⚠️ [POSITIONS_WS] No position updates for ${Math.round(idleMs / 1000)}s despite ${stopLimitOrderRepository.size} StopLimit(s) - forcing reconnect (Stop Limit Adjustment requires position updates)`);
           connectPositionsWebSocket();
         }
+      } else if (posWsOpen && !lastPositionUpdateTime) {
+        // WebSocket reports OPEN but never received any updates - likely stale
+        console.warn(`⚠️ [POSITIONS_WS] WebSocket reports OPEN but never received updates - forcing reconnect (stale connection)`);
+        connectPositionsWebSocket();
       }
     }
     
@@ -1040,14 +1045,26 @@ setInterval(async () => {
   }
 }, 120000); // Every 2 minutes
 
-// Proactive refresh: reconnect Positions WebSocket every 5 min to prevent stale/silent connections
+// Proactive refresh: reconnect Positions WebSocket every 3 min to prevent stale/silent connections
 // Cloud platforms (Vercel, Railway) can drop WebSocket traffic silently; periodic refresh keeps data fresh
-const POSITIONS_WS_REFRESH_MS = 5 * 60 * 1000; // 5 minutes
+// CRITICAL: Force reconnect even if WebSocket reports OPEN but hasn't received updates (detects stale connections)
+const POSITIONS_WS_REFRESH_MS = 3 * 60 * 1000; // 3 minutes (reduced from 5 min for better reliability)
 setInterval(() => {
   if (process.env.PNL_API_KEY && typeof connectPositionsWebSocket === 'function') {
-    if (positionsWs && positionsWs.readyState === WebSocket.OPEN) {
-      console.log('🔄 [POSITIONS_WS] Periodic refresh: reconnecting to keep data fresh');
+    const wsOpen = positionsWs && positionsWs.readyState === WebSocket.OPEN;
+    const hasRecentUpdate = lastPositionUpdateTime && (Date.now() - lastPositionUpdateTime) < 2 * 60 * 1000; // 2 min threshold
+    
+    // Force reconnect if:
+    // 1. WebSocket is OPEN but hasn't received updates recently (stale connection)
+    // 2. WebSocket is OPEN and it's been 3+ minutes (periodic refresh)
+    if (wsOpen && (!hasRecentUpdate || !lastPositionUpdateTime)) {
+      const silentFor = lastPositionUpdateTime ? Math.round((Date.now() - lastPositionUpdateTime) / 1000) : 'unknown';
+      console.log(`🔄 [POSITIONS_WS] Periodic refresh: reconnecting (silent for ${silentFor}s, WS reports OPEN but stale)`);
       connectPositionsWebSocket();
+    } else if (wsOpen) {
+      // WebSocket is open and has recent updates - just log for monitoring
+      const lastUpdateAgo = lastPositionUpdateTime ? Math.round((Date.now() - lastPositionUpdateTime) / 1000) : 'unknown';
+      console.log(`✅ [POSITIONS_WS] Connection healthy (last update: ${lastUpdateAgo}s ago)`);
     }
   }
 }, POSITIONS_WS_REFRESH_MS);
@@ -3987,6 +4004,24 @@ function connectOrdersWebSocket() {
               console.log(`✅ [DEBUG] BUY FLL for ${normalizedSymbol} - cleared StopLimit filled tracking (rebuy: new position needs new StopLimit)`);
             }
             
+            // CRITICAL: For tracked orders, call handleManualBuyFilled IMMEDIATELY without delay
+            // Tracked orders should be processed immediately - no delay needed for reconnect window
+            // Use setImmediate to ensure it runs in the next event loop tick but doesn't block the WebSocket handler
+            if (!stopLimitCreationInProgress.has(orderId)) {
+              setImmediate(() => {
+                handleManualBuyFilled(orderId, order, pending).catch(err => {
+                  console.error(`❌ [DEBUG] Error in handleManualBuyFilled for ${symbol} (order ${orderId}):`, err);
+                  console.error(`❌ [DEBUG] Stack:`, err.stack);
+                  // On error, remove from processed set so it can be retried if needed
+                  processedFllOrders.delete(orderId);
+                });
+              });
+            } else {
+              console.log(`⏸️ [DEBUG] StopLimit creation already in progress for ${orderId}, skipping WebSocket trigger`);
+            }
+            return; // Don't continue with delay logic below for tracked orders
+            
+            /*
             // CRITICAL: Check repository FIRST before processing to prevent duplicate creation
             // If a StopLimit already exists in repository, just update quantity instead of creating new one
             const existingRepoOrder = getActiveStopLimitOrder(normalizedSymbol);
