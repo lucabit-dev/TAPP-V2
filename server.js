@@ -1019,21 +1019,16 @@ setInterval(async () => {
 
     // Positions WebSocket activity watchdog: if we have StopLimits to update but no position updates, force reconnect.
     // Stop Limit Adjustment depends on position updates to call checkStopLimitTracker. Silent connection = no updates.
-    // CRITICAL: More aggressive reconnect (2 min) when StopLimits exist to ensure P&L tracking works
     if (process.env.PNL_API_KEY && typeof connectPositionsWebSocket === 'function') {
       const posWsOpen = positionsWs && positionsWs.readyState === WebSocket.OPEN;
       const hasStopLimits = stopLimitOrderRepository && stopLimitOrderRepository.size > 0;
       if (posWsOpen && hasStopLimits && lastPositionUpdateTime != null) {
         const idleMs = now - lastPositionUpdateTime;
-        const POSITIONS_IDLE_RECONNECT_MS = 2 * 60 * 1000; // 2 min (reduced from 3 min) - need P&L updates for Stop Limit Adjustment
+        const POSITIONS_IDLE_RECONNECT_MS = 3 * 60 * 1000; // 3 min - need P&L updates for Stop Limit Adjustment
         if (idleMs >= POSITIONS_IDLE_RECONNECT_MS) {
           console.warn(`⚠️ [POSITIONS_WS] No position updates for ${Math.round(idleMs / 1000)}s despite ${stopLimitOrderRepository.size} StopLimit(s) - forcing reconnect (Stop Limit Adjustment requires position updates)`);
           connectPositionsWebSocket();
         }
-      } else if (posWsOpen && !lastPositionUpdateTime) {
-        // WebSocket reports OPEN but never received any updates - likely stale
-        console.warn(`⚠️ [POSITIONS_WS] WebSocket reports OPEN but never received updates - forcing reconnect (stale connection)`);
-        connectPositionsWebSocket();
       }
     }
     
@@ -1045,26 +1040,14 @@ setInterval(async () => {
   }
 }, 120000); // Every 2 minutes
 
-// Proactive refresh: reconnect Positions WebSocket every 3 min to prevent stale/silent connections
+// Proactive refresh: reconnect Positions WebSocket every 5 min to prevent stale/silent connections
 // Cloud platforms (Vercel, Railway) can drop WebSocket traffic silently; periodic refresh keeps data fresh
-// CRITICAL: Force reconnect even if WebSocket reports OPEN but hasn't received updates (detects stale connections)
-const POSITIONS_WS_REFRESH_MS = 3 * 60 * 1000; // 3 minutes (reduced from 5 min for better reliability)
+const POSITIONS_WS_REFRESH_MS = 5 * 60 * 1000; // 5 minutes
 setInterval(() => {
   if (process.env.PNL_API_KEY && typeof connectPositionsWebSocket === 'function') {
-    const wsOpen = positionsWs && positionsWs.readyState === WebSocket.OPEN;
-    const hasRecentUpdate = lastPositionUpdateTime && (Date.now() - lastPositionUpdateTime) < 2 * 60 * 1000; // 2 min threshold
-    
-    // Force reconnect if:
-    // 1. WebSocket is OPEN but hasn't received updates recently (stale connection)
-    // 2. WebSocket is OPEN and it's been 3+ minutes (periodic refresh)
-    if (wsOpen && (!hasRecentUpdate || !lastPositionUpdateTime)) {
-      const silentFor = lastPositionUpdateTime ? Math.round((Date.now() - lastPositionUpdateTime) / 1000) : 'unknown';
-      console.log(`🔄 [POSITIONS_WS] Periodic refresh: reconnecting (silent for ${silentFor}s, WS reports OPEN but stale)`);
+    if (positionsWs && positionsWs.readyState === WebSocket.OPEN) {
+      console.log('🔄 [POSITIONS_WS] Periodic refresh: reconnecting to keep data fresh');
       connectPositionsWebSocket();
-    } else if (wsOpen) {
-      // WebSocket is open and has recent updates - just log for monitoring
-      const lastUpdateAgo = lastPositionUpdateTime ? Math.round((Date.now() - lastPositionUpdateTime) / 1000) : 'unknown';
-      console.log(`✅ [POSITIONS_WS] Connection healthy (last update: ${lastUpdateAgo}s ago)`);
     }
   }
 }, POSITIONS_WS_REFRESH_MS);
@@ -3204,25 +3187,23 @@ async function sendBuyOrder(symbol, configId = null, groupKey = null) {
       };
     }
 
-    // Get current stock price using Polygon service
+    // Buy price from Polygon only (ask-first for fast fill)
     let currentPrice = null;
     try {
-      currentPrice = await polygonService.getCurrentPrice(symbol);
+      currentPrice = await Promise.race([
+        polygonService.getBestPriceForBuy(symbol),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('Price timeout')), 2500))
+      ]);
       if (!currentPrice || currentPrice <= 0) {
-        console.warn(`⚠️ Could not get valid price for ${symbol}, trying lastClose from analysis...`);
         const analysis = await analyzeSymbol(symbol);
         currentPrice = analysis?.lastClose || null;
       }
     } catch (priceErr) {
-      console.error(`Error getting price for ${symbol}:`, priceErr.message);
       try {
         const analysis = await analyzeSymbol(symbol);
         currentPrice = analysis?.lastClose || null;
-      } catch (analyzeErr) {
-        console.error(`Error analyzing ${symbol} for price:`, analyzeErr.message);
-      }
+      } catch (_) {}
     }
-    
     if (!currentPrice || currentPrice <= 0) {
       return {
         success: false,
@@ -3535,6 +3516,8 @@ function connectPositionsWebSocket() {
             const pos = positionsCache.get(s);
             if (pos && stopLimitOrderRepository.has(s)) checkStopLimitTracker(s, pos);
           }
+          // Re-broadcast manual list so symbols with positions disappear from Manual section
+          if (typeof broadcastManualUpdate === 'function') broadcastManualUpdate();
           return;
         }
         
@@ -3584,6 +3567,8 @@ function connectPositionsWebSocket() {
             
             // Check StopLimit tracker for P&L-based updates
             checkStopLimitTracker(normalizedSymbol, dataObj);
+            // Re-broadcast manual list so newly held symbol disappears from Manual section
+            if (typeof broadcastManualUpdate === 'function') broadcastManualUpdate();
           }
         } else {
           // Position closed or quantity is 0, remove from cache
@@ -3622,6 +3607,8 @@ function connectPositionsWebSocket() {
           stopLimitFilledSymbols.delete(normalizedSymbol);
           
           console.log(`📊 Position removed from cache: ${symbol}`);
+          // Re-broadcast manual list so sold symbol can appear again in Manual section
+          if (typeof broadcastManualUpdate === 'function') broadcastManualUpdate();
         }
         
       } catch (err) {
@@ -3890,6 +3877,7 @@ function connectOrdersWebSocket() {
             }
             
             const normalizedSymbol = (symbol || '').toUpperCase();
+            const buySource = (pending.source || 'manual').toLowerCase();
             
             // CRITICAL: Check if StopLimit already exists BEFORE marking as processed (recover from DB if missing from cache)
             const existingStopLimit = await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
@@ -3898,17 +3886,11 @@ function connectOrdersWebSocket() {
               // Mark as processed to prevent retry
               processedFllOrders.add(orderId);
               pendingManualBuyOrders.delete(orderId);
-            // Re-buy: use actual position quantity from positionsCache (handles rapid successive buys)
-            // This ensures we always use the correct total quantity even when multiple orders come in quick succession
+            // Re-buy: add new bought quantity to existing stop-limit quantity
             const existingLeg = existingStopLimit.order?.Legs?.[0];
             const existingStopLimitQty = parseInt(existingLeg?.QuantityRemaining || existingLeg?.QuantityOrdered || '0', 10) || 0;
-            const position = positionsCache.get(normalizedSymbol);
-            const positionQuantity = position ? Math.floor(parseFloat(position.Quantity || '0')) : 0;
-            const newTotalQty = positionQuantity > 0 ? positionQuantity : (existingStopLimitQty + Math.floor(Number(pending.quantity || 0)));
-            
-            if (positionQuantity > 0 && positionQuantity !== (existingStopLimitQty + Math.floor(Number(pending.quantity || 0)))) {
-              console.log(`📊 [QUANTITY_FIX] Using position quantity ${positionQuantity} instead of calculated ${existingStopLimitQty + Math.floor(Number(pending.quantity || 0))} for ${normalizedSymbol} (rapid successive buys)`);
-            }
+            const newBuyQty = Math.floor(Number(pending.quantity || 0)) || 0;
+            const newTotalQty = existingStopLimitQty + newBuyQty;
             const newBuyPrice = parseFloat(order.FilledPrice || pending.limitPrice || order.LimitPrice || '0') || 0;
             const pos = positionsCache.get(normalizedSymbol);
             const existingPosAvg = pos ? parseFloat(pos.AveragePrice || '0') : 0;
@@ -3953,16 +3935,11 @@ function connectOrdersWebSocket() {
                 // Mark as processed to prevent retry
                 processedFllOrders.add(orderId);
                 pendingManualBuyOrders.delete(orderId);
-                // Re-buy: use actual position quantity from positionsCache (handles rapid successive buys)
+                // Re-buy: add new bought quantity to existing stop-limit quantity
                 const dbLeg = dbCheck.order?.Legs?.[0];
                 const dbExistingQty = parseInt(dbLeg?.QuantityRemaining || dbLeg?.QuantityOrdered || '0', 10) || 0;
-                const dbPosition = positionsCache.get(normalizedSymbol);
-                const dbPositionQuantity = dbPosition ? Math.floor(parseFloat(dbPosition.Quantity || '0')) : 0;
-                const dbNewTotalQty = dbPositionQuantity > 0 ? dbPositionQuantity : (dbExistingQty + Math.floor(Number(pending.quantity || 0)));
-                
-                if (dbPositionQuantity > 0 && dbPositionQuantity !== (dbExistingQty + Math.floor(Number(pending.quantity || 0)))) {
-                  console.log(`📊 [QUANTITY_FIX] Using position quantity ${dbPositionQuantity} instead of calculated ${dbExistingQty + Math.floor(Number(pending.quantity || 0))} for ${normalizedSymbol} (rapid successive buys)`);
-                }
+                const dbNewBuyQty = Math.floor(Number(pending.quantity || 0)) || 0;
+                const dbNewTotalQty = dbExistingQty + dbNewBuyQty;
                 const dbNewBuyPrice = parseFloat(order.FilledPrice || pending.limitPrice || order.LimitPrice || '0') || 0;
                 const dbPos = positionsCache.get(normalizedSymbol);
                 const dbPosAvg = dbPos ? parseFloat(dbPos.AveragePrice || '0') : 0;
@@ -4004,22 +3981,100 @@ function connectOrdersWebSocket() {
               console.log(`✅ [DEBUG] BUY FLL for ${normalizedSymbol} - cleared StopLimit filled tracking (rebuy: new position needs new StopLimit)`);
             }
             
-            // CRITICAL: For tracked orders, call handleManualBuyFilled IMMEDIATELY without delay
-            // Tracked orders should be processed immediately - no delay needed for reconnect window
-            // Use setImmediate to ensure it runs in the next event loop tick but doesn't block the WebSocket handler
+            // CRITICAL: Check repository FIRST before processing to prevent duplicate creation
+            // If a StopLimit already exists in repository, just update quantity instead of creating new one
+            const existingRepoOrder = getActiveStopLimitOrder(normalizedSymbol);
+            if (existingRepoOrder) {
+              console.log(`✅ [DEBUG] StopLimit already exists in repository for ${normalizedSymbol} (${existingRepoOrder.orderId}). Re-buy: updating quantity (existing + new buy).`);
+              
+              // Re-buy: add new bought quantity to existing stop-limit quantity
+              const repoLeg = existingRepoOrder.order?.Legs?.[0];
+              const repoExistingQty = parseInt(repoLeg?.QuantityRemaining || repoLeg?.QuantityOrdered || '0', 10) || 0;
+              const repoNewBuyQty = Math.floor(Number(pending.quantity || 0)) || 0;
+              const repoNewTotalQty = repoExistingQty + repoNewBuyQty;
+              const repoNewBuyPrice = parseFloat(order.FilledPrice || pending.limitPrice || order.LimitPrice || '0') || 0;
+              const repoPos = positionsCache.get(normalizedSymbol);
+              const repoPosAvg = repoPos ? parseFloat(repoPos.AveragePrice || '0') : 0;
+              const repoPosQty = repoPos ? parseFloat(repoPos.Quantity || '0') : 0;
+              if (repoNewTotalQty > 0) {
+                console.log(`📊 [REBUY] Updating StopLimit ${existingRepoOrder.orderId} for ${normalizedSymbol}: ${repoExistingQty} + ${repoNewBuyQty} = ${repoNewTotalQty}`);
+                try {
+                  const result = await modifyOrderQuantity(existingRepoOrder.orderId, repoNewTotalQty);
+                  if (result.success) {
+                    console.log(`✅ [REBUY] Successfully updated StopLimit ${existingRepoOrder.orderId} for ${normalizedSymbol} to ${repoNewTotalQty}`);
+                    if (repoNewBuyPrice > 0) {
+                      await updateStopLimitForAddToPosition(normalizedSymbol, existingRepoOrder.orderId, repoPosAvg, repoPosQty, repoNewBuyPrice, repoNewBuyQty);
+                    }
+                  } else {
+                    console.error(`❌ [REBUY] Failed to update StopLimit ${existingRepoOrder.orderId} for ${normalizedSymbol}: ${result.error}`);
+                  }
+                } catch (err) {
+                  console.error(`❌ [REBUY] Error updating StopLimit quantity for ${normalizedSymbol}:`, err);
+                }
+              }
+              return; // Don't call handleManualBuyFilled if order already exists
+            }
+            
+            console.log(`🚀 [DEBUG] Triggering StopLimit creation/modification for filled manual buy ${orderId} (${symbol})`);
+            
+            // Delay + re-check for existing stop-limit (handles message ordering: ACK may arrive after FLL)
+            // During reconnect window: longer delay (5s) so snapshot StopLimit ACKs arrive before we create (prevents REJ burst)
+            const inReconnectWindow = Date.now() < ordersReconnectWindowUntil;
+            const delayMs = inReconnectWindow ? 5000 : 350;
+            if (inReconnectWindow) console.log(`⏳ [RECONNECT] Waiting ${delayMs}ms for snapshot to complete before create check...`);
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+            const delayedExisting = await getActiveStopLimitOrderWithRecovery(normalizedSymbol);
+            if (delayedExisting && delayedExisting.orderId) {
+              const exLeg = delayedExisting.order?.Legs?.[0];
+              const exQty = parseInt(exLeg?.QuantityRemaining || exLeg?.QuantityOrdered || '0', 10) || 0;
+              const newQty = Math.floor(Number(pending.quantity || 0)) || 0;
+              const totalQty = exQty + newQty;
+              const delayedNewPrice = parseFloat(order.FilledPrice || pending.limitPrice || order.LimitPrice || '0') || 0;
+              const delayedPos = positionsCache.get(normalizedSymbol);
+              const delayedPosAvg = delayedPos ? parseFloat(delayedPos.AveragePrice || '0') : 0;
+              const delayedPosQty = delayedPos ? parseFloat(delayedPos.Quantity || '0') : 0;
+              if (totalQty > 0) {
+                console.log(`📊 [REBUY] After delay: found existing StopLimit for ${normalizedSymbol} (${delayedExisting.orderId}). Updating quantity ${exQty} + ${newQty} = ${totalQty}`);
+                try {
+                  const result = await modifyOrderQuantity(delayedExisting.orderId, totalQty);
+                  if (result.success) {
+                    console.log(`✅ [REBUY] Updated StopLimit ${delayedExisting.orderId} for ${normalizedSymbol} to ${totalQty}`);
+                    if (delayedNewPrice > 0) {
+                      await updateStopLimitForAddToPosition(normalizedSymbol, delayedExisting.orderId, delayedPosAvg, delayedPosQty, delayedNewPrice, newQty);
+                    }
+                  } else {
+                    console.error(`❌ [REBUY] Failed to update: ${result.error}`);
+                  }
+                } catch (err) { console.error(`❌ [REBUY] Error updating StopLimit for ${normalizedSymbol}:`, err); }
+              }
+              processedFllOrders.add(orderId);
+              pendingManualBuyOrders.delete(orderId);
+              return;
+            }
+            
+            // Buy from Positions = add-to-position only: update existing StopLimit, never create.
+            if (buySource === 'positions') {
+              console.log(`📋 [POSITIONS_BUY] Filled buy ${orderId} (${normalizedSymbol}) from Positions section - no existing StopLimit found; update-only flow, skipping creation`);
+              return;
+            }
+            
+            // CRITICAL: Do NOT apply reconnect-window skip to TRACKED orders (placed during this session).
+            // Reconnect window only skips UNTRACKED (fallback) FLLs to avoid creating stop-limits for replayed/sold stocks.
+            // Tracked orders must always get stop-limits created/updated regardless of reconnect window.
+            
+            // Don't remove from cache yet - let handleManualBuyFilled complete first
+            // The order will be removed from cache after this block if status is terminal
+            // Only call if not already in progress (prevent duplicate calls)
             if (!stopLimitCreationInProgress.has(orderId)) {
-              setImmediate(() => {
-                handleManualBuyFilled(orderId, order, pending).catch(err => {
-                  console.error(`❌ [DEBUG] Error in handleManualBuyFilled for ${symbol} (order ${orderId}):`, err);
-                  console.error(`❌ [DEBUG] Stack:`, err.stack);
-                  // On error, remove from processed set so it can be retried if needed
-                  processedFllOrders.delete(orderId);
-                });
+              handleManualBuyFilled(orderId, order, pending).catch(err => {
+                console.error(`❌ [DEBUG] Error in handleManualBuyFilled for ${orderId}:`, err);
+                console.error(`❌ [DEBUG] Stack:`, err.stack);
+                // On error, remove from processed set so it can be retried if needed
+                processedFllOrders.delete(orderId);
               });
             } else {
               console.log(`⏸️ [DEBUG] StopLimit creation already in progress for ${orderId}, skipping WebSocket trigger`);
             }
-            return; // Don't continue with delay logic below for tracked orders
           }
 
           // FALLBACK: Handle filled BUY orders that weren't tracked in pendingManualBuyOrders
@@ -4086,13 +4141,7 @@ function connectOrdersWebSocket() {
                 if (existingStopLimit) {
                   const existingLeg = existingStopLimit.order?.Legs?.[0];
                   const existingQty = parseInt(existingLeg?.QuantityRemaining || existingLeg?.QuantityOrdered || '0', 10) || 0;
-                  const fbPosition = positionsCache.get(normalizedSymbol);
-                  const fbPositionQuantity = fbPosition ? Math.floor(parseFloat(fbPosition.Quantity || '0')) : 0;
-                  const newTotalQty = fbPositionQuantity > 0 ? fbPositionQuantity : (existingQty + quantity);
-                  
-                  if (fbPositionQuantity > 0 && fbPositionQuantity !== (existingQty + quantity)) {
-                    console.log(`📊 [QUANTITY_FIX] Using position quantity ${fbPositionQuantity} instead of calculated ${existingQty + quantity} for ${normalizedSymbol} (rapid successive buys)`);
-                  }
+                  const newTotalQty = existingQty + quantity;
                   console.log(`✅ [FALLBACK] StopLimit already exists for ${normalizedSymbol} (${existingStopLimit.orderId}). Rebuy: updating quantity ${existingQty} + ${quantity} = ${newTotalQty}`);
                   processedFllOrders.add(orderId);
                   try {
@@ -4120,13 +4169,7 @@ function connectOrdersWebSocket() {
                   if (dbCheck) {
                     const dbLeg = dbCheck.order?.Legs?.[0];
                     const dbExistingQty = parseInt(dbLeg?.QuantityRemaining || dbLeg?.QuantityOrdered || '0', 10) || 0;
-                    const fbDbPosition = positionsCache.get(normalizedSymbol);
-                    const fbDbPositionQuantity = fbDbPosition ? Math.floor(parseFloat(fbDbPosition.Quantity || '0')) : 0;
-                    const dbNewTotalQty = fbDbPositionQuantity > 0 ? fbDbPositionQuantity : (dbExistingQty + quantity);
-                    
-                    if (fbDbPositionQuantity > 0 && fbDbPositionQuantity !== (dbExistingQty + quantity)) {
-                      console.log(`📊 [QUANTITY_FIX] Using position quantity ${fbDbPositionQuantity} instead of calculated ${dbExistingQty + quantity} for ${normalizedSymbol} (rapid successive buys)`);
-                    }
+                    const dbNewTotalQty = dbExistingQty + quantity;
                     console.log(`✅ [FALLBACK] Database found active StopLimit ${dbCheck.orderId} for ${normalizedSymbol}. Rebuy: updating quantity ${dbExistingQty} + ${quantity} = ${dbNewTotalQty}`);
                     processedFllOrders.add(orderId);
                     if (!stopLimitOrderRepository.has(normalizedSymbol)) {
@@ -4358,8 +4401,20 @@ function getPriceFromChartswatcherToplist(symbol) {
   return null;
 }
 
-// Fast price for buy/sell: Chartswatcher toplist first, then Polygon. Never use positionsCache.
-async function getFastPriceForOrder(symbol) {
+// Fast price for orders. For buys use Polygon only (ask-first for fast fill). For sell/other: toplist then Polygon.
+async function getFastPriceForOrder(symbol, options = {}) {
+  const { forBuy = false } = options;
+  if (forBuy) {
+    try {
+      const price = await Promise.race([
+        polygonService.getBestPriceForBuy(symbol),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('Price timeout')), 2500))
+      ]);
+      return price > 0 ? price : null;
+    } catch {
+      return null;
+    }
+  }
   const fromToplist = getPriceFromChartswatcherToplist(symbol);
   if (fromToplist > 0) return fromToplist;
   try {
@@ -4391,18 +4446,13 @@ app.post('/api/buys/test', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing symbol' });
     }
     
-    console.log(`🛒 Manual buy signal for ${symbol}`);
+    const buySource = (req.body?.source === 'positions' ? 'positions' : 'manual');
+    console.log(`🛒 Buy signal for ${symbol} (source: ${buySource})`);
     
-    // Use provided price from client (table column) if available, otherwise fetch from Chartswatcher/Polygon
-    let currentPrice = parseFloat(req.body?.price);
-    if (!currentPrice || currentPrice <= 0 || isNaN(currentPrice)) {
-      // Price from Chartswatcher toplist or Polygon (never positionsCache)
-      currentPrice = await getFastPriceForOrder(symbol);
-      if (!currentPrice || currentPrice <= 0) {
-        return res.status(400).json({ success: false, error: `Could not determine current price for ${symbol}. Please try again.` });
-      }
-    } else {
-      console.log(`💰 Using provided price from table: $${currentPrice.toFixed(2)}`);
+    // Buy price always from Polygon (ask-first for fast fill); single snapshot, no positionsCache
+    const currentPrice = await getFastPriceForOrder(symbol, { forBuy: true });
+    if (!currentPrice || currentPrice <= 0) {
+      return res.status(400).json({ success: false, error: `Could not get price for ${symbol} from Polygon. Please try again.` });
     }
     
     // Calculate quantity based on price ranges (using configured buy quantities)
@@ -4506,8 +4556,8 @@ app.post('/api/buys/test', async (req, res) => {
       // 202 Accepted can occur for async order acceptance - we must still track to avoid losing stop-limit creation.
       if (orderIdFromApi != null && notifyStatus.startsWith('2')) {
         const oid = String(orderIdFromApi);
-        pendingManualBuyOrders.set(oid, { symbol, quantity, limitPrice: currentPrice });
-        console.log(`📌 [DEBUG] Tracking manual buy order ${oid} for ${symbol} (qty ${quantity}, limitPrice ${currentPrice})`);
+        pendingManualBuyOrders.set(oid, { symbol, quantity, limitPrice: currentPrice, source: buySource });
+        console.log(`📌 [DEBUG] Tracking buy order ${oid} for ${symbol} (source: ${buySource}, qty ${quantity}, limitPrice ${currentPrice})`);
         console.log(`📌 [DEBUG] Full response data:`, JSON.stringify(responseData, null, 2));
         console.log(`📌 [DEBUG] Total tracked manual buys: ${pendingManualBuyOrders.size}`);
 
@@ -4751,11 +4801,12 @@ app.get('/api/buys/test', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing symbol' });
     }
     
-    console.log(`🛒 Manual buy signal (GET) for ${symbol}`);
+    const buySource = (req.query.source === 'positions' ? 'positions' : 'manual');
+    console.log(`🛒 Buy signal (GET) for ${symbol} (source: ${buySource})`);
     
-    const currentPrice = await getFastPriceForOrder(symbol);
+    const currentPrice = await getFastPriceForOrder(symbol, { forBuy: true });
     if (!currentPrice || currentPrice <= 0) {
-      return res.status(400).json({ success: false, error: `Could not determine current price for ${symbol}. Please try again.` });
+      return res.status(400).json({ success: false, error: `Could not get price for ${symbol} from Polygon. Please try again.` });
     }
     
     const priceGroup = getPriceGroup(currentPrice);
@@ -4811,7 +4862,7 @@ app.get('/api/buys/test', async (req, res) => {
       orderIdFromApi = responseData.order_id ?? responseData.OrderID ?? responseData.orderId ?? null;
       if (orderIdFromApi != null && notifyStatus.startsWith('2')) {
         const oid = String(orderIdFromApi);
-        pendingManualBuyOrders.set(oid, { symbol, quantity, limitPrice: currentPrice });
+        pendingManualBuyOrders.set(oid, { symbol, quantity, limitPrice: currentPrice, source: buySource });
         if (process.env.PNL_API_KEY && typeof connectOrdersWebSocket === 'function' && ordersWs?.readyState === WebSocket.OPEN) {
           const lastActivity = lastOrderUpdateTime ?? lastOrdersConnectedAt ?? 0;
           if (Date.now() - lastActivity > 2 * 60 * 1000) {
@@ -5617,17 +5668,11 @@ async function handleManualBuyFilled(orderId, order, pending) {
         console.log(`✅ [STOPLIMIT_REPO] Registered StopLimit ${dbCheck.orderId} from database for ${normalizedSymbol}`);
       }
       
-      // Re-buy: use actual position quantity from positionsCache (handles rapid successive buys)
+      // Re-buy: add new bought quantity to existing stop-limit quantity
       const dbCheckLeg = dbCheck.order?.Legs?.[0];
       const dbCheckExistingQty = parseInt(dbCheckLeg?.QuantityRemaining || dbCheckLeg?.QuantityOrdered || '0', 10) || 0;
-      const dbCheckPosition = positionsCache.get(normalizedSymbol);
-      const dbCheckPositionQuantity = dbCheckPosition ? Math.floor(parseFloat(dbCheckPosition.Quantity || '0')) : 0;
       const dbCheckBuyQty = Math.floor(Number(pending.quantity || (order.Legs?.[0]?.ExecQuantity ?? order.Legs?.[0]?.QuantityOrdered) || 0)) || 0;
-      const dbCheckNewTotalQty = dbCheckPositionQuantity > 0 ? dbCheckPositionQuantity : (dbCheckExistingQty + dbCheckBuyQty);
-      
-      if (dbCheckPositionQuantity > 0 && dbCheckPositionQuantity !== (dbCheckExistingQty + dbCheckBuyQty)) {
-        console.log(`📊 [QUANTITY_FIX] Using position quantity ${dbCheckPositionQuantity} instead of calculated ${dbCheckExistingQty + dbCheckBuyQty} for ${normalizedSymbol} (rapid successive buys)`);
-      }
+      const dbCheckNewTotalQty = dbCheckExistingQty + dbCheckBuyQty;
       const dbCheckBuyPrice = parseFloat(pending.limitPrice || order.FilledPrice || order.LimitPrice || '0') || 0;
       const dbCheckPos = positionsCache.get(normalizedSymbol);
       const dbCheckPosAvg = dbCheckPos ? parseFloat(dbCheckPos.AveragePrice || '0') : 0;
@@ -5670,14 +5715,8 @@ async function handleManualBuyFilled(orderId, order, pending) {
         console.log(`✅ [DEBUG] Found existing StopLimit ${existingRepoOrder.orderId} in repository for ${normalizedSymbol} - re-buy: updating quantity`);
         const guardLeg = existingRepoOrder.order?.Legs?.[0];
         const guardExistingQty = parseInt(guardLeg?.QuantityRemaining || guardLeg?.QuantityOrdered || '0', 10) || 0;
-        const guardPosition = positionsCache.get(normalizedSymbol);
-        const guardPositionQuantity = guardPosition ? Math.floor(parseFloat(guardPosition.Quantity || '0')) : 0;
         const guardBuyQty = Math.floor(Number(pending.quantity || (order.Legs?.[0]?.ExecQuantity ?? order.Legs?.[0]?.QuantityOrdered) || 0)) || 0;
-        const guardNewTotalQty = guardPositionQuantity > 0 ? guardPositionQuantity : (guardExistingQty + guardBuyQty);
-        
-        if (guardPositionQuantity > 0 && guardPositionQuantity !== (guardExistingQty + guardBuyQty)) {
-          console.log(`📊 [QUANTITY_FIX] Using position quantity ${guardPositionQuantity} instead of calculated ${guardExistingQty + guardBuyQty} for ${normalizedSymbol} (rapid successive buys)`);
-        }
+        const guardNewTotalQty = guardExistingQty + guardBuyQty;
         const guardBuyPrice = parseFloat(pending.limitPrice || order.FilledPrice || order.LimitPrice || '0') || 0;
         const guardPos = positionsCache.get(normalizedSymbol);
         const guardPosAvg = guardPos ? parseFloat(guardPos.AveragePrice || '0') : 0;
@@ -5716,14 +5755,8 @@ async function handleManualBuyFilled(orderId, order, pending) {
       } else {
         console.log(`✅ [DEBUG] Found order ${stuckGuardCheck.orderId} after wait. Updating quantity...`);
         const stuckQty = stuckGuardCheck.quantity || 0;
-        const stuckPosition = positionsCache.get(normalizedSymbol);
-        const stuckPositionQuantity = stuckPosition ? Math.floor(parseFloat(stuckPosition.Quantity || '0')) : 0;
         const guardBuyQty = Math.floor(Number(pending.quantity || (order.Legs?.[0]?.ExecQuantity ?? order.Legs?.[0]?.QuantityOrdered) || 0)) || 0;
-        const stuckNewQty = stuckPositionQuantity > 0 ? stuckPositionQuantity : (stuckQty + guardBuyQty);
-        
-        if (stuckPositionQuantity > 0 && stuckPositionQuantity !== (stuckQty + guardBuyQty)) {
-          console.log(`📊 [QUANTITY_FIX] Using position quantity ${stuckPositionQuantity} instead of calculated ${stuckQty + guardBuyQty} for ${normalizedSymbol} (rapid successive buys)`);
-        }
+        const stuckNewQty = stuckQty + guardBuyQty;
         if (stuckNewQty > 0) {
           try {
             const result = await modifyOrderQuantity(stuckGuardCheck.orderId, stuckNewQty);
@@ -5752,18 +5785,7 @@ async function handleManualBuyFilled(orderId, order, pending) {
   console.log(`🎯 [DEBUG] Pending data:`, JSON.stringify(pending, null, 2));
   
   const leg = order.Legs && order.Legs[0] ? order.Legs[0] : null;
-  const orderQuantity = Math.floor(Number(pending.quantity || leg?.ExecQuantity || leg?.QuantityOrdered || 0)) || 0;
-  
-  // CRITICAL: Use actual position quantity from positionsCache if available (handles rapid successive buys)
-  // This ensures we always use the correct total quantity even when multiple orders come in quick succession
-  // Fall back to order quantity only if position is not available yet
-  const position = positionsCache.get(normalizedSymbol);
-  const positionQuantity = position ? Math.floor(parseFloat(position.Quantity || '0')) : 0;
-  const quantity = positionQuantity > 0 ? positionQuantity : orderQuantity;
-  
-  if (positionQuantity > 0 && positionQuantity !== orderQuantity) {
-    console.log(`📊 [QUANTITY_FIX] Using position quantity ${positionQuantity} instead of order quantity ${orderQuantity} for ${normalizedSymbol} (rapid successive buys)`);
-  }
+  const quantity = Math.floor(Number(pending.quantity || leg?.ExecQuantity || leg?.QuantityOrdered || 0)) || 0;
   
   // CRITICAL: Always use pending.limitPrice (the buy order's limit price) as the buy price
   // This is the price at which we bought
@@ -6653,13 +6675,7 @@ async function handleManualBuyFilled(orderId, order, pending) {
         console.log(`🛑 [DEBUG] LAST CHECK: Repository has active StopLimit ${lastRepoCheck.orderId} - re-buy: updating quantity (existing + new buy).`);
         const lastRepoLeg = lastRepoCheck.order?.Legs?.[0];
         const lastRepoExistingQty = parseInt(lastRepoLeg?.QuantityRemaining || lastRepoLeg?.QuantityOrdered || '0', 10) || 0;
-        const lastRepoPosition = positionsCache.get(normalizedSymbol);
-        const lastRepoPositionQuantity = lastRepoPosition ? Math.floor(parseFloat(lastRepoPosition.Quantity || '0')) : 0;
-        const lastRepoNewTotalQty = lastRepoPositionQuantity > 0 ? lastRepoPositionQuantity : (lastRepoExistingQty + quantity);
-        
-        if (lastRepoPositionQuantity > 0 && lastRepoPositionQuantity !== (lastRepoExistingQty + quantity)) {
-          console.log(`📊 [QUANTITY_FIX] Using position quantity ${lastRepoPositionQuantity} instead of calculated ${lastRepoExistingQty + quantity} for ${normalizedSymbol} (rapid successive buys)`);
-        }
+        const lastRepoNewTotalQty = lastRepoExistingQty + quantity;
         if (lastRepoNewTotalQty > 0) {
           console.log(`📊 [REBUY] Updating StopLimit ${lastRepoCheck.orderId} for ${normalizedSymbol}: ${lastRepoExistingQty} + ${quantity} = ${lastRepoNewTotalQty}`);
           await modifyOrderQuantity(lastRepoCheck.orderId, lastRepoNewTotalQty);
@@ -9386,9 +9402,16 @@ function computeManualList() {
   const nonQualified = [];
   const analyzing = [];
 
+  // Symbols the user currently holds (position qty > 0) — hide them from Manual list until sold
+  const positionSymbols = new Set();
+  for (const [sym, pos] of positionsCache) {
+    if (pos && parseFloat(pos.Quantity || '0') > 0) positionSymbols.add(String(sym).toUpperCase());
+  }
+
   manualListRows.forEach(row => {
     const symbol = row.symbol || row.columns?.find((c) => c.key === 'SymbolColumn')?.value;
     if (!symbol) return;
+    if (positionSymbols.has(String(symbol).toUpperCase())) return; // skip: user has a position
 
     // Extract factors
     const factors = {

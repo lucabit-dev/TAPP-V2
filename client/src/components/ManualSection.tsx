@@ -251,7 +251,7 @@ const ManualSection: React.FC<Props> = ({ viewMode = 'qualified' }) => {
     await Promise.resolve();
     
     try {
-      const requestBody: { symbol: string; price?: number } = { symbol: cleanSymbol };
+      const requestBody: { symbol: string; price?: number; source?: string } = { symbol: cleanSymbol, source: 'manual' };
       if (price !== undefined && price > 0) {
         requestBody.price = price;
       }

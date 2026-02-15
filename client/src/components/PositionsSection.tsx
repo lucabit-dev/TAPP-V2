@@ -48,6 +48,9 @@ const PositionsSection: React.FC = () => {
   const [sellingAll, setSellingAll] = useState(false);
   const [sellAllStatus, setSellAllStatus] = useState<{ success: boolean; message: string } | null>(null);
   const [sellingPositions, setSellingPositions] = useState<Set<string>>(new Set());
+  const [buyingSymbols, setBuyingSymbols] = useState<Set<string>>(new Set());
+  const [buyStatuses, setBuyStatuses] = useState<Record<string, 'success' | 'error' | null>>({});
+  const [buyCooldown, setBuyCooldown] = useState(0);
   const [notifications, setNotifications] = useState<NotificationProps[]>([]);
   const [confirmModal, setConfirmModal] = useState<{
     isOpen: boolean;
@@ -84,6 +87,15 @@ const PositionsSection: React.FC = () => {
     },
     [fetchWithAuth]
   );
+
+  // Buy cooldown countdown
+  useEffect(() => {
+    if (buyCooldown <= 0) return;
+    const interval = setInterval(() => {
+      setBuyCooldown((prev) => (prev <= 1 ? 0 : prev - 1));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [buyCooldown]);
 
   // WebSocket connection for positions
   const connectWebSocket = useCallback(() => {
@@ -342,6 +354,69 @@ const PositionsSection: React.FC = () => {
   const removeNotification = (id: string) => {
     setNotifications(prev => prev.filter(n => n.id !== id));
   };
+
+  const handleBuyClick = useCallback(
+    async (symbol: string, e?: React.MouseEvent) => {
+      if (e) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      const cleanSymbol = String(symbol).trim().toUpperCase();
+      if (!cleanSymbol || buyingSymbols.has(cleanSymbol)) return;
+
+      setBuyingSymbols((prev) => new Set(prev).add(cleanSymbol));
+      setBuyStatuses((prev) => ({ ...prev, [cleanSymbol]: null }));
+      await Promise.resolve();
+
+      try {
+        const resp = await fetchWithTimeout(
+          `${API_BASE_URL}/buys/test`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ symbol: cleanSymbol, source: 'positions' }),
+          },
+          30000
+        );
+        if (!resp.ok) {
+          const errorData = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+          addNotification(`Failed to buy ${cleanSymbol}: ${errorData.error || resp.status}`, 'error');
+          setBuyStatuses((prev) => ({ ...prev, [cleanSymbol]: 'error' }));
+          setTimeout(() => setBuyStatuses((prev) => ({ ...prev, [cleanSymbol]: null })), 3000);
+          return;
+        }
+        const data = await resp.json().catch(() => ({}));
+        if (data?.success) {
+          const quantity = data.data?.quantity ?? 'N/A';
+          const limitPrice = data.data?.limitPrice != null ? `$${Number(data.data.limitPrice).toFixed(2)}` : 'N/A';
+          addNotification(`Buy order sent: ${quantity} ${cleanSymbol} at ${limitPrice}`, 'success');
+          setBuyStatuses((prev) => ({ ...prev, [cleanSymbol]: 'success' }));
+          setBuyCooldown(5);
+          setTimeout(() => setBuyStatuses((prev) => ({ ...prev, [cleanSymbol]: null })), 3000);
+        } else {
+          addNotification(`Failed to buy ${cleanSymbol}: ${data?.error || data?.data?.notifyStatus || 'Unknown error'}`, 'error');
+          setBuyStatuses((prev) => ({ ...prev, [cleanSymbol]: 'error' }));
+          setTimeout(() => setBuyStatuses((prev) => ({ ...prev, [cleanSymbol]: null })), 3000);
+        }
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Unknown error';
+        if ((err as { name?: string })?.name === 'AbortError') {
+          addNotification(`Buy request for ${cleanSymbol} timed out. Try again.`, 'error');
+        } else {
+          addNotification(`Error buying ${cleanSymbol}: ${message}`, 'error');
+        }
+        setBuyStatuses((prev) => ({ ...prev, [cleanSymbol]: 'error' }));
+        setTimeout(() => setBuyStatuses((prev) => ({ ...prev, [cleanSymbol]: null })), 3000);
+      } finally {
+        setBuyingSymbols((prev) => {
+          const next = new Set(prev);
+          next.delete(cleanSymbol);
+          return next;
+        });
+      }
+    },
+    [buyingSymbols, fetchWithTimeout, addNotification]
+  );
 
   const formatPrice = (price: string): string => {
     const num = parseFloat(price);
@@ -864,8 +939,41 @@ const PositionsSection: React.FC = () => {
                           </div>
                         </div>
 
-                        {/* Sell Button */}
-                        <div className="text-center">
+                        {/* Action: BUY + Sell */}
+                        <div className="text-center flex items-center justify-center gap-1">
+                          {(() => {
+                            const sym = (position.Symbol || '').toUpperCase();
+                            const isBuying = buyingSymbols.has(sym);
+                            const buyStatus = buyStatuses[sym];
+                            const isCooldown = buyCooldown > 0;
+                            const buyDisabled = isBuying || isCooldown;
+                            let buyLabel = 'BUY';
+                            let buyClass = 'px-2 py-0.5 text-[11px] font-semibold rounded transition-colors bg-[#4ade80] text-[#14130e] hover:bg-[#22c55e] active:scale-95';
+                            if (isBuying) {
+                              buyLabel = '...';
+                              buyClass = 'px-2 py-0.5 text-[11px] font-semibold rounded bg-[#2a2820] opacity-50 cursor-not-allowed pointer-events-none';
+                            } else if (isCooldown) {
+                              buyLabel = `${buyCooldown}s`;
+                              buyClass = 'px-2 py-0.5 text-[11px] font-semibold rounded bg-[#2a2820] opacity-50 cursor-not-allowed pointer-events-none';
+                            } else if (buyStatus === 'success') {
+                              buyLabel = '✓';
+                              buyClass = 'px-2 py-0.5 text-[11px] font-semibold rounded bg-[#4ade80] text-[#14130e]';
+                            } else if (buyStatus === 'error') {
+                              buyLabel = '✗';
+                              buyClass = 'px-2 py-0.5 text-[11px] font-semibold rounded bg-[#f87171] text-[#14130e]';
+                            }
+                            return (
+                              <button
+                                type="button"
+                                onClick={(e) => !buyDisabled && handleBuyClick(position.Symbol, e)}
+                                disabled={buyDisabled}
+                                className={buyClass}
+                                title={buyDisabled ? (isCooldown ? `Cooldown ${buyCooldown}s` : 'Sending...') : `Buy more ${position.Symbol}`}
+                              >
+                                {buyLabel}
+                              </button>
+                            );
+                          })()}
                           <button
                             onClick={(e) => handleSell(position, e)}
                             disabled={sellingPositions.has(position.PositionID)}

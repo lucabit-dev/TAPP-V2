@@ -292,6 +292,32 @@ class PolygonService {
     }
   }
 
+  /**
+   * Best price for a BUY limit order: one snapshot call, prefer ask for fast fill.
+   * Limit at ask fills immediately; if no quote use last trade + small buffer (1¢) to improve fill chance.
+   */
+  async getBestPriceForBuy(ticker) {
+    const round2 = (v) => Math.round(v * 100) / 100;
+    try {
+      const snapshotUrl = `${this.baseUrl}/v2/snapshot/locale/us/markets/stocks/tickers/${ticker}?apikey=${this.apiKey}`;
+      const snapshotResponse = await fetch(snapshotUrl);
+      if (!snapshotResponse.ok) return null;
+      const snapshotData = await snapshotResponse.json();
+      if (snapshotData.status !== 'OK' || !snapshotData.ticker) return null;
+      const t = snapshotData.ticker;
+      const ask = t.lastQuote?.ap ?? 0;
+      const last = t.lastTrade?.p ?? 0;
+      if (ask > 0) return round2(ask);
+      if (last > 0) return round2(last + 0.01); // small buffer so limit is at/above ask when quote missing
+      if (t.day?.c > 0) return round2(t.day.c);
+      if (t.prevDay?.c > 0) return round2(t.prevDay.c);
+      return null;
+    } catch (err) {
+      console.error(`[Polygon] getBestPriceForBuy(${ticker}):`, err.message);
+      return null;
+    }
+  }
+
   // Helper method to get date range - prioritize recent data with extended hours support
   getDateRange(hoursBack = 168) { // Default to 7 days for recent data
     const to = new Date();
