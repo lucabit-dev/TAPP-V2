@@ -1055,68 +1055,185 @@ setInterval(() => {
 // Live P&L tracking: periodically re-check StopLimit tracker for positions with active StopLimits
 // Iterate over positionsCache (like batch handler) so we never miss symbols after long uptime / stale connections
 // CRITICAL: Run even if WebSocket is down - use cached positions to keep StopLimit Adjustment working
+// CRITICAL: Always continue running even if errors occur - wrap entire check in try-catch
 const STOPLIMIT_PNL_CHECK_MS = 5000; // 5 seconds
 let lastPeriodicCheckTime = Date.now();
 let lastPeriodicCheckLog = 0;
+let consecutiveErrors = 0;
 setInterval(async () => {
-  const now = Date.now();
-  const wsSilent = !lastPositionUpdateTime || (now - lastPositionUpdateTime) > 5 * 60 * 1000; // 5 min silence
-  let checkedCount = 0;
-  let dbFallbackCount = 0;
-  
-  // Primary: Check all positions in cache that have StopLimits (even if WebSocket is temporarily down)
-  for (const [symbol, pos] of positionsCache) {
-    if (pos && parseFloat(pos.Quantity || '0') > 0 && stopLimitOrderRepository.has(symbol)) {
-      checkStopLimitTracker(symbol, pos);
-      checkedCount++;
-    }
-  }
-  
-  // Secondary: Check StopLimit repository for symbols with StopLimits that might not be in cache
-  // This catches cases where cache is stale but StopLimits exist
-  if (stopLimitOrderRepository.size > 0) {
-    for (const [symbol, _repoEntry] of stopLimitOrderRepository) {
-      const cachedPos = positionsCache.get(symbol);
-      if (cachedPos && parseFloat(cachedPos.Quantity || '0') > 0) {
-        // Already checked above, skip
-        continue;
-      }
-      
-      // Position not in cache - try to get from DB (fallback for stale cache or WebSocket down)
-      if (cachePersistenceService) {
-        const dbPos = await cachePersistenceService.getPositionForSymbol(symbol);
-        if (dbPos && parseFloat(dbPos.Quantity || '0') > 0) {
-          // Update cache with DB position for future checks
-          positionsCache.set(symbol, { ...dbPos, lastUpdated: Date.now() });
-          checkStopLimitTracker(symbol, dbPos);
-          dbFallbackCount++;
+  try {
+    const now = Date.now();
+    const wsSilent = !lastPositionUpdateTime || (now - lastPositionUpdateTime) > 5 * 60 * 1000; // 5 min silence
+    let checkedCount = 0;
+    let dbFallbackCount = 0;
+    let errorCount = 0;
+    
+    // Primary: Check all positions in cache that have StopLimits (even if WebSocket is temporarily down)
+    // CRITICAL: Await each check to ensure errors are caught and progress is saved
+    for (const [symbol, pos] of positionsCache) {
+      if (pos && parseFloat(pos.Quantity || '0') > 0 && stopLimitOrderRepository.has(symbol)) {
+        try {
+          await checkStopLimitTracker(symbol, pos);
+          checkedCount++;
+        } catch (err) {
+          errorCount++;
+          console.error(`❌ [STOPLIMIT_TRACKER] Error checking ${symbol}:`, err.message);
+          // Continue checking other symbols even if one fails
         }
       }
     }
-  }
-  
-  // Log periodically (every 60s) to track that checks are running
-  if (now - lastPeriodicCheckLog > 60000) {
-    const wsStatus = positionsWs ? (positionsWs.readyState === WebSocket.OPEN ? 'OPEN' : `CLOSED(${positionsWs.readyState})`) : 'NULL';
-    const lastUpdateAgo = lastPositionUpdateTime ? Math.round((now - lastPositionUpdateTime) / 1000) : 'never';
-    console.log(`📊 [STOPLIMIT_TRACKER] Periodic check: ${checkedCount} from cache, ${dbFallbackCount} from DB, WS: ${wsStatus}, last update: ${lastUpdateAgo}s ago`);
-    lastPeriodicCheckLog = now;
-  }
-  
-  // If WebSocket has been silent for 5+ minutes, refresh positions from DB every 30 seconds
-  if (wsSilent && cachePersistenceService && stopLimitOrderRepository.size > 0 && (now - lastPeriodicCheckTime) > 30000) {
-    console.warn(`⚠️ [STOPLIMIT_TRACKER] Positions WS silent for ${Math.round((now - lastPositionUpdateTime) / 1000)}s - refreshing positions from DB`);
-    try {
-      const loaded = await cachePersistenceService.loadFromDatabase();
-      if (loaded.positions > 0) {
-        console.log(`✅ [STOPLIMIT_TRACKER] Refreshed ${loaded.positions} positions from DB`);
+    
+    // Secondary: Check StopLimit repository for symbols with StopLimits that might not be in cache
+    // This catches cases where cache is stale but StopLimits exist
+    if (stopLimitOrderRepository.size > 0) {
+      for (const [symbol, _repoEntry] of stopLimitOrderRepository) {
+        try {
+          const cachedPos = positionsCache.get(symbol);
+          if (cachedPos && parseFloat(cachedPos.Quantity || '0') > 0) {
+            // Already checked above, skip
+            continue;
+          }
+          
+          // Position not in cache - try to get from DB (fallback for stale cache or WebSocket down)
+          if (cachePersistenceService) {
+            const dbPos = await cachePersistenceService.getPositionForSymbol(symbol);
+            if (dbPos && parseFloat(dbPos.Quantity || '0') > 0) {
+              // Update cache with DB position for future checks
+              positionsCache.set(symbol, { ...dbPos, lastUpdated: Date.now() });
+              await checkStopLimitTracker(symbol, dbPos);
+              dbFallbackCount++;
+            }
+          }
+        } catch (err) {
+          errorCount++;
+          console.error(`❌ [STOPLIMIT_TRACKER] Error checking ${symbol} from DB:`, err.message);
+          // Continue checking other symbols
+        }
       }
-    } catch (err) {
-      console.error(`❌ [STOPLIMIT_TRACKER] Error refreshing positions from DB:`, err.message);
     }
-    lastPeriodicCheckTime = now;
+    
+    // Reset error counter on successful run
+    if (errorCount === 0) {
+      consecutiveErrors = 0;
+    } else {
+      consecutiveErrors++;
+      if (consecutiveErrors >= 10) {
+        console.error(`🚨 [STOPLIMIT_TRACKER] ${consecutiveErrors} consecutive errors - may need investigation`);
+      }
+    }
+    
+    // Log periodically (every 30s) to track that checks are running and catch issues early
+    if (now - lastPeriodicCheckLog > 30000) {
+      const wsStatus = positionsWs ? (positionsWs.readyState === WebSocket.OPEN ? 'OPEN' : `CLOSED(${positionsWs.readyState})`) : 'NULL';
+      const lastUpdateAgo = lastPositionUpdateTime ? Math.round((now - lastPositionUpdateTime) / 1000) : 'never';
+      const repoSize = stopLimitOrderRepository.size;
+      const progressSize = stopLimitTrackerProgress.size;
+      console.log(`📊 [STOPLIMIT_TRACKER] Check: ${checkedCount} cache, ${dbFallbackCount} DB, ${errorCount} errors | Repo: ${repoSize}, Progress: ${progressSize} | WS: ${wsStatus}, last update: ${lastUpdateAgo}s ago`);
+      lastPeriodicCheckLog = now;
+    }
+    
+    // If WebSocket has been silent for 5+ minutes, refresh positions from DB every 30 seconds
+    if (wsSilent && cachePersistenceService && stopLimitOrderRepository.size > 0 && (now - lastPeriodicCheckTime) > 30000) {
+      console.warn(`⚠️ [STOPLIMIT_TRACKER] Positions WS silent for ${Math.round((now - lastPositionUpdateTime) / 1000)}s - refreshing positions from DB`);
+      try {
+        const loaded = await cachePersistenceService.loadFromDatabase();
+        if (loaded.positions > 0) {
+          console.log(`✅ [STOPLIMIT_TRACKER] Refreshed ${loaded.positions} positions from DB`);
+        }
+      } catch (err) {
+        console.error(`❌ [STOPLIMIT_TRACKER] Error refreshing positions from DB:`, err.message);
+      }
+      lastPeriodicCheckTime = now;
+    }
+    
+    // CRITICAL: Flush progress saves periodically to ensure DB is up-to-date (every 10 seconds)
+    if (cachePersistenceService && (now - (lastPeriodicCheckTime || 0)) > 10000) {
+      try {
+        await cachePersistenceService.flushProgressSave();
+      } catch (err) {
+        console.error(`❌ [STOPLIMIT_TRACKER] Error flushing progress save:`, err.message);
+      }
+    }
+  } catch (err) {
+    // CRITICAL: Catch any unhandled errors to prevent the interval from stopping
+    console.error(`❌ [STOPLIMIT_TRACKER] Fatal error in periodic check:`, err);
+    console.error(`❌ [STOPLIMIT_TRACKER] Stack:`, err.stack);
+    consecutiveErrors++;
+    // Continue running - don't let one error stop the entire system
   }
 }, STOPLIMIT_PNL_CHECK_MS);
+
+// CRITICAL: More frequent check (every 2 seconds) for positions close to step thresholds
+// This ensures we catch step changes as quickly as possible for real-time StopLimit adjustment
+const STOPLIMIT_CRITICAL_CHECK_MS = 2000; // 2 seconds for positions near thresholds
+setInterval(async () => {
+  try {
+    if (stopLimitOrderRepository.size === 0) return;
+    
+    const now = Date.now();
+    let criticalChecked = 0;
+    
+    // Check positions that are close to step thresholds (within 5% of next step)
+    for (const [symbol, pos] of positionsCache) {
+      if (!pos || parseFloat(pos.Quantity || '0') <= 0 || !stopLimitOrderRepository.has(symbol)) continue;
+      
+      try {
+        const progress = stopLimitTrackerProgress.get(symbol);
+        if (!progress || progress.currentStepIndex < 0) continue;
+        
+        const avgPrice = parseFloat(pos.AveragePrice || '0');
+        if (avgPrice <= 0) continue;
+        
+        // Find matching group
+        let matchingGroup = null;
+        for (const [groupId, group] of stopLimitTrackerConfig.entries()) {
+          if (!group.enabled || !group.steps) continue;
+          if (avgPrice >= group.minPrice && avgPrice <= group.maxPrice) {
+            matchingGroup = group;
+            break;
+          }
+        }
+        
+        if (!matchingGroup || !matchingGroup.steps) continue;
+        
+        // Calculate current P&L
+        const pnlPerShareRaw = pos.UnrealizedProfitLossQty ?? pos.unrealizedProfitLossQty;
+        let pnlPerShare = parseFloat(pnlPerShareRaw || '');
+        if (isNaN(pnlPerShare) && avgPrice > 0) {
+          const lastPrice = parseFloat(pos.Last || pos.MarkToMarketPrice || pos.last || pos.markToMarketPrice || '0');
+          if (!isNaN(lastPrice) && lastPrice > 0) {
+            pnlPerShare = lastPrice - avgPrice;
+          }
+        }
+        const currentPnl = !isNaN(pnlPerShare) ? pnlPerShare : 0;
+        
+        // Check if we're close to next step threshold (within 5% or $0.01)
+        const currentStepIndex = progress.currentStepIndex;
+        const nextStep = matchingGroup.steps[currentStepIndex + 1];
+        if (nextStep) {
+          const nextStepPnl = parseFloat(nextStep.pnl || '0');
+          const distanceToNext = nextStepPnl - currentPnl;
+          const threshold = Math.max(0.01, nextStepPnl * 0.05); // 5% or $0.01, whichever is larger
+          
+          if (distanceToNext > 0 && distanceToNext <= threshold) {
+            // Close to threshold - check immediately
+            await checkStopLimitTracker(symbol, pos);
+            criticalChecked++;
+          }
+        }
+      } catch (err) {
+        console.error(`❌ [STOPLIMIT_TRACKER] Error in critical check for ${symbol}:`, err.message);
+      }
+    }
+    
+    if (criticalChecked > 0 && now % 10000 < STOPLIMIT_CRITICAL_CHECK_MS) {
+      // Log every ~10s when critical checks are happening
+      console.log(`⚡ [STOPLIMIT_TRACKER] Critical check: ${criticalChecked} position(s) near step thresholds`);
+    }
+  } catch (err) {
+    console.error(`❌ [STOPLIMIT_TRACKER] Fatal error in critical check:`, err);
+  }
+}, STOPLIMIT_CRITICAL_CHECK_MS);
 
 // Periodic cache cleanup to remove expired entries (less frequent)
 setInterval(() => {
@@ -3512,9 +3629,14 @@ function connectPositionsWebSocket() {
             console.log(`📊 [BATCH] Position sold: ${cachedSymbol} - cleared cache and Stage & Progress`);
           }
           // Live-track P&L: check StopLimit tracker for each position in batch (P&L updates come through here)
+          // CRITICAL: Await each check to ensure real-time updates and error handling
           for (const s of symbolsInBatch) {
             const pos = positionsCache.get(s);
-            if (pos && stopLimitOrderRepository.has(s)) checkStopLimitTracker(s, pos);
+            if (pos && stopLimitOrderRepository.has(s)) {
+              checkStopLimitTracker(s, pos).catch(err => {
+                console.error(`❌ [STOPLIMIT_TRACKER] Error in batch check for ${s}:`, err.message);
+              });
+            }
           }
           // Re-broadcast manual list so symbols with positions disappear from Manual section
           if (typeof broadcastManualUpdate === 'function') broadcastManualUpdate();
@@ -3565,8 +3687,10 @@ function connectPositionsWebSocket() {
               recentlySoldSymbols.delete(normalizedSymbol);
             }
             
-            // Check StopLimit tracker for P&L-based updates
-            checkStopLimitTracker(normalizedSymbol, dataObj);
+            // Check StopLimit tracker for P&L-based updates (CRITICAL: real-time P&L tracking)
+            checkStopLimitTracker(normalizedSymbol, dataObj).catch(err => {
+              console.error(`❌ [STOPLIMIT_TRACKER] Error in single position check for ${normalizedSymbol}:`, err.message);
+            });
             // Re-broadcast manual list so newly held symbol disappears from Manual section
             if (typeof broadcastManualUpdate === 'function') broadcastManualUpdate();
           }
@@ -5577,10 +5701,25 @@ async function checkStopLimitTracker(symbol, position) {
             lastPnl: currentPnl,
             lastUpdate: Date.now()
           });
-          if (cachePersistenceService) cachePersistenceService.scheduleProgressSave(normalizedSymbol);
+          // CRITICAL: Immediately flush progress save for step changes (multi-instance consistency)
+          if (cachePersistenceService) {
+            cachePersistenceService.scheduleProgressSave(normalizedSymbol);
+            // Flush immediately for step changes to ensure real-time updates
+            cachePersistenceService.flushProgressSave().catch(err => {
+              console.error(`❌ [STOPLIMIT_TRACKER] Error flushing progress after step change:`, err.message);
+            });
+          }
           console.log(`✅ [STOPLIMIT_TRACKER] Successfully updated StopLimit for ${normalizedSymbol} to step ${newStepIndex + 1}`);
         } else {
           console.error(`❌ [STOPLIMIT_TRACKER] Failed to update StopLimit for ${normalizedSymbol}:`, result.error);
+          // Still update progress for display even if order update failed
+          stopLimitTrackerProgress.set(normalizedSymbol, {
+            groupId: matchingGroupId,
+            currentStepIndex: newStepIndex,
+            lastPnl: currentPnl,
+            lastUpdate: Date.now()
+          });
+          if (cachePersistenceService) cachePersistenceService.scheduleProgressSave(normalizedSymbol);
         }
       } else {
         // Still update progress for display (P&L threshold met) even if StopLimit couldn't be updated
@@ -5594,7 +5733,8 @@ async function checkStopLimitTracker(symbol, position) {
       }
     }
     
-    // Update progress even if no step change (to track current P&L)
+    // Update progress even if no step change (to track current P&L for real-time display)
+    // CRITICAL: Always update progress to ensure UI shows current P&L and step
     if (progress) {
       progress.lastPnl = currentPnl;
       progress.lastUpdate = Date.now();
@@ -5609,8 +5749,21 @@ async function checkStopLimitTracker(symbol, position) {
       });
       if (cachePersistenceService) cachePersistenceService.scheduleProgressSave(normalizedSymbol);
     }
+    
+    // CRITICAL: If P&L changed significantly but step didn't update, log for debugging
+    if (progress && Math.abs(progress.lastPnl - currentPnl) > 0.01 && newStepIndex === currentStepIndex && currentStepIndex >= 0) {
+      const nextStepPnl = matchingGroup.steps[currentStepIndex + 1]?.pnl;
+      if (nextStepPnl !== undefined) {
+        const distanceToNext = nextStepPnl - currentPnl;
+        if (distanceToNext < 0.01 && distanceToNext > -0.01) {
+          console.log(`📊 [STOPLIMIT_TRACKER] ${normalizedSymbol} P&L $${currentPnl.toFixed(4)} very close to step ${currentStepIndex + 2} threshold $${nextStepPnl.toFixed(4)}`);
+        }
+      }
+    }
   } catch (err) {
     console.error(`❌ [STOPLIMIT_TRACKER] Error checking tracker for ${symbol}:`, err);
+    console.error(`❌ [STOPLIMIT_TRACKER] Stack:`, err.stack);
+    // Don't throw - let periodic check continue for other symbols
   }
 }
 
