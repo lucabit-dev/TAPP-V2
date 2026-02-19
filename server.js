@@ -3693,47 +3693,34 @@ function connectPositionsWebSocket() {
             });
             // Re-broadcast manual list so newly held symbol disappears from Manual section
             if (typeof broadcastManualUpdate === 'function') broadcastManualUpdate();
+          } else {
+            // Single position update with quantity 0 or negative: position closed, remove from cache
+            const normalizedSymbol = symbol.toUpperCase();
+            console.log(`📊 Position closed or quantity is 0: ${symbol} - removing from cache`);
+            positionsCache.delete(symbol);
+            if (cachePersistenceService) {
+              cachePersistenceService.schedulePositionSave(symbol);
+            }
+            if (typeof lastBuyTsByTicker !== 'undefined' && lastBuyTsByTicker.has(symbol)) {
+              lastBuyTsByTicker.delete(symbol);
+              console.log(`🔁 Reset buy lock for ${symbol} (position closed)`);
+            }
+            const repoEntry = stopLimitOrderRepository.get(normalizedSymbol);
+            if (repoEntry) {
+              console.log(`🧹 [STOPLIMIT_REPO] Position closed for ${normalizedSymbol} - removing StopLimit order ${repoEntry.orderId}`);
+              stopLimitOrderRepository.delete(normalizedSymbol);
+            }
+            stopLimitCreationBySymbol.delete(normalizedSymbol);
+            recentlySoldSymbols.set(normalizedSymbol, Date.now());
+            console.log(`🏷️ [DEBUG] Marked ${normalizedSymbol} as recently sold (timestamp: ${Date.now()})`);
+            stopLimitTrackerProgress.delete(normalizedSymbol);
+            if (cachePersistenceService) cachePersistenceService.scheduleProgressDelete(normalizedSymbol);
+            stopLimitFilledSymbols.delete(normalizedSymbol);
+            console.log(`📊 Position removed from cache: ${symbol}`);
+            if (typeof broadcastManualUpdate === 'function') broadcastManualUpdate();
           }
-        } else {
-          // Position closed or quantity is 0, remove from cache
-          const normalizedSymbol = symbol.toUpperCase(); // Normalize for StopLimit cleanup
-          console.log(`📊 Position closed or quantity is 0: ${symbol} - removing from cache`);
-          positionsCache.delete(symbol);
-          // Schedule save to database (to delete from DB)
-          if (cachePersistenceService) {
-            cachePersistenceService.schedulePositionSave(symbol);
-          }
-          if (typeof lastBuyTsByTicker !== 'undefined' && lastBuyTsByTicker.has(symbol)) {
-            lastBuyTsByTicker.delete(symbol);
-            console.log(`🔁 Reset buy lock for ${symbol} (position closed)`);
-          }
-          
-          // CRITICAL: Clean up StopLimit tracking when position is closed (clean repository pattern)
-          const repoEntry = stopLimitOrderRepository.get(normalizedSymbol);
-          if (repoEntry) {
-            console.log(`🧹 [STOPLIMIT_REPO] Position closed for ${normalizedSymbol} - removing StopLimit order ${repoEntry.orderId}`);
-            stopLimitOrderRepository.delete(normalizedSymbol);
-          }
-          
-          // Clean up in-progress creation flag
-          stopLimitCreationBySymbol.delete(normalizedSymbol);
-        console.log(`🔓 [DEBUG] Removed ${normalizedSymbol} from stopLimitCreationBySymbol guard (after creation)`);
-          
-          // CRITICAL: Mark symbol as recently sold to prevent StopLimit creation loops
-          recentlySoldSymbols.set(normalizedSymbol, Date.now());
-          console.log(`🏷️ [DEBUG] Marked ${normalizedSymbol} as recently sold (timestamp: ${Date.now()})`);
-          
-          // Clean up StopLimit tracker progress
-          stopLimitTrackerProgress.delete(normalizedSymbol);
-          if (cachePersistenceService) cachePersistenceService.scheduleProgressDelete(normalizedSymbol);
-          
-          // Clean up filled StopLimit tracking (position closed, can create new StopLimit if rebought)
-          stopLimitFilledSymbols.delete(normalizedSymbol);
-          
-          console.log(`📊 Position removed from cache: ${symbol}`);
-          // Re-broadcast manual list so sold symbol can appear again in Manual section
-          if (typeof broadcastManualUpdate === 'function') broadcastManualUpdate();
         }
+        // Note: If rawSymbol is missing, we cannot determine which position closed; batch updates handle full snapshot
         
       } catch (err) {
         console.error('⚠️ Error parsing positions WebSocket message:', err.message);
@@ -5741,9 +5728,11 @@ async function checkStopLimitTracker(symbol, position) {
       if (cachePersistenceService) cachePersistenceService.scheduleProgressSave(normalizedSymbol);
     } else if (matchingGroup && existingStopLimit) {
       // Initialize progress if not exists (only if StopLimit exists)
+      // CRITICAL: Use newStepIndex when P&L already exceeds thresholds - fixes position showing "Initial" when it should be Stage 2/3 (e.g. CISS with $0.10 P&L)
+      const initialStepIndex = newStepIndex >= 0 ? newStepIndex : -1;
       stopLimitTrackerProgress.set(normalizedSymbol, {
         groupId: matchingGroupId,
-        currentStepIndex: -1,
+        currentStepIndex: initialStepIndex,
         lastPnl: currentPnl,
         lastUpdate: Date.now()
       });
