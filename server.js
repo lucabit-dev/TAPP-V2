@@ -5510,14 +5510,15 @@ async function modifyStopLimitPrice(orderId, stopPrice, limitPrice) {
   };
   console.log(`📤 [DEBUG] Modifying StopLimit order prices:`, JSON.stringify(body, null, 2));
   
+  // Stop Limit Adjustment: longer timeout and more retries to avoid step updates failing on slow/transient connections
   const resp = await robustFetch(SECTIONS_BOT_ORDER_URL, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
     body: JSON.stringify(body)
   }, {
-    maxRetries: 3,
-    timeout: 8000,
-    retryDelay: 500
+    maxRetries: 5,
+    timeout: 15000,
+    retryDelay: 800
   });
   
   const text = await resp.text().catch(() => '');
@@ -7541,7 +7542,19 @@ app.get('/api/stoplimit-tracker/progress', requireAuth, async (req, res) => {
   try {
     // Sync trigger: client can pass ?symbols=AAPL,PTON,EVGO to ensure we run checkStopLimitTracker
     // for those symbols before returning (fixes "—" after long uptime when server cache goes stale)
+    // pnlHints=RELY:0.38,OND:-0.06 - client's real-time P&L per share overrides stale server cache (fixes Step not updating when UI shows higher P&L)
     const symbolsParam = req.query.symbols;
+    const pnlHintsParam = req.query.pnlHints;
+    const pnlHints = {};
+    if (pnlHintsParam && typeof pnlHintsParam === 'string') {
+      for (const pair of pnlHintsParam.split(',')) {
+        const [sym, val] = pair.split(':');
+        if (sym && val !== undefined && val !== '') {
+          const num = parseFloat(val.trim());
+          if (!isNaN(num)) pnlHints[(sym || '').trim().toUpperCase()] = num;
+        }
+      }
+    }
     if (symbolsParam && typeof symbolsParam === 'string') {
       const requestedSymbols = symbolsParam.split(',').map(s => (s || '').trim().toUpperCase()).filter(Boolean);
       for (const symbol of requestedSymbols) {
@@ -7556,7 +7569,10 @@ app.get('/api/stoplimit-tracker/progress', requireAuth, async (req, res) => {
             positionsCache.set(symbol, { ...pos, lastUpdated: Date.now() });
           }
         }
-        
+        // Override P&L with client hint (client has real-time data; server cache can be stale)
+        if (pos && pnlHints[symbol] !== undefined) {
+          pos = { ...pos, UnrealizedProfitLossQty: String(pnlHints[symbol]), unrealizedProfitLossQty: pnlHints[symbol] };
+        }
         if (pos && parseFloat(pos.Quantity || '0') > 0) {
           await checkStopLimitTracker(symbol, pos);
         }

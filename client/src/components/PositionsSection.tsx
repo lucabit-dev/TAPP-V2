@@ -324,9 +324,27 @@ const PositionsSection: React.FC = () => {
     if (!token || mergedPositions.length === 0) return;
     const fetchProgress = async () => {
       try {
-        const symbols = positionsRef.current.map(p => (p.Symbol || '').toUpperCase()).filter(Boolean);
-        const qs = symbols.length > 0 ? `?symbols=${encodeURIComponent(symbols.join(','))}` : '';
-        const res = await fetchWithAuth(`${API_BASE_URL}/stoplimit-tracker/progress${qs}`);
+        const positions = positionsRef.current;
+        const symbols = positions.map(p => (p.Symbol || '').toUpperCase()).filter(Boolean);
+        const pnlHints = positions
+          .map((p) => {
+            const sym = (p.Symbol || '').toUpperCase();
+            if (!sym) return null;
+            const perShare = parseFloat(p.UnrealizedProfitLossQty || '');
+            if (isNaN(perShare)) {
+              const total = parseFloat(p.UnrealizedProfitLoss || '');
+              const qty = parseFloat(p.Quantity || '0') || 1;
+              const computed = qty > 0 ? total / qty : 0;
+              return { sym, val: isNaN(computed) ? null : computed };
+            }
+            return { sym, val: perShare };
+          })
+          .filter((x): x is { sym: string; val: number } => x !== null && x.val !== null);
+        const qs = new URLSearchParams();
+        if (symbols.length > 0) qs.set('symbols', symbols.join(','));
+        if (pnlHints.length > 0) qs.set('pnlHints', pnlHints.map((h) => `${h.sym}:${h.val}`).join(','));
+        const query = qs.toString();
+        const res = await fetchWithAuth(`${API_BASE_URL}/stoplimit-tracker/progress${query ? `?${query}` : ''}`);
         const data = await res.json();
         if (data.success && Array.isArray(data.data)) {
           const currentSymbols = new Set(positionsRef.current.map(p => (p.Symbol || '').toUpperCase()).filter(Boolean));
