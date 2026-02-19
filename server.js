@@ -1024,9 +1024,9 @@ setInterval(async () => {
       const hasStopLimits = stopLimitOrderRepository && stopLimitOrderRepository.size > 0;
       if (posWsOpen && hasStopLimits && lastPositionUpdateTime != null) {
         const idleMs = now - lastPositionUpdateTime;
-        const POSITIONS_IDLE_RECONNECT_MS = 3 * 60 * 1000; // 3 min - need P&L updates for Stop Limit Adjustment
+        const POSITIONS_IDLE_RECONNECT_MS = 1 * 60 * 1000; // 1 min = stale, reconnect to keep tracking alive
         if (idleMs >= POSITIONS_IDLE_RECONNECT_MS) {
-          console.warn(`⚠️ [POSITIONS_WS] No position updates for ${Math.round(idleMs / 1000)}s despite ${stopLimitOrderRepository.size} StopLimit(s) - forcing reconnect (Stop Limit Adjustment requires position updates)`);
+          console.warn(`⚠️ [POSITIONS_WS] Stale (no position updates for ${Math.round(idleMs / 1000)}s) - reconnecting to keep tracking alive`);
           connectPositionsWebSocket();
         }
       }
@@ -1063,7 +1063,7 @@ let consecutiveErrors = 0;
 setInterval(async () => {
   try {
     const now = Date.now();
-    const wsSilent = !lastPositionUpdateTime || (now - lastPositionUpdateTime) > 5 * 60 * 1000; // 5 min silence
+    const wsSilent = !lastPositionUpdateTime || (now - lastPositionUpdateTime) > 1 * 60 * 1000; // 1 min = stale
     let checkedCount = 0;
     let dbFallbackCount = 0;
     let errorCount = 0;
@@ -1132,7 +1132,7 @@ setInterval(async () => {
       lastPeriodicCheckLog = now;
     }
     
-    // If WebSocket has been stale (no position updates for 5+ min), reconnect to restore live tracking
+    // If WebSocket has been stale (no position updates for 1+ min), reconnect to restore live tracking
     if (wsSilent && (now - lastPeriodicCheckTime) > 60000) {
       const staleSec = lastPositionUpdateTime ? Math.round((now - lastPositionUpdateTime) / 1000) : 0;
       console.warn(`⚠️ [STOPLIMIT_TRACKER] Positions WS stale (no updates for ${staleSec}s) - reconnecting to keep tracking alive`);
@@ -9577,21 +9577,36 @@ function getManualColVal(row, keys) {
   return isNaN(val) ? 0 : val;
 }
 
+// Normalize symbol from toplist row (one place for MANUAL list data management)
+function getNormalizedSymbolFromRow(row) {
+  if (!row) return null;
+  const raw = row.symbol ?? row.Symbol ?? row.ticker ?? row.Ticker
+    ?? row.columns?.find((c) => c.key === 'SymbolColumn' || c.key === 'Symbol')?.value
+    ?? null;
+  if (raw == null || raw === '') return null;
+  const normalized = String(raw).trim().toUpperCase();
+  return normalized || null;
+}
+
 function computeManualList() {
   const qualified = [];
   const nonQualified = [];
   const analyzing = [];
 
-  // Symbols the user currently holds (position qty > 0) — hide them from Manual list until sold
+  // Symbols the user currently holds (position qty > 0) — hide only these from Manual/NON-QUALIFIED list
   const positionSymbols = new Set();
   for (const [sym, pos] of positionsCache) {
-    if (pos && parseFloat(pos.Quantity || '0') > 0) positionSymbols.add(String(sym).toUpperCase());
+    if (!pos) continue;
+    const qty = parseFloat(pos.Quantity || '0');
+    if (!(qty > 0)) continue;
+    const normalized = String(sym).trim().toUpperCase();
+    if (normalized) positionSymbols.add(normalized);
   }
 
   manualListRows.forEach(row => {
-    const symbol = row.symbol || row.columns?.find((c) => c.key === 'SymbolColumn')?.value;
+    const symbol = getNormalizedSymbolFromRow(row);
     if (!symbol) return;
-    if (positionSymbols.has(String(symbol).toUpperCase())) return; // skip: user has a position
+    if (positionSymbols.has(symbol)) return; // skip: user has a position (only hide true positions)
 
     // Extract factors
     const factors = {
@@ -9608,7 +9623,7 @@ function computeManualList() {
     };
     const price = getManualColVal(row, ['PriceNOOPTION', 'Price']);
 
-    const indicators = manualListIndicators.get(symbol);
+    const indicators = manualListIndicators.get(symbol); // symbol is normalized (uppercase)
 
     if (!indicators) {
       analyzing.push({ symbol, price, factors, rawRow: row });
@@ -9699,27 +9714,32 @@ function broadcastManualUpdate() {
 
 async function updateManualList(rows) {
   manualListRows = rows;
-  const symbols = rows.map(r => r.symbol || (r.columns.find(c => c.key === 'SymbolColumn')?.value)).filter(Boolean);
-  
+  const symbols = rows.map((r) => getNormalizedSymbolFromRow(r)).filter(Boolean);
+  const uniqueSymbols = [...new Set(symbols)];
+  const currentSet = new Set(uniqueSymbols);
+  // Remove indicators for symbols no longer in toplist so we don't use stale data
+  for (const key of manualListIndicators.keys()) {
+    if (!currentSet.has(key)) manualListIndicators.delete(key);
+  }
+
   // Initial broadcast with new rows (analyzing state)
   broadcastManualUpdate();
 
-  // Analyze symbols in batches
+  // Analyze symbols in batches; store indicators by normalized symbol so computeManualList finds them
   const BATCH_SIZE = 3;
-  for (let i = 0; i < symbols.length; i += BATCH_SIZE) {
-    const batch = symbols.slice(i, i + BATCH_SIZE);
-    await Promise.all(batch.map(async (sym) => {
+  for (let i = 0; i < uniqueSymbols.length; i += BATCH_SIZE) {
+    const batch = uniqueSymbols.slice(i, i + BATCH_SIZE);
+    await Promise.all(batch.map(async (normalizedSym) => {
       try {
-        const analysis = await analyzeSymbol(sym);
+        const analysis = await analyzeSymbol(normalizedSym);
         if (analysis && analysis.indicators) {
-          manualListIndicators.set(sym, analysis.indicators);
+          manualListIndicators.set(normalizedSym, analysis.indicators);
         }
       } catch (e) {
-        console.error(`Error analyzing manual symbol ${sym}:`, e.message);
+        console.error(`Error analyzing manual symbol ${normalizedSym}:`, e.message);
       }
     }));
     broadcastManualUpdate();
-    // Small delay to be nice to API/CPU
     await new Promise(r => setTimeout(r, 100));
   }
 }
