@@ -1040,13 +1040,13 @@ setInterval(async () => {
   }
 }, 120000); // Every 2 minutes
 
-// Proactive refresh: reconnect Positions WebSocket every 5 min to prevent stale/silent connections
-// Cloud platforms (Vercel, Railway) can drop WebSocket traffic silently; periodic refresh keeps data fresh
-const POSITIONS_WS_REFRESH_MS = 5 * 60 * 1000; // 5 minutes
+// Proactive refresh: reconnect Positions WebSocket every 2 min to prevent stale connections
+// Cloud platforms (Vercel, Railway) can drop WebSocket traffic silently; periodic reconnect keeps tracking alive
+const POSITIONS_WS_REFRESH_MS = 2 * 60 * 1000; // 2 minutes
 setInterval(() => {
   if (process.env.PNL_API_KEY && typeof connectPositionsWebSocket === 'function') {
     if (positionsWs && positionsWs.readyState === WebSocket.OPEN) {
-      console.log('🔄 [POSITIONS_WS] Periodic refresh: reconnecting to keep data fresh');
+      console.log('🔄 [POSITIONS_WS] Periodic refresh (every 2 min): reconnecting to keep tracking alive');
       connectPositionsWebSocket();
     }
   }
@@ -1056,7 +1056,7 @@ setInterval(() => {
 // Iterate over positionsCache (like batch handler) so we never miss symbols after long uptime / stale connections
 // CRITICAL: Run even if WebSocket is down - use cached positions to keep StopLimit Adjustment working
 // CRITICAL: Always continue running even if errors occur - wrap entire check in try-catch
-const STOPLIMIT_PNL_CHECK_MS = 5000; // 5 seconds
+const STOPLIMIT_PNL_CHECK_MS = 2500; // 2.5 seconds - real-time step updates (backend independent of client)
 let lastPeriodicCheckTime = Date.now();
 let lastPeriodicCheckLog = 0;
 let consecutiveErrors = 0;
@@ -1132,16 +1132,22 @@ setInterval(async () => {
       lastPeriodicCheckLog = now;
     }
     
-    // If WebSocket has been silent for 5+ minutes, refresh positions from DB every 30 seconds
-    if (wsSilent && cachePersistenceService && stopLimitOrderRepository.size > 0 && (now - lastPeriodicCheckTime) > 30000) {
-      console.warn(`⚠️ [STOPLIMIT_TRACKER] Positions WS silent for ${Math.round((now - lastPositionUpdateTime) / 1000)}s - refreshing positions from DB`);
-      try {
-        const loaded = await cachePersistenceService.loadFromDatabase();
-        if (loaded.positions > 0) {
-          console.log(`✅ [STOPLIMIT_TRACKER] Refreshed ${loaded.positions} positions from DB`);
+    // If WebSocket has been stale (no position updates for 5+ min), reconnect to restore live tracking
+    if (wsSilent && (now - lastPeriodicCheckTime) > 60000) {
+      const staleSec = lastPositionUpdateTime ? Math.round((now - lastPositionUpdateTime) / 1000) : 0;
+      console.warn(`⚠️ [STOPLIMIT_TRACKER] Positions WS stale (no updates for ${staleSec}s) - reconnecting to keep tracking alive`);
+      if (process.env.PNL_API_KEY && typeof connectPositionsWebSocket === 'function') {
+        connectPositionsWebSocket();
+      }
+      if (cachePersistenceService && stopLimitOrderRepository.size > 0) {
+        try {
+          const loaded = await cachePersistenceService.loadFromDatabase();
+          if (loaded.positions > 0) {
+            console.log(`✅ [STOPLIMIT_TRACKER] Refreshed ${loaded.positions} positions from DB (while WS reconnecting)`);
+          }
+        } catch (err) {
+          console.error(`❌ [STOPLIMIT_TRACKER] Error refreshing positions from DB:`, err.message);
         }
-      } catch (err) {
-        console.error(`❌ [STOPLIMIT_TRACKER] Error refreshing positions from DB:`, err.message);
       }
       lastPeriodicCheckTime = now;
     }
@@ -3584,7 +3590,7 @@ function connectPositionsWebSocket() {
       }
     });
     
-    positionsWs.on('message', (data) => {
+    positionsWs.on('message', async (data) => {
       try {
         const messageStr = Buffer.isBuffer(data) ? data.toString('utf8') : data.toString();
         const dataObj = JSON.parse(messageStr);
@@ -3629,13 +3635,15 @@ function connectPositionsWebSocket() {
             console.log(`📊 [BATCH] Position sold: ${cachedSymbol} - cleared cache and Stage & Progress`);
           }
           // Live-track P&L: check StopLimit tracker for each position in batch (P&L updates come through here)
-          // CRITICAL: Await each check to ensure real-time updates and error handling
+          // CRITICAL: Await each check so step updates complete before next message (backend real-time)
           for (const s of symbolsInBatch) {
             const pos = positionsCache.get(s);
             if (pos && stopLimitOrderRepository.has(s)) {
-              checkStopLimitTracker(s, pos).catch(err => {
+              try {
+                await checkStopLimitTracker(s, pos);
+              } catch (err) {
                 console.error(`❌ [STOPLIMIT_TRACKER] Error in batch check for ${s}:`, err.message);
-              });
+              }
             }
           }
           // Re-broadcast manual list so symbols with positions disappear from Manual section
@@ -5585,6 +5593,7 @@ async function updateStopLimitForAddToPosition(symbol, orderId, existingAvg, exi
 // CRITICAL: This function ONLY updates existing StopLimit orders, NEVER creates new ones
 // StopLimit orders are created by handleManualBuyFilled when buy orders fill
 async function checkStopLimitTracker(symbol, position) {
+  const TRACK_TAG = '[STOPLIMIT_TRACKER]';
   try {
     const normalizedSymbol = (symbol || '').toUpperCase();
     const avgPrice = parseFloat(position.AveragePrice || '0');
@@ -5593,14 +5602,21 @@ async function checkStopLimitTracker(symbol, position) {
     const totalPnl = parseFloat(position.UnrealizedProfitLoss || position.unrealizedProfitLoss || '0');
     const pnlPerShareRaw = position.UnrealizedProfitLossQty ?? position.unrealizedProfitLossQty;
     let pnlPerShare = parseFloat(pnlPerShareRaw || '');
-    if (isNaN(pnlPerShare) && avgPrice > 0) {
-      // Fallback: compute from Last or MarkToMarketPrice - AveragePrice (for long positions)
-      const lastPrice = parseFloat(position.Last || position.MarkToMarketPrice || position.last || position.markToMarketPrice || '0');
-      if (!isNaN(lastPrice) && lastPrice > 0) {
-        pnlPerShare = lastPrice - avgPrice;
+    let pnlSource = 'UnrealizedProfitLossQty';
+    const lastPrice = parseFloat(position.Last || position.MarkToMarketPrice || position.last || position.markToMarketPrice || '0');
+    // Fallback: when per-share P&L is missing, NaN, or zero but we have Last price, use Last - Avg (backend independence; feed often omits UnrealizedProfitLossQty)
+    if (avgPrice > 0 && !isNaN(lastPrice) && lastPrice > 0) {
+      const derivedPnl = lastPrice - avgPrice;
+      if (isNaN(pnlPerShare) || (pnlPerShare === 0 && (totalPnl !== 0 || Math.abs(derivedPnl) > 0.001))) {
+        pnlPerShare = derivedPnl;
+        pnlSource = 'Last-Avg';
       }
     }
-    const currentPnl = !isNaN(pnlPerShare) ? pnlPerShare : (qty > 0 ? totalPnl / qty : 0);
+    if (isNaN(pnlPerShare)) {
+      pnlPerShare = qty > 0 ? totalPnl / qty : 0;
+      pnlSource = 'totalPnl/qty';
+    }
+    const currentPnl = !isNaN(pnlPerShare) ? pnlPerShare : 0;
     
     if (avgPrice <= 0 || !normalizedSymbol) return;
     
@@ -5633,7 +5649,7 @@ async function checkStopLimitTracker(symbol, position) {
       if (existingStopLimit && !stopLimitTrackerProgress.has(normalizedSymbol)) {
         stopLimitTrackerProgress.set(normalizedSymbol, { groupId: null, currentStepIndex: -1, lastPnl: currentPnl, lastUpdate: Date.now() });
         if (cachePersistenceService) cachePersistenceService.scheduleProgressSave(normalizedSymbol);
-        console.log(`📊 [STOPLIMIT_TRACKER] ${normalizedSymbol}: No matching group (avg=$${avgPrice.toFixed(2)}), set progress to Initial for display`);
+        console.log(`${TRACK_TAG} ${normalizedSymbol}: no group (avg=$${avgPrice.toFixed(2)}) → Initial`);
       }
       return; // No matching group or no steps configured
     }
@@ -5655,6 +5671,12 @@ async function checkStopLimitTracker(symbol, position) {
         break;
       }
     }
+    
+    // Tracking log: one line per check (grep STOPLIMIT_TRACKER to debug step/IBRX issues)
+    const curStepLabel = currentStepIndex < 0 ? 'Initial' : `Step${currentStepIndex + 1}`;
+    const newStepLabel = newStepIndex < 0 ? 'Initial' : `Step${newStepIndex + 1}`;
+    const action = newStepIndex > currentStepIndex && newStepIndex >= 0 ? 'UPDATE' : '—';
+    console.log(`${TRACK_TAG} ${normalizedSymbol} avg=$${avgPrice.toFixed(2)} PnL=$${currentPnl.toFixed(2)} (${pnlSource}) group=${matchingGroupId} ${curStepLabel}→${newStepLabel} ${action}`);
     
     // If we've reached a new step, update the StopLimit order
     if (newStepIndex > currentStepIndex && newStepIndex >= 0) {
