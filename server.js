@@ -5549,8 +5549,8 @@ async function modifyStopLimitPrice(orderId, stopPrice, limitPrice) {
   return { success: true, data };
 }
 
-// When adding to existing position: update StopLimit prices to new blended avg, reset to Initial step
-// newAvgPrice: use positionsCache (already blended by addPositionFromFilledBuy) or compute from (existingAvg, existingQty, newPrice, newQty)
+// When adding to existing position: update StopLimit to new blended avg and correct step from current P&L (not Initial)
+// Rebuy must not reset to Initial; use step that matches current P&L so stage stays correct
 async function updateStopLimitForAddToPosition(symbol, orderId, existingAvg, existingQty, newPrice, newQty) {
   const normalized = (symbol || '').toUpperCase();
   const pos = positionsCache.get(normalized);
@@ -5577,14 +5577,45 @@ async function updateStopLimitForAddToPosition(symbol, orderId, existingAvg, exi
     console.log(`⚠️ [ADD_TO_POSITION] No matching tracker group for ${normalized} (newAvg=$${newAvg.toFixed(2)})`);
     return { success: false };
   }
-  const newStopPrice = Math.max(0, newAvg + parseFloat(matchingGroup.initialStopPrice || '0'));
-  const newLimitPrice = Math.round((newStopPrice / 1.002) * 100) / 100;
-  console.log(`📊 [ADD_TO_POSITION] ${normalized}: newAvg=$${newAvg.toFixed(2)}, stop=$${newStopPrice.toFixed(2)}, limit=$${newLimitPrice.toFixed(2)}, reset to Initial`);
+  const totalQty = parseFloat(pos?.Quantity || '0') || (parseFloat(existingQty || '0') + Math.floor(Number(newQty || 0)) || 0) || 1;
+  const totalPnl = parseFloat(pos?.UnrealizedProfitLoss || pos?.unrealizedProfitLoss || '0');
+  let pnlPerShare = parseFloat(pos?.UnrealizedProfitLossQty ?? pos?.unrealizedProfitLossQty ?? '');
+  const lastPrice = parseFloat(pos?.Last || pos?.MarkToMarketPrice || pos?.last || pos?.markToMarketPrice || '0');
+  if ((isNaN(pnlPerShare) || pnlPerShare === 0) && lastPrice > 0) pnlPerShare = lastPrice - newAvg;
+  if (isNaN(pnlPerShare)) pnlPerShare = totalQty > 0 ? totalPnl / totalQty : 0;
+  const currentPnl = pnlPerShare;
+
+  const PNL_EPSILON = 0.0001;
+  let stepIndex = -1;
+  const steps = matchingGroup.steps && matchingGroup.steps.length > 0 ? matchingGroup.steps : [];
+  for (let i = 0; i < steps.length; i++) {
+    const stepPnl = parseFloat(steps[i].pnl || '0');
+    if (currentPnl >= stepPnl - PNL_EPSILON) stepIndex = i;
+    else break;
+  }
+
+  let newStopPrice;
+  let newLimitPrice;
+  if (stepIndex >= 0) {
+    const step = steps[stepIndex];
+    const stopOffset = step.stopOffset !== undefined && step.stopOffset !== null ? parseFloat(step.stopOffset) : null;
+    const stopAbsolute = parseFloat(step.stop || '0');
+    newStopPrice = stopOffset !== null ? (newAvg + stopOffset) : (stopAbsolute > 0 ? stopAbsolute : 0);
+    if (newStopPrice <= 0 && matchingGroup.initialStopPrice != null) newStopPrice = newAvg + parseFloat(matchingGroup.initialStopPrice);
+    newStopPrice = Math.max(0, newStopPrice);
+    newLimitPrice = Math.round((newStopPrice / 1.002) * 100) / 100;
+    console.log(`📊 [ADD_TO_POSITION] ${normalized}: newAvg=$${newAvg.toFixed(2)} PnL=$${currentPnl.toFixed(2)} → Step ${stepIndex + 1}, stop=$${newStopPrice.toFixed(2)} limit=$${newLimitPrice.toFixed(2)}`);
+  } else {
+    newStopPrice = Math.max(0, newAvg + parseFloat(matchingGroup.initialStopPrice || '0'));
+    newLimitPrice = Math.round((newStopPrice / 1.002) * 100) / 100;
+    console.log(`📊 [ADD_TO_POSITION] ${normalized}: newAvg=$${newAvg.toFixed(2)} PnL=$${currentPnl.toFixed(2)} → Initial, stop=$${newStopPrice.toFixed(2)} limit=$${newLimitPrice.toFixed(2)}`);
+  }
+
   const result = await modifyStopLimitPrice(orderId, newStopPrice, newLimitPrice);
   if (result.success) {
-    stopLimitTrackerProgress.set(normalized, { groupId: matchingGroupId, currentStepIndex: -1, lastPnl: 0, lastUpdate: Date.now() });
+    stopLimitTrackerProgress.set(normalized, { groupId: matchingGroupId, currentStepIndex: stepIndex, lastPnl: currentPnl, lastUpdate: Date.now() });
     if (cachePersistenceService) cachePersistenceService.scheduleProgressSave(normalized);
-    console.log(`✅ [ADD_TO_POSITION] StopLimit ${orderId} updated to Initial step for ${normalized}`);
+    console.log(`✅ [ADD_TO_POSITION] StopLimit ${orderId} updated to ${stepIndex >= 0 ? `Step ${stepIndex + 1}` : 'Initial'} for ${normalized}`);
   }
   return result;
 }
@@ -9713,16 +9744,30 @@ function broadcastManualUpdate() {
 }
 
 async function updateManualList(rows) {
-  manualListRows = rows;
-  const symbols = rows.map((r) => getNormalizedSymbolFromRow(r)).filter(Boolean);
+  // Symbols the user currently holds — keep their rows in the pool so they reappear in MANUAL when sold
+  const positionSymbols = new Set();
+  for (const [sym, pos] of positionsCache) {
+    if (pos && parseFloat(pos.Quantity || '0') > 0) {
+      const n = String(sym).trim().toUpperCase();
+      if (n) positionSymbols.add(n);
+    }
+  }
+  const symbolsInNewRows = new Set(rows.map((r) => getNormalizedSymbolFromRow(r)).filter(Boolean));
+  const mergedRows = [...rows];
+  for (const sym of positionSymbols) {
+    if (symbolsInNewRows.has(sym)) continue;
+    const existingRow = manualListRows.find((r) => getNormalizedSymbolFromRow(r) === sym);
+    if (existingRow) mergedRows.push(existingRow);
+  }
+  manualListRows = mergedRows;
+
+  const symbols = mergedRows.map((r) => getNormalizedSymbolFromRow(r)).filter(Boolean);
   const uniqueSymbols = [...new Set(symbols)];
   const currentSet = new Set(uniqueSymbols);
-  // Remove indicators for symbols no longer in toplist so we don't use stale data
   for (const key of manualListIndicators.keys()) {
     if (!currentSet.has(key)) manualListIndicators.delete(key);
   }
 
-  // Initial broadcast with new rows (analyzing state)
   broadcastManualUpdate();
 
   // Analyze symbols in batches; store indicators by normalized symbol so computeManualList finds them
