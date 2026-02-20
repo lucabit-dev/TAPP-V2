@@ -164,7 +164,6 @@ function App() {
   const [alertsCollapsed, setAlertsCollapsed] = useState(true); // Start collapsed
   const [listsCollapsed, setListsCollapsed] = useState(false); // Start expanded by default for Lists
   const [manualCollapsed, setManualCollapsed] = useState(false); // Start expanded by default for Manual
-  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [manualSymbol, setManualSymbol] = useState('');
   const [manualAnalysis, setManualAnalysis] = useState<any>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -176,6 +175,7 @@ function App() {
   const [selectedStockInfo, setSelectedStockInfo] = useState<any>(null);
   const [showStopLimitTrackerModal, setShowStopLimitTrackerModal] = useState(false);
   const [showStopLimitAdjustmentModal, setShowStopLimitAdjustmentModal] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [additionalFilters, setAdditionalFilters] = useState({
     vwapAboveEma200: false,
     vwapAboveEma18: false
@@ -183,6 +183,21 @@ function App() {
   const alertsEndRef = useRef<HTMLDivElement>(null);
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+
+  // Lock body scroll when mobile nav is open
+  useEffect(() => {
+    if (mobileNavOpen) {
+      document.body.style.overflow = 'hidden';
+      document.body.style.touchAction = 'none';
+    } else {
+      document.body.style.overflow = '';
+      document.body.style.touchAction = '';
+    }
+    return () => {
+      document.body.style.overflow = '';
+      document.body.style.touchAction = '';
+    };
+  }, [mobileNavOpen]);
 
   // Listen for custom events to open StopLimit modals
   useEffect(() => {
@@ -623,51 +638,59 @@ function App() {
   }
 
   return (
-    <div className="h-screen bg-[#14130e] text-[#eae9e9] flex flex-col overflow-hidden">
-      {/* Clean Minimalist Header */}
+    <div className="min-h-screen h-screen bg-[#14130e] text-[#eae9e9] flex flex-col overflow-hidden">
+      {/* Clean Minimalist Header - Responsive */}
       {(!isHeaderHidden || isHeaderAnimating) && (
-        <header className={`relative bg-gradient-to-r from-[#14130e] to-[#0f0e0a] border-b border-[#2a2820]/50 backdrop-blur-sm ${isHidingHeader ? 'header-exit' : 'header-enter'}`}>
-          <div className="px-3 sm:px-4 md:px-6 py-3 sm:py-4">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center shrink-0">
-                <img src="/images/logo.png" alt="ASTOR" className="h-6 sm:h-7 md:h-8 w-auto" />
+        <header className={`bg-gradient-to-r from-[#14130e] to-[#0f0e0a] border-b border-[#2a2820]/50 backdrop-blur-sm ${isHidingHeader ? 'header-exit' : 'header-enter'}`}>
+          <div className="px-4 py-3 sm:px-5 sm:py-3.5 lg:px-6 lg:py-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center min-w-0 flex-shrink-0">
+                <img src="/images/logo.png" alt="ASTOR" className="h-6 sm:h-7 lg:h-8 w-auto" />
               </div>
-
-              {/* Mobile hamburger - visible md and down */}
-              <button
-                type="button"
-                onClick={() => setMobileNavOpen(!mobileNavOpen)}
-                className="md:hidden p-2 -mr-2 rounded-lg text-[#969696] hover:text-[#eae9e9] hover:bg-[#2a2820]/50 transition-colors"
-                aria-label={mobileNavOpen ? 'Close menu' : 'Open menu'}
-              >
-                {mobileNavOpen ? (
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                ) : (
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-                  </svg>
-                )}
-              </button>
-
-              {/* Navigation Sections - Right: hidden on mobile unless menu open */}
-              <div className={`items-center gap-3 md:gap-6 ${mobileNavOpen ? 'flex flex-col w-full md:flex-row md:w-auto absolute md:relative top-full left-0 right-0 mt-0 md:mt-0 py-4 md:py-0 px-3 md:px-0 bg-[#14130e]/98 md:bg-transparent border-b border-[#2a2820]/50 md:border-0 shadow-lg md:shadow-none max-h-[min(400px,calc(100vh-5rem))] md:max-h-none overflow-y-auto md:overflow-visible z-40' : 'hidden md:flex'}`}>
-                {/* Logout button - icon only on mobile */}
+              
+              {/* Mobile: Hamburger */}
+              <div className="flex md:hidden items-center gap-2">
                 <button
-                  onClick={() => {
-                    setMobileNavOpen(false);
-                    logout();
-                  }}
-                  className="flex items-center justify-center sm:justify-start space-x-2 p-2 sm:px-3 sm:py-1.5 text-xs font-medium text-[#969696] 
-                           hover:text-[#f87171] transition-colors duration-200 border border-[#2a2820] 
-                           rounded-lg hover:border-[#f87171]/30 hover:bg-[#f87171]/5 min-w-[44px] sm:min-w-0"
-                  title="Logout"
+                  onClick={() => setMobileNavOpen(!mobileNavOpen)}
+                  className="p-2.5 -mr-2 rounded-lg text-[#969696] hover:text-[#eae9e9] hover:bg-[#2a2820]/50 touch-manipulation"
+                  aria-label={mobileNavOpen ? 'Close menu' : 'Open menu'}
+                  aria-expanded={mobileNavOpen}
                 >
-                  <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  {mobileNavOpen ? (
+                    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  ) : (
+                    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                    </svg>
+                  )}
+                </button>
+                <button
+                  onClick={logout}
+                  className="p-2.5 rounded-lg text-[#969696] hover:text-[#f87171] border border-[#2a2820] hover:border-[#f87171]/30 touch-manipulation"
+                  title="Logout"
+                  aria-label="Logout"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
                   </svg>
-                  <span className="hidden sm:inline">Logout</span>
+                </button>
+              </div>
+              
+              {/* Desktop: Navigation */}
+              <div className="hidden md:flex items-center space-x-4 lg:space-x-6">
+                <button
+                  onClick={logout}
+                  className="flex items-center space-x-2 px-3 py-2 text-xs font-medium text-[#969696] 
+                           hover:text-[#f87171] transition-colors duration-200 border border-[#2a2820] 
+                           rounded-lg hover:border-[#f87171]/30 hover:bg-[#f87171]/5"
+                  title="Logout"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                  </svg>
+                  <span>Logout</span>
                 </button>
                 {/* Alerts group - Collapsible */}
                 {/* <div className="flex items-center space-x-1">
@@ -749,11 +772,11 @@ function App() {
                   ))}
                 </div> */}
 
-                {/* Manual group */}
-                <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-1 w-full md:w-auto">
+                {/* Manual group - Desktop */}
+                <div className="flex flex-wrap items-center gap-1">
                   <button
                     onClick={() => setManualCollapsed(!manualCollapsed)}
-                    className="flex items-center space-x-1 px-2 py-1.5 text-xs opacity-60 hover:opacity-100 transition-colors self-start"
+                    className="flex items-center space-x-1 px-2 py-2 text-xs opacity-60 hover:opacity-100 transition-colors rounded"
                     title={manualCollapsed ? 'Expand Manual' : 'Collapse Manual'}
                   >
                     <span>Manual</span>
@@ -766,41 +789,82 @@ function App() {
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                     </svg>
                   </button>
-                  {!manualCollapsed && (
-                    <div className="flex flex-wrap gap-1">
-                      {[ 
-                        { key: 'manual', label: 'MANUAL', count: 0 },
-                        { key: 'manual-non-qualified', label: 'NON-QUALIFIED', count: 0 },
-                        { key: 'positions', label: 'Positions', count: 0 },
-                        { key: 'orders', label: 'Orders', count: 0 },
-                        { key: 'l2', label: 'L2', count: 0 },
-                        { key: 'charts', label: 'Charts', count: 0 },
-                        { key: 'admin', label: 'Admin', count: 0 },
-                      ].map(tab => (
-                        <button
-                          key={tab.key}
-                          onClick={() => {
-                            selectTab(tab.key as TabKey);
-                            setMobileNavOpen(false);
-                          }}
-                          className={`relative px-3 py-1.5 sm:px-4 sm:py-2 text-xs sm:text-sm font-medium transition-all duration-200 rounded md:rounded-none ${
-                            selectedTab === tab.key
-                              ? 'text-[#eae9e9] bg-[#22c55e]/10 md:bg-transparent'
-                              : 'text-[#969696] hover:text-[#cccccc] hover:bg-[#2a2820]/30 md:hover:bg-transparent'
-                          }`}
-                        >
-                          {selectedTab === tab.key && (
-                            <span className="absolute inset-0 bg-gradient-to-r from-[#22c55e]/20 to-[#14b8a6]/20 border-b-2 border-[#22c55e] rounded md:rounded-none pointer-events-none"></span>
-                          )}
-                          <span className="relative z-10">{tab.label}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                  {!manualCollapsed && [ 
+                    { key: 'manual', label: 'MANUAL' },
+                    { key: 'manual-non-qualified', label: 'NON-QUALIFIED' },
+                    { key: 'positions', label: 'Positions' },
+                    { key: 'orders', label: 'Orders' },
+                    { key: 'l2', label: 'L2' },
+                    { key: 'charts', label: 'Charts' },
+                    { key: 'admin', label: 'Admin' },
+                  ].map(tab => (
+                    <button
+                      key={tab.key}
+                      onClick={() => selectTab(tab.key as TabKey)}
+                      className={`relative px-3 py-2 text-sm font-medium transition-all duration-200 rounded ${
+                        selectedTab === tab.key
+                          ? 'text-[#eae9e9] bg-[#2a2820]/50'
+                          : 'text-[#969696] hover:text-[#cccccc] hover:bg-[#2a2820]/30'
+                      }`}
+                    >
+                      <span className="relative z-10">{tab.label}</span>
+                    </button>
+                  ))}
                 </div>
               </div>
             </div>
           </div>
+
+          {/* Mobile Nav Drawer */}
+          {mobileNavOpen && (
+            <div 
+              className="md:hidden fixed inset-0 z-50 top-[52px] sm:top-[56px] bg-[#14130e]/98 backdrop-blur-md border-t border-[#2a2820] animate-fadeIn overflow-y-auto safe-area-pb"
+              role="dialog"
+              aria-label="Navigation menu"
+            >
+              <nav className="p-4 pb-8 space-y-1">
+                <p className="px-3 py-2 text-xs font-semibold text-[#808080] uppercase tracking-wider">Sections</p>
+                {[
+                  { key: 'manual' as TabKey, label: 'MANUAL' },
+                  { key: 'manual-non-qualified' as TabKey, label: 'NON-QUALIFIED' },
+                  { key: 'positions' as TabKey, label: 'Positions' },
+                  { key: 'orders' as TabKey, label: 'Orders' },
+                  { key: 'l2' as TabKey, label: 'L2' },
+                  { key: 'charts' as TabKey, label: 'Charts' },
+                  { key: 'admin' as TabKey, label: 'Admin' },
+                ].map(tab => (
+                  <button
+                    key={tab.key}
+                    onClick={() => {
+                      selectTab(tab.key);
+                      setMobileNavOpen(false);
+                    }}
+                    className={`w-full flex items-center px-4 py-3.5 text-base font-medium rounded-lg transition-colors touch-manipulation ${
+                      selectedTab === tab.key
+                        ? 'text-[#eae9e9] bg-[#2a2820] border-l-2 border-[#22c55e]'
+                        : 'text-[#969696] hover:text-[#eae9e9] hover:bg-[#2a2820]/50 active:bg-[#2a2820]'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+                <div className="pt-4 mt-4 border-t border-[#2a2820]">
+                  <button
+                    onClick={() => {
+                      setMobileNavOpen(false);
+                      logout();
+                    }}
+                    className="w-full flex items-center space-x-3 px-4 py-3.5 text-base font-medium text-[#f87171] rounded-lg hover:bg-[#f87171]/10 active:bg-[#f87171]/20 transition-colors touch-manipulation"
+                  >
+                    <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                    </svg>
+                    <span>Logout</span>
+                  </button>
+                </div>
+              </nav>
+            </div>
+          )}
         </header>
       )}
 
@@ -931,7 +995,7 @@ function App() {
 
       {/* Error Message */}
       {error && (
-        <div className="mx-6 mt-4 bg-[#5a1d1d] border border-[#f44747] rounded-lg p-3">
+        <div className="mx-3 sm:mx-4 md:mx-6 mt-3 sm:mt-4 bg-[#5a1d1d] border border-[#f44747] rounded-lg p-3">
           <div className="flex items-center space-x-2">
             <svg className="w-4 h-4 text-[#f44747]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -943,9 +1007,9 @@ function App() {
         </div>
       )}
 
-      {/* Clean Notification */}
+      {/* Clean Notification - responsive positioning */}
       {newValidAlertsCount > 0 && (
-        <div className="fixed top-4 right-4 z-50 bg-[#252526] border border-[#3e3e42] rounded-lg shadow-lg p-3">
+        <div className="fixed top-4 right-4 z-50 bg-[#252526] border border-[#3e3e42] rounded-lg shadow-lg p-3 mx-3 max-w-[calc(100vw-1.5rem)] sm:max-w-sm" style={{ top: 'max(1rem, env(safe-area-inset-top))' }}>
           <div className="flex items-center space-x-2">
             <div className="w-2 h-2 bg-[#4ec9b0] rounded-full animate-pulse"></div>
             <div>

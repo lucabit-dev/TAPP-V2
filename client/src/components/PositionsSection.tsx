@@ -767,52 +767,48 @@ const PositionsSection: React.FC = () => {
         />
       )}
       
-      {/* Header */}
-      <div className="p-5 border-b border-[#2a2820]/60 bg-gradient-to-r from-[#14130e] to-[#0f0e0a]">
-        <div className="flex justify-between items-center mb-3">
-          <div className="flex items-center space-x-4">
-            <div className="p-2 bg-[#2a2820]/40 rounded-lg border border-[#2a2820]">
-              <svg className="w-5 h-5 text-[#4ade80]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      {/* Header - Responsive */}
+      <div className="p-3 sm:p-4 lg:p-5 border-b border-[#2a2820]/60 bg-gradient-to-r from-[#14130e] to-[#0f0e0a]">
+        <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
+          <div className="flex items-center space-x-3 sm:space-x-4 min-w-0">
+            <div className="p-1.5 sm:p-2 bg-[#2a2820]/40 rounded-lg border border-[#2a2820] flex-shrink-0">
+              <svg className="w-4 h-4 sm:w-5 sm:h-5 text-[#4ade80]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
               </svg>
             </div>
-            <div>
+            <div className="min-w-0">
               <h2 className="text-sm font-bold text-[#eae9e9] tracking-wider uppercase">Positions</h2>
               <p className="text-xs text-[#808080] mt-0.5 font-light tracking-wide">Active Positions</p>
             </div>
           </div>
-          <div className="flex items-center space-x-3">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
             <button
-              onClick={() => {
-                window.dispatchEvent(new CustomEvent('openStopLimitTrackerModal'));
-              }}
-              className="px-3 py-1.5 bg-[#2a2820] hover:bg-[#3a3830] text-[#eae9e9] text-xs rounded border border-[#404040] transition-colors flex items-center space-x-2"
+              onClick={() => window.dispatchEvent(new CustomEvent('openStopLimitTrackerModal'))}
+              className="px-2 py-2 sm:px-3 sm:py-1.5 bg-[#2a2820] hover:bg-[#3a3830] text-[#eae9e9] text-xs rounded border border-[#404040] transition-colors flex items-center gap-1.5 touch-manipulation"
               title="Configure StopLimit Tracker"
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
               </svg>
-              <span>StopLimit Tracker</span>
+              <span className="hidden sm:inline">Tracker</span>
             </button>
             <button
-              onClick={() => {
-                window.dispatchEvent(new CustomEvent('openStopLimitAdjustmentModal'));
-              }}
-              className="px-3 py-1.5 bg-[#2a2820] hover:bg-[#3a3830] text-[#eae9e9] text-xs rounded border border-[#404040] transition-colors flex items-center space-x-2"
+              onClick={() => window.dispatchEvent(new CustomEvent('openStopLimitAdjustmentModal'))}
+              className="px-2 py-2 sm:px-3 sm:py-1.5 bg-[#2a2820] hover:bg-[#3a3830] text-[#eae9e9] text-xs rounded border border-[#404040] transition-colors flex items-center gap-1.5 touch-manipulation"
               title="Configure P&L-based stop limit adjustment steps"
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
               </svg>
-              <span>Stop Limit Adjustment</span>
+              <span className="hidden sm:inline">Adjustment</span>
             </button>
-            <div className="px-3 py-1 bg-[#1a1915] border border-[#2a2820] rounded-md flex items-center space-x-2">
-              <span className="text-[10px] text-[#808080] uppercase tracking-wider">Positions</span>
+            <div className="px-2 py-1.5 sm:px-3 sm:py-1 bg-[#1a1915] border border-[#2a2820] rounded-md flex items-center gap-2">
+              <span className="text-[10px] text-[#808080] uppercase tracking-wider hidden sm:inline">Positions</span>
               <span className="text-xs font-mono font-bold text-[#eae9e9]">{mergedPositions.length}</span>
             </div>
-            <div className="w-px h-6 bg-[#2a2820] mx-2"></div>
-            <div className="flex items-center space-x-2">
-              <div className={`w-2.5 h-2.5 rounded-full ${isConnected ? 'bg-[#22c55e] shadow-[0_0_6px_rgba(34,197,94,0.5)]' : 'bg-[#f87171] shadow-[0_0_6px_rgba(248,113,113,0.5)]'}`}></div>
+            <div className="hidden sm:block w-px h-6 bg-[#2a2820]"></div>
+            <div className="flex items-center gap-2">
+              <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${isConnected ? 'bg-[#22c55e] shadow-[0_0_6px_rgba(34,197,94,0.5)]' : 'bg-[#f87171] shadow-[0_0_6px_rgba(248,113,113,0.5)]'}`}></div>
               <span className="text-xs text-[#eae9e9]/80 font-medium">
                 {isConnected ? 'Connected' : 'Disconnected'}
               </span>
@@ -821,15 +817,15 @@ const PositionsSection: React.FC = () => {
               <button
                 onClick={handleSellAll}
                 disabled={sellingAll}
-                className={`ml-3 px-3 py-1.5 rounded-sm text-xs font-bold transition-all ${
+                className={`px-3 py-2 sm:py-1.5 rounded-sm text-xs font-bold transition-all touch-manipulation min-h-[44px] sm:min-h-0 ${
                   sellingAll
                     ? 'bg-[#2a2820] text-[#eae9e9] opacity-50 cursor-not-allowed'
                     : 'bg-[#f87171] hover:bg-[#ef4444] text-[#14130e] shadow-[0_0_8px_rgba(248,113,113,0.3)]'
                 }`}
               >
                 {sellingAll ? (
-                  <span className="flex items-center space-x-1">
-                    <svg className="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <span className="flex items-center gap-1">
+                    <svg className="animate-spin h-3 w-3 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
@@ -924,9 +920,12 @@ const PositionsSection: React.FC = () => {
             </div>
           </div>
         ) : (
-          <div className="h-full flex flex-col">
+          <div className="h-full flex flex-col min-w-0 overflow-hidden">
+            {/* Table - horizontally scrollable on mobile */}
+            <div className="flex-1 overflow-x-auto min-h-0 overscroll-x-contain">
+            <div className="min-w-[720px] h-full flex flex-col">
             {/* Table Header */}
-            <div className="bg-[#14130e] border-b border-[#2a2820] px-4 py-3 sticky top-0 z-10">
+            <div className="bg-[#14130e] border-b border-[#2a2820] px-3 sm:px-4 py-2 sm:py-3 sticky top-0 z-10">
               <div className="grid grid-cols-8 gap-2 text-xs font-medium opacity-60 uppercase tracking-wide items-center">
                 <div>Symbol</div>
                 <div className="text-right">Qty</div>
@@ -1053,6 +1052,8 @@ const PositionsSection: React.FC = () => {
                   );
                 }}
               />
+            </div>
+            </div>
             </div>
           </div>
         )}
