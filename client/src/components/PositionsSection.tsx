@@ -69,6 +69,7 @@ const PositionsSection: React.FC = () => {
     type?: 'danger' | 'warning' | 'info' | 'success';
   } | null>(null);
   const [stopLimitProgress, setStopLimitProgress] = useState<Map<string, { currentStepIndex: number; lastPnl?: number; groupId?: string }>>(new Map());
+  const [stopLimitData, setStopLimitData] = useState<Map<string, { limitPrice: number; stopPrice: number }>>(new Map());
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -312,8 +313,40 @@ const PositionsSection: React.FC = () => {
 
   // Clear Stage & Progress when no positions (all sold)
   useEffect(() => {
-    if (mergedPositions.length === 0) setStopLimitProgress(new Map());
+    if (mergedPositions.length === 0) {
+      setStopLimitProgress(new Map());
+      setStopLimitData(new Map());
+    }
   }, [mergedPositions.length]);
+
+  // Fetch stop limit order data (limit price, stop price) for Risk column
+  useEffect(() => {
+    if (!token || mergedPositions.length === 0) return;
+    const fetchStopLimit = async () => {
+      try {
+        const res = await fetchWithAuth(`${API_BASE_URL}/stoplimit/positions`);
+        const data = await res.json();
+        if (data.success && Array.isArray(data.data)) {
+          const map = new Map<string, { limitPrice: number; stopPrice: number }>();
+          data.data.forEach((p: { symbol: string; limitPrice?: number | null; stopPrice?: number | null }) => {
+            const sym = (p.symbol || '').toUpperCase();
+            if (sym && p.limitPrice != null && p.limitPrice > 0) {
+              map.set(sym, {
+                limitPrice: Number(p.limitPrice),
+                stopPrice: p.stopPrice != null ? Number(p.stopPrice) : Number(p.limitPrice)
+              });
+            }
+          });
+          setStopLimitData(map);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    fetchStopLimit();
+    const interval = setInterval(fetchStopLimit, 8000);
+    return () => clearInterval(interval);
+  }, [token, mergedPositions.length, fetchWithAuth]);
 
   // Fetch stop limit adjustment progress for Stage & Progress column (only for current positions)
   // Pass symbols to server so it runs checkStopLimitTracker before returning (fixes "—" after long uptime)
@@ -374,7 +407,7 @@ const PositionsSection: React.FC = () => {
   };
 
   const handleBuyClick = useCallback(
-    async (symbol: string, e?: React.MouseEvent) => {
+    async (symbol: string, quantity?: number, e?: React.MouseEvent) => {
       if (e) {
         e.preventDefault();
         e.stopPropagation();
@@ -386,13 +419,16 @@ const PositionsSection: React.FC = () => {
       setBuyStatuses((prev) => ({ ...prev, [cleanSymbol]: null }));
       await Promise.resolve();
 
+      const body: { symbol: string; source: string; quantity?: number } = { symbol: cleanSymbol, source: 'positions' };
+      if (typeof quantity === 'number' && quantity > 0) body.quantity = quantity;
+
       try {
         const resp = await fetchWithTimeout(
           `${API_BASE_URL}/buys/test`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ symbol: cleanSymbol, source: 'positions' }),
+            body: JSON.stringify(body),
           },
           30000
         );
@@ -891,16 +927,15 @@ const PositionsSection: React.FC = () => {
           <div className="h-full flex flex-col">
             {/* Table Header */}
             <div className="bg-[#14130e] border-b border-[#2a2820] px-4 py-3 sticky top-0 z-10">
-              <div className="grid grid-cols-9 gap-4 text-xs font-medium opacity-60 uppercase tracking-wide">
+              <div className="grid grid-cols-8 gap-2 text-xs font-medium opacity-60 uppercase tracking-wide items-center">
                 <div>Symbol</div>
                 <div className="text-right">Qty</div>
                 <div className="text-right">Avg Price</div>
                 <div className="text-right">Last</div>
-                <div className="text-right">P&L</div>
-                <div className="text-right">Unrealized P&L</div>
-                <div className="text-center">Action</div>
-                <div className="text-center">Stage & Progress</div>
-                <div className="text-right">Time</div>
+                <div className="text-right">P&L <span className="block text-[10px] normal-case opacity-80">Per Share / Total</span></div>
+                <div className="text-center">Actions <span className="block text-[10px] normal-case opacity-80">Buy +201 / +501 / +1001</span></div>
+                <div className="text-center">Risk <span className="block text-[10px] normal-case opacity-80">Limit / Share / Max P&L</span></div>
+                <div className="text-right">Sell</div>
               </div>
             </div>
 
@@ -913,89 +948,91 @@ const PositionsSection: React.FC = () => {
                 itemContent={(index, position) => {
                   const unrealizedPL = parseFloat(position.UnrealizedProfitLoss);
                   const unrealizedPLQty = parseFloat(position.UnrealizedProfitLossQty || '0');
-                  const todaysPL = parseFloat(position.TodaysProfitLoss);
-                  
+                  const avgPrice = parseFloat(position.AveragePrice || '0');
+                  const qty = parseFloat(position.Quantity || '0') || 1;
+                  const sym = (position.Symbol || '').toUpperCase();
+                  const slData = stopLimitData.get(sym);
+                  const prog = stopLimitProgress.get(sym);
+                  const stepLabel = prog ? (prog.currentStepIndex < 0 ? 'Initial' : `Step ${prog.currentStepIndex + 1}`) : null;
+                  const limitPrice = slData?.limitPrice ?? 0;
+                  const shareDiff = limitPrice > 0 ? limitPrice - avgPrice : null;
+                  const maxPnl = shareDiff != null ? shareDiff * qty : null;
+
+                  const isBuying = buyingSymbols.has(sym);
+                  const buyStatus = buyStatuses[sym];
+                  const isCooldown = buyCooldown > 0;
+                  const buyDisabled = isBuying || isCooldown;
+
+                  const buyBtnClass = (qtyNum: number) => {
+                    if (isBuying) return 'px-1.5 py-0.5 text-[10px] font-semibold rounded bg-[#2a2820] opacity-50 cursor-not-allowed pointer-events-none';
+                    if (isCooldown) return 'px-1.5 py-0.5 text-[10px] font-semibold rounded bg-[#2a2820] opacity-50 cursor-not-allowed pointer-events-none';
+                    return 'px-1.5 py-0.5 text-[10px] font-semibold rounded bg-[#4ade80] text-[#14130e] hover:bg-[#22c55e] active:scale-95';
+                  };
+
                   return (
                     <div
                       key={position.PositionID}
-                      className={`px-4 py-3 border-b border-[#2a2820] hover:bg-[#1e1d17] transition-colors ${
+                      className={`px-4 py-2.5 border-b border-[#2a2820] hover:bg-[#1e1d17] transition-colors ${
                         index % 2 === 0 ? 'bg-[#0f0e0a]' : 'bg-[#14130e]'
                       }`}
                     >
-                      <div className="grid grid-cols-9 gap-4 items-center text-sm">
+                      <div className="grid grid-cols-8 gap-2 items-center text-sm">
                         {/* Symbol */}
-                        <div>
-                          <div className="font-semibold text-[#eae9e9]">{position.Symbol}</div>
-                        </div>
+                        <div className="font-semibold text-[#eae9e9]">{position.Symbol}</div>
 
-                        {/* Quantity */}
-                        <div className="text-right">
-                          <div className="text-[#eae9e9] font-mono">{formatQuantity(position.Quantity)}</div>
-                        </div>
+                        {/* Qty */}
+                        <div className="text-right text-[#eae9e9] font-mono text-xs">{formatQuantity(position.Quantity)}</div>
 
-                        {/* Average Price */}
-                        <div className="text-right">
-                          <div className="text-[#eae9e9] font-mono text-xs">{formatPrice(position.AveragePrice)}</div>
-                        </div>
+                        {/* Avg Price */}
+                        <div className="text-right text-[#eae9e9] font-mono text-xs">{formatPrice(position.AveragePrice)}</div>
 
                         {/* Last */}
+                        <div className="text-right text-[#eae9e9] font-mono text-xs">{formatPrice(position.Last)}</div>
+
+                        {/* P&L: Per Share / Total */}
                         <div className="text-right">
-                          <div className="text-[#eae9e9] font-mono text-xs">{formatPrice(position.Last)}</div>
+                          <div className={`font-mono text-xs ${unrealizedPLQty >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>{formatPrice(position.UnrealizedProfitLossQty)}</div>
+                          <div className={`font-mono text-[10px] opacity-90 ${unrealizedPL >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>{formatPrice(position.UnrealizedProfitLoss)}</div>
                         </div>
 
-                        {/* P&L (per share) */}
-                        <div className="text-right">
-                          <div className={`font-semibold font-mono text-xs ${unrealizedPLQty >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
-                            {formatPrice(position.UnrealizedProfitLossQty)}
-                          </div>
+                        {/* Actions: Buy +201, +501, +1001 */}
+                        <div className="flex items-center justify-center gap-1 flex-wrap">
+                          {[201, 501, 1001].map((n) => (
+                            <button
+                              key={n}
+                              type="button"
+                              onClick={(e) => !buyDisabled && handleBuyClick(position.Symbol, n, e)}
+                              disabled={buyDisabled}
+                              className={buyBtnClass(n)}
+                              title={`Buy +${n} ${position.Symbol}`}
+                            >
+                              {isBuying ? '...' : isCooldown ? `${buyCooldown}s` : buyStatus === 'success' ? '✓' : buyStatus === 'error' ? '✗' : `+${n}`}
+                            </button>
+                          ))}
                         </div>
 
-                        {/* Unrealized P&L */}
-                        <div className="text-right">
-                          <div className={`font-semibold font-mono text-xs ${unrealizedPL >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
-                            {formatPrice(position.UnrealizedProfitLoss)}
-                          </div>
+                        {/* Risk: Limit / Share / Max P&L */}
+                        <div className="text-center text-xs">
+                          {slData ? (
+                            <div className="space-y-0.5">
+                              <div className="text-[#eae9e9] font-mono">{formatPrice(String(limitPrice))}</div>
+                              <div className="text-[#808080]">{shareDiff != null ? `${shareDiff >= 0 ? '+' : ''}${shareDiff.toFixed(2)}` : '—'}</div>
+                              <div className={maxPnl != null ? (maxPnl >= 0 ? 'text-[#4ade80]' : 'text-[#f87171]') : ''}>
+                                {maxPnl != null ? formatPrice(String(maxPnl)) : '—'}
+                              </div>
+                              {stepLabel && <div className="text-[10px] opacity-70">{stepLabel}</div>}
+                            </div>
+                          ) : (
+                            <span className="opacity-50">—</span>
+                          )}
                         </div>
 
-                        {/* Action: BUY + Sell */}
-                        <div className="text-center flex items-center justify-center gap-1">
-                          {(() => {
-                            const sym = (position.Symbol || '').toUpperCase();
-                            const isBuying = buyingSymbols.has(sym);
-                            const buyStatus = buyStatuses[sym];
-                            const isCooldown = buyCooldown > 0;
-                            const buyDisabled = isBuying || isCooldown;
-                            let buyLabel = 'BUY';
-                            let buyClass = 'px-2 py-0.5 text-[11px] font-semibold rounded transition-colors bg-[#4ade80] text-[#14130e] hover:bg-[#22c55e] active:scale-95';
-                            if (isBuying) {
-                              buyLabel = '...';
-                              buyClass = 'px-2 py-0.5 text-[11px] font-semibold rounded bg-[#2a2820] opacity-50 cursor-not-allowed pointer-events-none';
-                            } else if (isCooldown) {
-                              buyLabel = `${buyCooldown}s`;
-                              buyClass = 'px-2 py-0.5 text-[11px] font-semibold rounded bg-[#2a2820] opacity-50 cursor-not-allowed pointer-events-none';
-                            } else if (buyStatus === 'success') {
-                              buyLabel = '✓';
-                              buyClass = 'px-2 py-0.5 text-[11px] font-semibold rounded bg-[#4ade80] text-[#14130e]';
-                            } else if (buyStatus === 'error') {
-                              buyLabel = '✗';
-                              buyClass = 'px-2 py-0.5 text-[11px] font-semibold rounded bg-[#f87171] text-[#14130e]';
-                            }
-                            return (
-                              <button
-                                type="button"
-                                onClick={(e) => !buyDisabled && handleBuyClick(position.Symbol, e)}
-                                disabled={buyDisabled}
-                                className={buyClass}
-                                title={buyDisabled ? (isCooldown ? `Cooldown ${buyCooldown}s` : 'Sending...') : `Buy more ${position.Symbol}`}
-                              >
-                                {buyLabel}
-                              </button>
-                            );
-                          })()}
+                        {/* Sell */}
+                        <div className="text-right">
                           <button
                             onClick={(e) => handleSell(position, e)}
                             disabled={sellingPositions.has(position.PositionID)}
-                            className={`px-2 py-1 rounded text-xs font-medium transition-all duration-75 ${
+                            className={`px-2 py-1 rounded text-xs font-medium transition-all ${
                               sellingPositions.has(position.PositionID)
                                 ? 'bg-[#2a2820] text-[#eae9e9] opacity-50 cursor-not-allowed pointer-events-none'
                                 : 'bg-[#f87171] hover:bg-[#ef4444] active:scale-95 text-[#14130e]'
@@ -1010,23 +1047,6 @@ const PositionsSection: React.FC = () => {
                               'Sell'
                             )}
                           </button>
-                        </div>
-
-                        {/* Stage & Progress - Stop limit adjustment step */}
-                        <div className="text-center">
-                          {(() => {
-                            const sym = (position.Symbol || '').toUpperCase();
-                            const prog = stopLimitProgress.get(sym);
-                            if (!prog) return <span className="text-xs opacity-50">—</span>;
-                            const step = prog.currentStepIndex;
-                            if (step < 0) return <span className="text-xs text-[#808080]">Initial</span>;
-                            return <span className="text-xs text-[#4ade80] font-medium">Step {step + 1}</span>;
-                          })()}
-                        </div>
-
-                        {/* Time */}
-                        <div className="text-right">
-                          <div className="text-xs opacity-60 font-mono">{formatTimestamp(position.Timestamp)}</div>
                         </div>
                       </div>
                     </div>

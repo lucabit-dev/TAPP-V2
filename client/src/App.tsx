@@ -164,6 +164,7 @@ function App() {
   const [alertsCollapsed, setAlertsCollapsed] = useState(true); // Start collapsed
   const [listsCollapsed, setListsCollapsed] = useState(false); // Start expanded by default for Lists
   const [manualCollapsed, setManualCollapsed] = useState(false); // Start expanded by default for Manual
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [manualSymbol, setManualSymbol] = useState('');
   const [manualAnalysis, setManualAnalysis] = useState<any>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -625,27 +626,48 @@ function App() {
     <div className="h-screen bg-[#14130e] text-[#eae9e9] flex flex-col overflow-hidden">
       {/* Clean Minimalist Header */}
       {(!isHeaderHidden || isHeaderAnimating) && (
-        <header className={`bg-gradient-to-r from-[#14130e] to-[#0f0e0a] border-b border-[#2a2820]/50 backdrop-blur-sm ${isHidingHeader ? 'header-exit' : 'header-enter'}`}>
-          <div className="px-6 py-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-3">
-                <img src="/images/logo.png" alt="ASTOR" className="h-8 w-auto" />
+        <header className={`relative bg-gradient-to-r from-[#14130e] to-[#0f0e0a] border-b border-[#2a2820]/50 backdrop-blur-sm ${isHidingHeader ? 'header-exit' : 'header-enter'}`}>
+          <div className="px-3 sm:px-4 md:px-6 py-3 sm:py-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center shrink-0">
+                <img src="/images/logo.png" alt="ASTOR" className="h-6 sm:h-7 md:h-8 w-auto" />
               </div>
-              
-              {/* Navigation Sections - Right */}
-              <div className="flex items-center space-x-6">
-                {/* Logout button */}
+
+              {/* Mobile hamburger - visible md and down */}
+              <button
+                type="button"
+                onClick={() => setMobileNavOpen(!mobileNavOpen)}
+                className="md:hidden p-2 -mr-2 rounded-lg text-[#969696] hover:text-[#eae9e9] hover:bg-[#2a2820]/50 transition-colors"
+                aria-label={mobileNavOpen ? 'Close menu' : 'Open menu'}
+              >
+                {mobileNavOpen ? (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                ) : (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                  </svg>
+                )}
+              </button>
+
+              {/* Navigation Sections - Right: hidden on mobile unless menu open */}
+              <div className={`items-center gap-3 md:gap-6 ${mobileNavOpen ? 'flex flex-col w-full md:flex-row md:w-auto absolute md:relative top-full left-0 right-0 mt-0 md:mt-0 py-4 md:py-0 px-3 md:px-0 bg-[#14130e]/98 md:bg-transparent border-b border-[#2a2820]/50 md:border-0 shadow-lg md:shadow-none max-h-[min(400px,calc(100vh-5rem))] md:max-h-none overflow-y-auto md:overflow-visible z-40' : 'hidden md:flex'}`}>
+                {/* Logout button - icon only on mobile */}
                 <button
-                  onClick={logout}
-                  className="flex items-center space-x-2 px-3 py-1.5 text-xs font-medium text-[#969696] 
+                  onClick={() => {
+                    setMobileNavOpen(false);
+                    logout();
+                  }}
+                  className="flex items-center justify-center sm:justify-start space-x-2 p-2 sm:px-3 sm:py-1.5 text-xs font-medium text-[#969696] 
                            hover:text-[#f87171] transition-colors duration-200 border border-[#2a2820] 
-                           rounded-lg hover:border-[#f87171]/30 hover:bg-[#f87171]/5"
+                           rounded-lg hover:border-[#f87171]/30 hover:bg-[#f87171]/5 min-w-[44px] sm:min-w-0"
                   title="Logout"
                 >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
                   </svg>
-                  <span>Logout</span>
+                  <span className="hidden sm:inline">Logout</span>
                 </button>
                 {/* Alerts group - Collapsible */}
                 {/* <div className="flex items-center space-x-1">
@@ -728,10 +750,10 @@ function App() {
                 </div> */}
 
                 {/* Manual group */}
-                <div className="flex items-center space-x-1">
+                <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-1 w-full md:w-auto">
                   <button
                     onClick={() => setManualCollapsed(!manualCollapsed)}
-                    className="flex items-center space-x-1 px-2 py-1 text-xs opacity-60 hover:opacity-100 transition-colors"
+                    className="flex items-center space-x-1 px-2 py-1.5 text-xs opacity-60 hover:opacity-100 transition-colors self-start"
                     title={manualCollapsed ? 'Expand Manual' : 'Collapse Manual'}
                   >
                     <span>Manual</span>
@@ -744,30 +766,37 @@ function App() {
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                     </svg>
                   </button>
-                  {!manualCollapsed && [ 
-                    { key: 'manual', label: 'MANUAL', count: 0 },
-                    { key: 'manual-non-qualified', label: 'NON-QUALIFIED', count: 0 },
-                    { key: 'positions', label: 'Positions', count: 0 },
-                    { key: 'orders', label: 'Orders', count: 0 },
-                    { key: 'l2', label: 'L2', count: 0 },
-                    { key: 'charts', label: 'Charts', count: 0 },
-                    { key: 'admin', label: 'Admin', count: 0 },
-                  ].map(tab => (
-                    <button
-                      key={tab.key}
-                      onClick={() => selectTab(tab.key as TabKey)}
-                      className={`relative px-4 py-2 text-sm font-medium transition-all duration-200 ${
-                        selectedTab === tab.key
-                          ? 'text-[#eae9e9]'
-                          : 'text-[#969696] hover:text-[#cccccc]'
-                      }`}
-                    >
-                      {selectedTab === tab.key && (
-                        <span className="absolute inset-0 bg-gradient-to-r from-[#22c55e]/20 to-[#14b8a6]/20 border-b-2 border-[#22c55e]"></span>
-                      )}
-                      <span className="relative z-10">{tab.label}</span>
-                    </button>
-                  ))}
+                  {!manualCollapsed && (
+                    <div className="flex flex-wrap gap-1">
+                      {[ 
+                        { key: 'manual', label: 'MANUAL', count: 0 },
+                        { key: 'manual-non-qualified', label: 'NON-QUALIFIED', count: 0 },
+                        { key: 'positions', label: 'Positions', count: 0 },
+                        { key: 'orders', label: 'Orders', count: 0 },
+                        { key: 'l2', label: 'L2', count: 0 },
+                        { key: 'charts', label: 'Charts', count: 0 },
+                        { key: 'admin', label: 'Admin', count: 0 },
+                      ].map(tab => (
+                        <button
+                          key={tab.key}
+                          onClick={() => {
+                            selectTab(tab.key as TabKey);
+                            setMobileNavOpen(false);
+                          }}
+                          className={`relative px-3 py-1.5 sm:px-4 sm:py-2 text-xs sm:text-sm font-medium transition-all duration-200 rounded md:rounded-none ${
+                            selectedTab === tab.key
+                              ? 'text-[#eae9e9] bg-[#22c55e]/10 md:bg-transparent'
+                              : 'text-[#969696] hover:text-[#cccccc] hover:bg-[#2a2820]/30 md:hover:bg-transparent'
+                          }`}
+                        >
+                          {selectedTab === tab.key && (
+                            <span className="absolute inset-0 bg-gradient-to-r from-[#22c55e]/20 to-[#14b8a6]/20 border-b-2 border-[#22c55e] rounded md:rounded-none pointer-events-none"></span>
+                          )}
+                          <span className="relative z-10">{tab.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

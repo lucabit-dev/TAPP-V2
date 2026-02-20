@@ -4566,7 +4566,8 @@ app.post('/api/buys/test', async (req, res) => {
     }
     
     const buySource = (req.body?.source === 'positions' ? 'positions' : 'manual');
-    console.log(`🛒 Buy signal for ${symbol} (source: ${buySource})`);
+    const requestedQty = req.body?.quantity != null ? Math.floor(Number(req.body.quantity)) : null;
+    console.log(`🛒 Buy signal for ${symbol} (source: ${buySource}${requestedQty != null ? `, quantity: ${requestedQty}` : ''})`);
     
     // Buy price always from Polygon (ask-first for fast fill); single snapshot, no positionsCache
     const currentPrice = await getFastPriceForOrder(symbol, { forBuy: true });
@@ -4574,28 +4575,29 @@ app.post('/api/buys/test', async (req, res) => {
       return res.status(400).json({ success: false, error: `Could not get price for ${symbol} from Polygon. Please try again.` });
     }
     
-    // Calculate quantity based on price ranges (using configured buy quantities)
-    const priceGroup = getPriceGroup(currentPrice);
-    if (!priceGroup) {
-      // Price outside supported range - skip buy
-      return res.status(400).json({ 
-        success: false, 
-        error: `Price ${currentPrice} is outside supported range (0-30). Only prices between 0-30 are supported.` 
-      });
-    }
-    
-    // Get quantity from configured buy quantities, or use default
-    let quantity = MANUAL_BUY_QUANTITIES[priceGroup];
-    if (!quantity || quantity <= 0) {
-      // Fallback to defaults if not configured
-      const defaults = {
-        '0-5': 2002,
-        '5-10': 1001,
-        '10-12': 757,
-        '12-20': 500,
-        '20-30': 333
-      };
-      quantity = defaults[priceGroup] || 500;
+    let quantity;
+    if (requestedQty != null && requestedQty > 0) {
+      quantity = requestedQty;
+    } else {
+      // Calculate quantity based on price ranges (using configured buy quantities)
+      const priceGroup = getPriceGroup(currentPrice);
+      if (!priceGroup) {
+        return res.status(400).json({ 
+          success: false, 
+          error: `Price ${currentPrice} is outside supported range (0-30). Only prices between 0-30 are supported.` 
+        });
+      }
+      quantity = MANUAL_BUY_QUANTITIES[priceGroup];
+      if (!quantity || quantity <= 0) {
+        const defaults = {
+          '0-5': 2002,
+          '5-10': 1001,
+          '10-12': 757,
+          '12-20': 500,
+          '20-30': 333
+        };
+        quantity = defaults[priceGroup] || 500;
+      }
     }
     
     // Build order body according to Sections Bot API documentation
@@ -7209,7 +7211,11 @@ app.get('/api/stoplimit/positions', requireAuth, (req, res) => {
         const side = (leg.BuyOrSell || '').toUpperCase();
         if (legSymbol === normalizedSymbol && side === 'SELL') {
           const qty = parseInt(leg.QuantityRemaining || leg.QuantityOrdered || '0', 10) || 0;
-          stopLimit = { orderId: oid, quantity: qty, order: order };
+          const ord = order;
+          const leg0 = ord?.Legs?.[0];
+          const stopP = ord?.StopPrice ?? leg0?.StopPrice ?? null;
+          const limitP = ord?.LimitPrice ?? leg0?.LimitPrice ?? null;
+          stopLimit = { orderId: oid, quantity: qty, order: ord, stopPrice: stopP, limitPrice: limitP };
           break;
         }
       }
@@ -7225,8 +7231,8 @@ app.get('/api/stoplimit/positions', requireAuth, (req, res) => {
         stopLimitOrderId: stopLimit?.orderId || null,
         stopLimitQuantity: stopLimit?.quantity || 0,
         stopLimitStatus: stopLimit?.order?.Status || null,
-        stopPrice: stopLimit?.order?.StopPrice || null,
-        limitPrice: stopLimit?.order?.LimitPrice || null
+        stopPrice: stopLimit?.stopPrice ?? null,
+        limitPrice: stopLimit?.limitPrice ?? null
       });
     }
     
@@ -9752,9 +9758,15 @@ async function updateManualList(rows) {
       if (n) positionSymbols.add(n);
     }
   }
+  // Symbols recently sold — also preserve their rows so they reappear in the pool immediately (toplist may not include them yet)
+  const symbolsToPreserve = new Set(positionSymbols);
+  for (const sym of recentlySoldSymbols.keys()) {
+    const n = String(sym).trim().toUpperCase();
+    if (n) symbolsToPreserve.add(n);
+  }
   const symbolsInNewRows = new Set(rows.map((r) => getNormalizedSymbolFromRow(r)).filter(Boolean));
   const mergedRows = [...rows];
-  for (const sym of positionSymbols) {
+  for (const sym of symbolsToPreserve) {
     if (symbolsInNewRows.has(sym)) continue;
     const existingRow = manualListRows.find((r) => getNormalizedSymbolFromRow(r) === sym);
     if (existingRow) mergedRows.push(existingRow);
