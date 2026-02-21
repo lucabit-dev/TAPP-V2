@@ -88,6 +88,12 @@
     }
   }
 
+  /* Mobile header / drawer tap improvement */
+  button.touch-manipulation {
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+
   .header-enter {
     animation: slideDown 0.3s ease-out forwards;
   }

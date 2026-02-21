@@ -641,18 +641,18 @@ function App() {
     <div className="min-h-screen h-screen bg-[#14130e] text-[#eae9e9] flex flex-col overflow-hidden">
       {/* Clean Minimalist Header - Responsive */}
       {(!isHeaderHidden || isHeaderAnimating) && (
-        <header className={`bg-gradient-to-r from-[#14130e] to-[#0f0e0a] border-b border-[#2a2820]/50 backdrop-blur-sm ${isHidingHeader ? 'header-exit' : 'header-enter'}`}>
+        <header className={`sticky top-0 z-40 flex-shrink-0 bg-gradient-to-r from-[#14130e] to-[#0f0e0a] border-b border-[#2a2820]/50 backdrop-blur-sm ${isHidingHeader ? 'header-exit' : 'header-enter'}`} style={{ paddingTop: 'env(safe-area-inset-top)', paddingLeft: 'env(safe-area-inset-left)', paddingRight: 'env(safe-area-inset-right)' }}>
           <div className="px-4 py-3 sm:px-5 sm:py-3.5 lg:px-6 lg:py-4">
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center justify-between gap-2 min-h-[44px]">
               <div className="flex items-center min-w-0 flex-shrink-0">
                 <img src="/images/logo.png" alt="ASTOR" className="h-6 sm:h-7 lg:h-8 w-auto" />
               </div>
               
-              {/* Mobile: Hamburger */}
-              <div className="flex md:hidden items-center gap-2">
+              {/* Mobile: Hamburger + Logout */}
+              <div className="flex md:hidden items-center gap-1 flex-shrink-0">
                 <button
                   onClick={() => setMobileNavOpen(!mobileNavOpen)}
-                  className="p-2.5 -mr-2 rounded-lg text-[#969696] hover:text-[#eae9e9] hover:bg-[#2a2820]/50 touch-manipulation"
+                  className="p-3 -m-1 rounded-lg text-[#969696] hover:text-[#eae9e9] hover:bg-[#2a2820]/50 touch-manipulation min-w-[44px] min-h-[44px] flex items-center justify-center"
                   aria-label={mobileNavOpen ? 'Close menu' : 'Open menu'}
                   aria-expanded={mobileNavOpen}
                 >
@@ -668,7 +668,7 @@ function App() {
                 </button>
                 <button
                   onClick={logout}
-                  className="p-2.5 rounded-lg text-[#969696] hover:text-[#f87171] border border-[#2a2820] hover:border-[#f87171]/30 touch-manipulation"
+                  className="p-3 rounded-lg text-[#969696] hover:text-[#f87171] border border-[#2a2820] hover:border-[#f87171]/30 touch-manipulation min-w-[44px] min-h-[44px] flex items-center justify-center"
                   title="Logout"
                   aria-label="Logout"
                 >
@@ -814,58 +814,73 @@ function App() {
               </div>
             </div>
           </div>
-
-          {/* Mobile Nav Drawer */}
-          {mobileNavOpen && (
-            <div 
-              className="md:hidden fixed inset-0 z-50 top-[52px] sm:top-[56px] bg-[#14130e]/98 backdrop-blur-md border-t border-[#2a2820] animate-fadeIn overflow-y-auto safe-area-pb"
-              role="dialog"
-              aria-label="Navigation menu"
-            >
-              <nav className="p-4 pb-8 space-y-1">
-                <p className="px-3 py-2 text-xs font-semibold text-[#808080] uppercase tracking-wider">Sections</p>
-                {[
-                  { key: 'manual' as TabKey, label: 'MANUAL' },
-                  { key: 'manual-non-qualified' as TabKey, label: 'NON-QUALIFIED' },
-                  { key: 'positions' as TabKey, label: 'Positions' },
-                  { key: 'orders' as TabKey, label: 'Orders' },
-                  { key: 'l2' as TabKey, label: 'L2' },
-                  { key: 'charts' as TabKey, label: 'Charts' },
-                  { key: 'admin' as TabKey, label: 'Admin' },
-                ].map(tab => (
-                  <button
-                    key={tab.key}
-                    onClick={() => {
-                      selectTab(tab.key);
-                      setMobileNavOpen(false);
-                    }}
-                    className={`w-full flex items-center px-4 py-3.5 text-base font-medium rounded-lg transition-colors touch-manipulation ${
-                      selectedTab === tab.key
-                        ? 'text-[#eae9e9] bg-[#2a2820] border-l-2 border-[#22c55e]'
-                        : 'text-[#969696] hover:text-[#eae9e9] hover:bg-[#2a2820]/50 active:bg-[#2a2820]'
-                    }`}
-                  >
-                    {tab.label}
-                  </button>
-                ))}
-                <div className="pt-4 mt-4 border-t border-[#2a2820]">
-                  <button
-                    onClick={() => {
-                      setMobileNavOpen(false);
-                      logout();
-                    }}
-                    className="w-full flex items-center space-x-3 px-4 py-3.5 text-base font-medium text-[#f87171] rounded-lg hover:bg-[#f87171]/10 active:bg-[#f87171]/20 transition-colors touch-manipulation"
-                  >
-                    <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-                    </svg>
-                    <span>Logout</span>
-                  </button>
-                </div>
-              </nav>
-            </div>
-          )}
         </header>
+      )}
+
+      {/* Mobile Nav Drawer - full overlay, rendered outside header for correct stacking */}
+      {mobileNavOpen && (
+        <div 
+          className="md:hidden fixed inset-0 z-[100] bg-[#14130e] animate-fadeIn overflow-y-auto"
+          style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)', paddingLeft: 'env(safe-area-inset-left)', paddingRight: 'env(safe-area-inset-right)' }}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Navigation menu"
+        >
+          {/* Drawer header with close button */}
+          <div className="flex items-center justify-between px-4 py-3 border-b border-[#2a2820] min-h-[56px]">
+            <img src="/images/logo.png" alt="ASTOR" className="h-7 w-auto" />
+            <button
+              onClick={() => setMobileNavOpen(false)}
+              className="p-3 -mr-3 rounded-lg text-[#969696] hover:text-[#eae9e9] hover:bg-[#2a2820]/50 touch-manipulation min-w-[44px] min-h-[44px] flex items-center justify-center"
+              aria-label="Close menu"
+            >
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          <nav className="p-4 pb-8 space-y-1">
+            <p className="px-3 py-2 text-xs font-semibold text-[#808080] uppercase tracking-wider">Sections</p>
+            {[
+              { key: 'manual' as TabKey, label: 'MANUAL' },
+              { key: 'manual-non-qualified' as TabKey, label: 'NON-QUALIFIED' },
+              { key: 'positions' as TabKey, label: 'Positions' },
+              { key: 'orders' as TabKey, label: 'Orders' },
+              { key: 'l2' as TabKey, label: 'L2' },
+              { key: 'charts' as TabKey, label: 'Charts' },
+              { key: 'admin' as TabKey, label: 'Admin' },
+            ].map(tab => (
+              <button
+                key={tab.key}
+                onClick={() => {
+                  selectTab(tab.key);
+                  setMobileNavOpen(false);
+                }}
+                className={`w-full flex items-center px-4 py-3.5 text-base font-medium rounded-lg transition-colors touch-manipulation min-h-[48px] text-left ${
+                  selectedTab === tab.key
+                    ? 'text-[#eae9e9] bg-[#2a2820] border-l-2 border-[#22c55e]'
+                    : 'text-[#969696] hover:text-[#eae9e9] hover:bg-[#2a2820]/50 active:bg-[#2a2820]'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+            <div className="pt-4 mt-4 border-t border-[#2a2820]">
+              <button
+                onClick={() => {
+                  setMobileNavOpen(false);
+                  logout();
+                }}
+                className="w-full flex items-center space-x-3 px-4 py-3.5 text-base font-medium text-[#f87171] rounded-lg hover:bg-[#f87171]/10 active:bg-[#f87171]/20 transition-colors touch-manipulation min-h-[48px]"
+              >
+                <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                </svg>
+                <span>Logout</span>
+              </button>
+            </div>
+          </nav>
+        </div>
       )}
 
       {/* Analytics Modal */}
